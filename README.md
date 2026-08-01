@@ -16,6 +16,16 @@ The installed app creates `$PREFIX/bin/coomi` as a symlink to the executable in
 the APK native library directory. The Android UI and Termux CLI share
 `$HOME/.coomi/config/providers.json` and the same engine process.
 
+## Community
+
+Join the Coomi QQ group to discuss usage, development, and releases.
+
+<p align="center">
+  <img src="assets/coomi-qq-group.jpg" alt="Coomi QQ 交流群二维码" width="320">
+</p>
+
+<p align="center">使用 QQ 扫码加入 Coomi 交流群</p>
+
 ## Build
 
 Prerequisites: JDK 17, Android SDK/NDK, Rust, Node.js, and npm.
