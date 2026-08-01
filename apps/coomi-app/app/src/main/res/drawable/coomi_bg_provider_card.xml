@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_checked="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/coomi_blue_soft"/>
+            <corners android:radius="@dimen/coomi_radius_input"/>
+            <stroke android:width="@dimen/coomi_stroke_thick" android:color="@color/coomi_blue"/>
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@color/coomi_fill"/>
+            <corners android:radius="@dimen/coomi_radius_input"/>
+            <stroke android:width="@dimen/coomi_stroke_thick" android:color="@color/coomi_fill"/>
+        </shape>
+    </item>
+</selector>

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- API 27+ 才有浅色导航栏图标；低版本保持系统默认深色导航栏，避免白底白图标。 -->
+<resources>
+    <style name="Theme.Coomi" parent="Theme.AppCompat.Light.NoActionBar">
+        <item name="colorPrimary">@color/coomi_blue</item>
+        <item name="colorPrimaryDark">@color/coomi_blue_press</item>
+        <item name="colorAccent">@color/coomi_blue</item>
+        <item name="colorControlNormal">@color/coomi_text_3</item>
+        <item name="colorControlActivated">@color/coomi_blue</item>
+        <item name="colorControlHighlight">@color/coomi_ripple</item>
+
+        <item name="android:windowBackground">@color/coomi_white</item>
+        <item name="android:colorBackground">@color/coomi_white</item>
+        <item name="android:textColorPrimary">@color/coomi_text</item>
+        <item name="android:textColorSecondary">@color/coomi_text_2</item>
+        <item name="android:textColorHint">@color/coomi_text_3</item>
+        <item name="android:textColorLink">@color/coomi_blue</item>
+
+        <item name="android:statusBarColor">@color/coomi_white</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:navigationBarColor">@color/coomi_white</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:forceDarkAllowed">false</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+
+        <item name="android:editTextBackground">@drawable/coomi_bg_input</item>
+    </style>
+</resources>

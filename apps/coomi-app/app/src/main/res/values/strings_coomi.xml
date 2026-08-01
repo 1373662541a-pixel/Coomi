@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Coomi UI 文案（新版设计） -->
+<resources>
+
+    <!-- ===== 启动引导 ===== -->
+    <string name="coomi_brand">Coomi</string>
+    <string name="coomi_launcher_title">Coomi</string>
+    <string name="coomi_launcher_subtitle">手机上的自主编程 Agent</string>
+    <string name="coomi_launcher_section_permission">开始之前</string>
+    <string name="coomi_launcher_privacy">所有命令都在本机 Linux 环境内执行，权限仅用于保持引擎运行。</string>
+    <string name="coomi_launcher_permission_hint">两项权限都开启后即可继续</string>
+    <string name="coomi_dash_section_settings">设置</string>
+    <string name="coomi_dash_permission_settings">运行权限</string>
+    <string name="coomi_dash_permission_settings_desc">通知与电池优化授权</string>
+    <string name="coomi_dash_provider_settings">Provider 配置</string>
+    <string name="coomi_dash_provider_settings_desc">密钥、模型与服务地址</string>
+    <string name="coomi_dash_storage_settings">手机存储访问</string>
+    <string name="coomi_dash_storage_settings_desc">允许 Agent 读取真实手机目录</string>
+    <string name="coomi_auth_discover_models">检索可用模型</string>
+    <string name="coomi_auth_discovering">正在检索可用模型…</string>
+    <string name="coomi_auth_discovered">已更新可用模型</string>
+    <string name="coomi_auth_discover_failed">模型检索失败：%1$s</string>
+    <string name="coomi_auth_need_base_url">请先填写 Base URL</string>
+
+    <!-- ===== 安装向导（外壳） ===== -->
+    <string name="coomi_setup_cancel">取消</string>
+    <string name="coomi_setup_back">返回</string>
+    <string name="coomi_setup_next">下一步</string>
+    <string name="coomi_setup_finish">完成</string>
+    <string name="coomi_setup_step_label">第 %1$d / %2$d 步</string>
+
+    <!-- ===== 步骤一：部署运行时 ===== -->
+    <string name="coomi_install_title">部署运行环境</string>
+    <string name="coomi_install_subtitle">部署原生 ARM64 coomi-rs 引擎与前端。</string>
+    <string name="coomi_install_phase_base">基础环境</string>
+    <string name="coomi_install_phase_base_desc">解压 Termux bootstrap</string>
+    <string name="coomi_install_phase_runtime">Rust 运行时</string>
+    <string name="coomi_install_phase_runtime_desc">部署预编译 ARM64 原生二进制</string>
+    <string name="coomi_install_phase_engine">Coomi 引擎</string>
+    <string name="coomi_install_phase_engine_desc">校验 HTTP / WebSocket 引擎</string>
+    <string name="coomi_install_log_label">部署日志</string>
+    <string name="coomi_install_error_title">部署失败</string>
+    <string name="coomi_install_error_hint">多数失败是网络问题，切换网络后重试即可。</string>
+    <string name="coomi_install_retry">重新部署</string>
+    <string name="coomi_install_waiting">准备中…</string>
+    <string name="coomi_install_running">正在处理：%1$s</string>
+    <string name="coomi_install_unknown_error">未知错误</string>
+    <string name="coomi_install_done_title">部署完成</string>
+    <string name="coomi_install_done_desc">运行环境就绪</string>
+
+    <!-- ===== 步骤二：模型配置 ===== -->
+    <string name="coomi_auth_title">连接模型</string>
+    <string name="coomi_auth_subtitle">选择服务商并填入 API Key，Key 只保存在本机配置文件里。</string>
+    <string name="coomi_auth_section_provider">服务商</string>
+    <string name="coomi_auth_section_key">凭据</string>
+    <string name="coomi_auth_key_label">API Key</string>
+    <string name="coomi_auth_key_hint">粘贴你的 API Key</string>
+    <string name="coomi_auth_model_label">模型</string>
+    <string name="coomi_auth_model_hint">模型名称</string>
+    <string name="coomi_auth_context_window_label">上下文窗口</string>
+    <string-array name="coomi_context_window_options">
+        <item>128k</item>
+        <item>256k（默认）</item>
+        <item>512k</item>
+    </string-array>
+    <string name="coomi_auth_base_url_label">Base URL</string>
+    <string name="coomi_auth_base_url_hint">https://api.example.com/v1</string>
+    <string name="coomi_auth_verify">保存并验证</string>
+    <string name="coomi_auth_toggle_key">显示 / 隐藏 API Key</string>
+    <string name="coomi_auth_need_key">请先填写 API Key</string>
+    <string name="coomi_auth_saving">正在保存…</string>
+    <string name="coomi_auth_saved">已保存，点「完成」继续</string>
+    <string name="coomi_auth_save_failed">保存失败，请重试</string>
+    <string name="coomi_provider_anthropic">Anthropic</string>
+    <string name="coomi_provider_openai">OpenAI</string>
+    <string name="coomi_provider_gemini">Google Gemini</string>
+    <string name="coomi_provider_deepseek">DeepSeek</string>
+    <string name="coomi_provider_zhipu">智谱</string>
+    <string name="coomi_provider_minimax">Minimax</string>
+    <string name="coomi_provider_custom">自定义 / 兼容 OpenAI</string>
+
+    <!-- ===== 仪表盘 ===== -->
+    <string name="coomi_dash_title">Coomi 控制台</string>
+    <string name="coomi_dash_section_engine">引擎</string>
+    <string name="coomi_dash_section_runtime">运行时</string>
+    <string name="coomi_dash_section_tools">工具</string>
+    <string name="coomi_dash_open_chat">进入对话</string>
+    <string name="coomi_dash_open_chat_desc">Coomi 的主界面</string>
+    <string name="coomi_dash_restart">重启引擎</string>
+    <string name="coomi_dash_stop">停止引擎</string>
+    <string name="coomi_dash_runtime">运行时</string>
+    <string name="coomi_dash_terminal">终端</string>
+    <string name="coomi_dash_terminal_desc">打开 Termux shell</string>
+    <string name="coomi_dash_tui">终端版 Coomi</string>
+    <string name="coomi_dash_tui_desc">在终端里运行原生 coomi</string>
+    <string name="coomi_dash_browser">在浏览器打开</string>
+    <string name="coomi_dash_browser_desc">用系统浏览器访问本机引擎</string>
+    <string name="coomi_dash_engine_running">引擎运行中</string>
+    <string name="coomi_dash_engine_stopped">引擎未启动</string>
+    <string name="coomi_dash_engine_starting">正在启动…</string>
+    <string name="coomi_dash_toast_no_service">服务未连接</string>
+    <string name="coomi_dash_toast_started">引擎已启动</string>
+    <string name="coomi_dash_toast_start_failed">启动失败：%1$s</string>
+    <string name="coomi_dash_toast_stopped">引擎已停止</string>
+    <string name="coomi_dash_toast_tui_hint">在终端里执行：coomi</string>
+    <string name="coomi_dash_toast_no_browser">未找到可用的浏览器</string>
+
+    <!-- ===== WebView 闪屏 ===== -->
+    <string name="coomi_splash_hint">正在连接本机引擎…</string>
+    <string name="coomi_splash_retry">重试</string>
+
+    <!-- ===== 演示包（demo 构建类型专用） ===== -->
+    <string name="coomi_demo_routing">演示模式，跳过环境检查…</string>
+    <string name="coomi_demo_install_title">已跳过</string>
+    <string name="coomi_demo_install_desc">演示包不部署运行环境，直接点「下一步」</string>
+    <string name="coomi_demo_auth_hint">演示包无需 API Key</string>
+    <string name="coomi_demo_auth_button">演示模式</string>
+    <string name="coomi_demo_auth_status">演示包不连模型，直接点「完成」</string>
+    <string name="coomi_demo_dash_status">演示模式 · 引擎未启动</string>
+    <string name="coomi_demo_dash_runtime">演示包不含 Rust 引擎</string>
+    <string name="coomi_demo_dash_unavailable">演示包不含终端环境</string>
+    <string name="coomi_demo_loading">正在加载演示界面…</string>
+    <string name="coomi_demo_failed">演示资源缺失（web.zip）</string>
+
+</resources>
