@@ -307,8 +307,11 @@ public class CoomiDashboardActivity extends Activity {
     private void openWebUi() {
         if (!mBound || mCoomiService == null) return;
         int port = mCoomiService.getEnginePort();
+        // 与 WebView 一致：携带引擎令牌，浏览器打开后所有 API 才可用。
+        String token = mCoomiService.getEngineToken();
+        String url = "http://127.0.0.1:" + port + "/?token=" + token;
         Intent intent = new Intent(Intent.ACTION_VIEW);
-        intent.setData(android.net.Uri.parse("http://127.0.0.1:" + port + "/"));
+        intent.setData(android.net.Uri.parse(url));
         try {
             startActivity(intent);
         } catch (Exception e) {

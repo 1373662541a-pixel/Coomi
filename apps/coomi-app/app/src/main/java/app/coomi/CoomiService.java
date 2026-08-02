@@ -222,8 +222,14 @@ public class CoomiService extends Service {
 
     private CommandResult startEngineSync() {
         try {
-            if (mEngineProcess != null && mEngineProcess.isAlive() && checkHealth(mEnginePort)) {
-                return new CommandResult(true, "already running", "", 0);
+            if (mEngineProcess != null && mEngineProcess.isAlive()) {
+                if (checkHealth(mEnginePort)) {
+                    return new CommandResult(true, "already running", "", 0);
+                }
+                // 进程活着但健康检查失败（假死/端口错乱）：先清理旧进程再重启，
+                // 避免双引擎并发写同一会话目录。
+                Logger.logInfo(LOG_TAG, "Engine process alive but unhealthy, killing before restart");
+                stopEngineSync();
             }
             if (!isDeployComplete()) {
                 return new CommandResult(false, "", "coomi-rs is not deployed", -1);

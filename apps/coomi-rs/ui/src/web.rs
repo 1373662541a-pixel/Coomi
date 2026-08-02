@@ -270,7 +270,8 @@ async fn auth_layer(
     }
     // 运行时探活端点放行：Android 侧在引擎启动阶段无法携带令牌做健康检查，
     // 若此处拦截，引擎会被误判为「未启动」而陷入无限重启。
-    if path == "/api/runtime/health" || path == "/api/runtime/port" {
+    // （/api/runtime/port 仅前端带令牌调用，不放行。）
+    if path == "/api/runtime/health" {
         return next.run(request).await;
     }
     let header_token = request
