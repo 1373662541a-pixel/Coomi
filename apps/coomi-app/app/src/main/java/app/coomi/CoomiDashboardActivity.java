@@ -47,6 +47,8 @@ public class CoomiDashboardActivity extends Activity {
     private View mOpenTuiButton;
     private View mOpenWebUiButton;
     private View mWebUiButtonContainer;
+    private View mCatalogButton;
+    private View mCheckUpdateButton;
     private View mPermissionSettingsButton;
     private View mProviderSettingsButton;
     private View mStorageSettingsButton;
@@ -88,6 +90,8 @@ public class CoomiDashboardActivity extends Activity {
         mOpenTuiButton = findViewById(R.id.btn_open_tui);
         mOpenWebUiButton = findViewById(R.id.btn_open_webui);
         mWebUiButtonContainer = findViewById(R.id.webui_button_container);
+        mCatalogButton = findViewById(R.id.btn_open_catalog);
+        mCheckUpdateButton = findViewById(R.id.btn_check_update);
         mPermissionSettingsButton = findViewById(R.id.btn_permission_settings);
         mProviderSettingsButton = findViewById(R.id.btn_provider_settings);
         mStorageSettingsButton = findViewById(R.id.btn_storage_settings);
@@ -98,6 +102,8 @@ public class CoomiDashboardActivity extends Activity {
         mOpenTuiButton.setOnClickListener(v -> openTui());
         mOpenTerminalButton.setOnClickListener(v -> openTerminal());
         mOpenWebUiButton.setOnClickListener(v -> openWebUi());
+        mCatalogButton.setOnClickListener(v -> openCatalog());
+        mCheckUpdateButton.setOnClickListener(v -> checkUpdate());
         mPermissionSettingsButton.setOnClickListener(v -> openPermissionSettings());
         mProviderSettingsButton.setOnClickListener(v -> openProviderSettings());
         mStorageSettingsButton.setOnClickListener(v -> openStorageSettings());
@@ -219,6 +225,21 @@ public class CoomiDashboardActivity extends Activity {
 
     @Override
     public void onBackPressed() {
+        // 需求：控制台返回 = 退出 app，且退出后终止所有由 coomi 启动的进程。
+        // 先异步停引擎（Rust 侧收到终止信号会清理全部工具子进程），
+        // 再停前台保活服务与引擎宿主，最后退出。
+        if (mBound && mCoomiService != null) {
+            mCoomiService.stopEngine(result -> runOnUiThread(this::shutdownApp));
+        } else {
+            shutdownApp();
+        }
+    }
+
+    private void shutdownApp() {
+        try {
+            stopService(new Intent(this, CoomiEngineMonitor.class));
+            stopService(new Intent(this, CoomiService.class));
+        } catch (Exception ignored) { /* 服务可能未启动 */ }
         finishAffinity();
     }
 
@@ -290,5 +311,18 @@ public class CoomiDashboardActivity extends Activity {
         } catch (Exception e) {
             Toast.makeText(this, R.string.coomi_dash_toast_no_browser, Toast.LENGTH_SHORT).show();
         }
+    }
+
+    /** 打开应用内 SKILL / MCP 管理页（WebView 直达 #/catalog）。 */
+    private void openCatalog() {
+        Intent intent = new Intent(this, com.termux.app.CoomiActivity.class);
+        intent.putExtra(com.termux.app.CoomiActivity.EXTRA_ROUTE, "#/catalog");
+        startActivity(intent);
+    }
+
+    /** 软件内检查更新：读取更新源 latest.json，有新版本则下载并安装。 */
+    private void checkUpdate() {
+        Toast.makeText(this, R.string.coomi_dash_checking, Toast.LENGTH_SHORT).show();
+        UpdateChecker.checkAndPrompt(this, () -> refreshStatus());
     }
 }

@@ -69,6 +69,8 @@ onMounted(() => {
   void apiGet<{ cwd?: string }>('/api/runtime/health')
     .then(h => { if (h?.cwd) sessions.setCurrentCwd(h.cwd) })
     .catch(() => { /* 引擎未就绪时保持空 cwd，列表退化为全部显示 */ })
+  // 以引擎磁盘会话为权威源同步列表，修复“会话记录消失/串会话”。
+  void sessions.syncFromEngine()
   if (config.providers.length === 0) void config.fetchProviders()
   // 高度只要变就重新贴底（内部有 rAF 合并，不怕高频触发）
   if (typeof ResizeObserver !== 'undefined') {

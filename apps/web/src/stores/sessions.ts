@@ -247,8 +247,56 @@ export const useSessionsStore = defineStore('sessions', () => {
     persist()
   }
 
+  /**
+   * 从引擎磁盘拉取会话列表（权威源）并与本地元数据合并。
+   * 修复“会话记录消失”：引擎重启/回放后，会话以磁盘为准重新出现；
+   * 空会话（turns=0）也保留，不再被过滤。
+   */
+  async function syncFromEngine(): Promise<boolean> {
+    try {
+      const res = await fetch('/api/sessions')
+      if (!res.ok) return false
+      const data = await res.json()
+      const remote = (data.sessions ?? []) as Array<{
+        id: string
+        provider_id: string
+        model: string
+        cwd: string
+        updated_at: string
+        preview: string
+        created_at: string
+      }>
+      const localById = new Map(metas.value.map(m => [m.id, m]))
+      const merged: SessionMeta[] = remote.map(r => {
+        const local = localById.get(r.id)
+        const updatedAt = Date.parse(r.updated_at) || Date.now()
+        const createdAt = local?.createdAt ?? (Date.parse(r.created_at) || updatedAt)
+        return {
+          id: r.id,
+          title: local?.title ?? (r.preview ? deriveTitle(r.preview) : '新对话'),
+          createdAt,
+          updatedAt,
+          turns: local?.turns ?? 0,
+          pinned: local?.pinned ?? false,
+          cwd: r.cwd || local?.cwd,
+        }
+      })
+      // 本地有而引擎暂无的（旧迁移 ID 等）保留，避免吞掉用户数据
+      const remoteIds = new Set(merged.map(m => m.id))
+      for (const m of metas.value) {
+        if (!remoteIds.has(m.id)) merged.push(m)
+      }
+      metas.value = merged
+      persist()
+      return true
+    } catch {
+      return false
+    }
+  }
+
   return {
     metas, query, sorted, filtered, groups, currentCwd, setCurrentCwd,
+    syncFromEngine,
     ensure, touch, rename, togglePin, remove, find, deriveTitle,
     saveTranscript, loadTranscript, migrateId, clearAll,
   }

@@ -123,13 +123,12 @@
         <activity
             android:name=".app.CoomiActivity"
             android:exported="false"
-            android:configChanges="orientation|screenSize|smallestScreenSize|density|screenLayout|keyboard|keyboardHidden|navigation"
+            android:configChanges="orientation|screenSize|smallestScreenSize|density|screenLayout|keyboard|keyboardHidden|navigation|uiMode"
             android:label="@string/application_name"
             android:launchMode="singleTask"
             android:resizeableActivity="true"
             android:theme="@style/Theme.Coomi.Web"
             tools:targetApi="n" />
-
         <service
             android:name="app.coomi.CoomiService"
             android:exported="false" />
@@ -215,6 +214,16 @@
                 <data android:mimeType="video/*" />
             </intent-filter>
         </activity-alias>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${TERMUX_PACKAGE_NAME}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/coomi_file_paths" />
+        </provider>
 
         <provider
             android:name=".filepicker.TermuxDocumentsProvider"

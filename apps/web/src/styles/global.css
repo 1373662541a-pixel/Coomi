@@ -85,6 +85,50 @@
   color-scheme: light;
 }
 
+/* ── 暗色主题：跟随系统深色模式 ──
+   Android 侧（CoomiActivity）把系统深色状态经 JS 桥写入 <html data-theme="dark">；
+   桌面浏览器由前端 matchMedia 监听自动设置，两者等效。 */
+:root[data-theme='dark'] {
+    color-scheme: dark;
+    --bg: #131518;
+    --page: #0e1013;
+    --fill: #1a1d22;
+    --fill-strong: #22262d;
+    --fill-press: #2a2f38;
+    --border: #252a32;
+    --border-strong: #313844;
+    --text: #e7e9ee;
+    --text-2: #9aa2af;
+    --text-3: #68717f;
+    --blue: #5b8bf0;
+    --blue-press: #6f9bf3;
+    --blue-soft: #1c2c50;
+    --blue-soft-2: #23365f;
+    --blue-border: #3b5285;
+    --orange: #e08a6b;
+    --orange-soft: #3a2821;
+    --orange-border: #5e3b2e;
+    --ok: #38b98a;
+    --ok-soft: #1b362c;
+    --warn: #d3a44e;
+    --warn-soft: #3a3120;
+    --danger: #e86a58;
+    --danger-soft: #3d241f;
+    --danger-border: #613630;
+    --code-bg: #1a1d22;
+    --code-text: #cdd3de;
+    --code-bg-dark: #0d0f12;
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.35), 0 2px 8px rgba(0, 0, 0, 0.3);
+    --shadow-2: 0 6px 24px rgba(0, 0, 0, 0.45);
+    --shadow-sheet: 0 -10px 44px rgba(0, 0, 0, 0.55);
+    --shadow-drawer: 10px 0 44px rgba(0, 0, 0, 0.55);
+    --bg-card: #191c21;
+    --bg-input: #1c1f24;
+    --bg-elevated: #1f232a;
+    --user-bubble: var(--blue);
+    --user-text: #ffffff;
+  }
+}
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html, body, #app { height: 100%; margin: 0; }
 body {

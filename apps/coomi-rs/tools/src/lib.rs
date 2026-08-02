@@ -39,7 +39,7 @@ use tokio::process::Command;
 
 pub use crate::agents::AgentScheduler;
 use crate::agents::snapshots_json;
-pub use crate::processes::ProcessManager;
+pub use crate::processes::{ProcessManager, terminate_all_managed};
 
 const DEFAULT_MAX_OUTPUT: usize = 48_000;
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;

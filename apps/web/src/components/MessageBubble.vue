@@ -11,6 +11,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import type { AssistantMessage, UserMessage } from '@/stores/viewModel'
 import { renderMarkdown } from '@/utils/markdown'
 import CoomiIcon from './CoomiIcon.vue'
+import FileInline from './FileInline.vue'
 
 const props = defineProps<{ msg: AssistantMessage | UserMessage }>()
 
@@ -23,6 +24,24 @@ let last = 0
 const isUser = computed(() => props.msg.kind === 'user')
 const streaming = computed(() => props.msg.kind === 'assistant' && props.msg.streaming)
 const src = computed(() => (props.msg.kind === 'assistant' ? props.msg.content : ''))
+
+/** 从助手文本中识别本地文件路径（供 FileInline 渲染为可点击文件卡片）。 */
+const filePaths = computed(() => {
+  if (props.msg.kind !== 'assistant' || props.msg.streaming) return []
+  const seen = new Set<string>()
+  const out: string[] = []
+  const re = /\/[\w.+\-]+(?:\/[\w.+\-]+)+\.[A-Za-z0-9]{1,8}(?=\s|$|[,，。;；)】」])/g
+  for (const m of src.value.matchAll(re)) {
+    const p = m[0].trim()
+    if (p.length < 8) continue
+    if (p.includes('://')) continue
+    if (seen.has(p)) continue
+    seen.add(p)
+    out.push(p)
+    if (out.length >= 8) break
+  }
+  return out
+})
 
 /** 按空行切块，但围栏代码块整体保留。 */
 function splitBlocks(text: string): string[] {
@@ -84,6 +103,7 @@ async function copyAll() {
 
   <div v-else class="assistant">
     <div v-for="(h, i) in blocks" :key="i" class="md blk cascade" v-html="h" />
+    <FileInline v-if="filePaths.length" :paths="filePaths" />
     <span v-if="streaming" class="stream-caret" />
     <div v-if="!streaming && blocks.length" class="acts">
       <button class="act" @click="copyAll">

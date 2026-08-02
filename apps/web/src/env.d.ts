@@ -8,6 +8,7 @@ interface Window {
     authorizeFolder?(): void
     exportFile?(path: string, suggestedName: string): void
     exportFileForRequest?(requestId: string, path: string, suggestedName: string): void
+    openFile?(path: string): void
   }
 }
 

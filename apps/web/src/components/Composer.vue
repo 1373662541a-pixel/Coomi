@@ -58,7 +58,8 @@ function tapPrimary() {
 }
 
 function onKeydown(e: KeyboardEvent) {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit() }
+  // Enter 默认换行（需求：换行键就换行）；Ctrl/Cmd+Enter 仍可快捷发送。
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submit() }
 }
 
 function cycleMode() { session.setPermissionMode(config.cyclePermissionMode()) }

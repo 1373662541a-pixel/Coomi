@@ -186,10 +186,24 @@ async function copy(text: string) {
 .tile.wait { background: var(--bg); color: var(--orange); }
 .tile.cancelled { background: var(--fill-strong); color: var(--text-3); }
 .ring {
-  position: absolute; inset: -3px;
-  border: 1.6px solid var(--blue-border); border-top-color: var(--blue);
+  position: absolute; inset: 0;
   border-radius: 12px;
-  animation: coomi-spin .8s linear infinite;
+  pointer-events: none;
+}
+.ring::before {
+  content: '';
+  position: absolute; left: 8px; top: 50%;
+  width: 6px; height: 6px; margin-top: -3px;
+  border-radius: 50%;
+  background: var(--blue);
+  animation: coomi-dot-travel 1.15s ease-in-out infinite;
+}
+@keyframes coomi-dot-travel {
+  0% { left: 8px; opacity: .25; }
+  20% { opacity: 1; }
+  50% { left: calc(100% - 16px); opacity: 1; }
+  75% { opacity: .6; }
+  100% { left: 8px; opacity: .25; }
 }
 
 .txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }

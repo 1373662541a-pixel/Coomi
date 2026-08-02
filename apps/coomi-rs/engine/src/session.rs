@@ -95,8 +95,19 @@ impl SessionStore {
         })?;
         let path = self.path(session.id);
         let bytes = serde_json::to_vec_pretty(session)?;
-        fs::write(&path, bytes)
-            .with_context(|| format!("failed to save session {}", path.display()))
+        // 原子写：先写临时文件再 rename，避免崩溃/断电留下截断的 JSON，
+        // 防止会话记录“莫名消失”（损坏文件此前会被 load 失败后静默丢弃）。
+        let tmp = self.directory.join(format!("{}.json.tmp", session.id));
+        fs::write(&tmp, &bytes)
+            .with_context(|| format!("failed to write session {}", tmp.display()))?;
+        fs::rename(&tmp, &path).with_context(|| {
+            format!(
+                "failed to commit session {} ({} -> {})",
+                session.id,
+                tmp.display(),
+                path.display()
+            )
+        })
     }
 
     pub fn load(&self, id: Uuid) -> Result<Session> {
@@ -115,6 +126,11 @@ impl SessionStore {
         fs::remove_file(&path)
             .with_context(|| format!("failed to delete session {}", path.display()))?;
         Ok(true)
+    }
+
+    /// Whether a session file exists on disk for this id.
+    pub fn contains(&self, id: Uuid) -> bool {
+        self.path(id).exists()
     }
 
     pub fn latest(&self, cwd: Option<&Path>) -> Result<Option<Session>> {

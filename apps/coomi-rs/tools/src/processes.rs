@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -13,10 +14,31 @@ use tokio::process::Command;
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
-#[derive(Default)]
-pub struct ProcessManager {
-    processes: Mutex<HashMap<String, Arc<AsyncMutex<ManagedProcess>>>>,
+/// 全局进程注册表：所有 ConnectionContext 共享同一张表，引擎收到终止信号时
+/// 能一次性清理所有由它启动的工具进程（“关闭 app 后全部终止”）。
+static PROCESS_REGISTRY: OnceLock<
+    Mutex<HashMap<String, Arc<AsyncMutex<ManagedProcess>>>>,
+> = OnceLock::new();
+
+fn registry() -> &'static Mutex<HashMap<String, Arc<AsyncMutex<ManagedProcess>>>> {
+    PROCESS_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
+
+/// 全局终止所有受管工具进程（引擎退出前调用）。
+pub async fn terminate_all_managed() {
+    let processes: Vec<Arc<AsyncMutex<ManagedProcess>>> = registry()
+        .lock()
+        .expect("process registry lock")
+        .drain()
+        .map(|(_, process)| process)
+        .collect();
+    for process in processes {
+        kill_managed(&process).await;
+    }
+}
+
+#[derive(Default)]
+pub struct ProcessManager;
 
 struct ManagedProcess {
     child: Child,
@@ -155,7 +177,7 @@ impl ProcessManager {
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
         }
-        self.processes
+        registry()
             .lock()
             .expect("process registry lock")
             .insert(session_id.clone(), managed);
@@ -212,7 +234,7 @@ impl ProcessManager {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                     let output = read_delta(&mut process).await;
                     drop(process);
-                    self.processes
+                    registry()
                         .lock()
                         .expect("process registry lock")
                         .remove(id);
@@ -241,8 +263,7 @@ impl ProcessManager {
         let Some(id) = arguments.get("session_id").and_then(Value::as_str) else {
             return ToolResult::error("missing string argument: session_id");
         };
-        let process = self
-            .processes
+        let process = registry()
             .lock()
             .expect("process registry lock")
             .remove(id);
@@ -256,20 +277,11 @@ impl ProcessManager {
     /// Kill every managed process. Used when a turn is cancelled so no orphaned
     /// shell keeps running after the agent stopped.
     pub async fn terminate_all(&self) {
-        let processes: Vec<Arc<AsyncMutex<ManagedProcess>>> = self
-            .processes
-            .lock()
-            .expect("process registry lock")
-            .drain()
-            .map(|(_, process)| process)
-            .collect();
-        for process in processes {
-            kill_managed(&process).await;
-        }
+        terminate_all_managed().await;
     }
 
     fn lookup(&self, id: &str) -> Option<Arc<AsyncMutex<ManagedProcess>>> {
-        self.processes
+        registry()
             .lock()
             .expect("process registry lock")
             .get(id)

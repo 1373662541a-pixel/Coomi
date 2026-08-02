@@ -28,6 +28,12 @@ export interface ToolApprovalRequestEvent { event_type: 'tool_approval_request';
 export interface UserQuestionRequestEvent { event_type: 'user_question_request'; call_id: string; question: string; options?: string[]; allow_free_text?: boolean }
 export interface FileTransferRequestEvent { event_type: 'file_transfer_request'; request_id: string; operation: 'import' | 'export'; path?: string; suggested_name?: string; multiple: boolean }
 export interface TurnEndEvent { event_type: 'turn_end' }
+export interface SessionLoadedEvent {
+  event_type: 'session_loaded'
+  session_id: string
+  cwd: string
+  usage: { input_tokens: number; output_tokens: number; total_tokens: number }
+}
 
 export type AgentEvent =
   | TextChunkEvent | ReasoningChunkEvent | ToolStartEvent | ToolRunningEvent
@@ -37,5 +43,6 @@ export type AgentEvent =
   | LoopIssueCreatedEvent | ToolApprovalRequestEvent | UserQuestionRequestEvent
   | FileTransferRequestEvent
   | TurnEndEvent
+  | SessionLoadedEvent
 
 export type AgentEventType = AgentEvent['event_type']

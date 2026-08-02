@@ -125,6 +125,21 @@ public class CoomiEngineMonitor extends Service {
         if (mWakeLock != null && mWakeLock.isHeld()) mWakeLock.release();
     }
 
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        // 用户从最近任务划掉 app：终止引擎及其全部子进程，并停止保活服务。
+        // （Rust 引擎收到 SIGTERM 后会先清理所有由它启动的工具进程。）
+        Logger.logInfo(LOG_TAG, "Task removed; shutting down engine and monitor");
+        if (mBound && mCoomiService != null) {
+            mCoomiService.stopEngine(null);
+        }
+        try {
+            stopService(new Intent(this, CoomiService.class));
+        } catch (Exception ignored) { /* service may be gone */ }
+        stopSelf();
+        super.onTaskRemoved(rootIntent);
+    }
+
     @Nullable
     @Override
     public IBinder onBind(Intent intent) {

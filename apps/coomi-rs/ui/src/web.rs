@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use axum::Json;
 use axum::Router;
 use axum::extract::Path as AxumPath;
+use axum::extract::Query;
 use axum::extract::State;
 use axum::extract::ws::Message;
 use axum::extract::ws::WebSocket;
@@ -177,6 +178,19 @@ pub async fn serve(home: PathBuf, cwd: PathBuf, port: u16, static_dir: PathBuf) 
             "/api/providers/{id}/discover-models",
             post(discover_provider_models),
         )
+        .route("/api/sessions", get(list_sessions))
+        .route("/api/sessions/{id}", get(get_session))
+        .route("/api/sessions/{id}/cwd", post(set_session_cwd))
+        .route("/api/fs/list", get(fs_list))
+        .route("/api/fs/raw", get(fs_raw))
+        .route("/api/fs/mkdir", post(fs_mkdir))
+        .route("/api/fs/delete", post(fs_delete))
+        .route("/api/fs/rename", post(fs_rename))
+        .route("/api/fs/copy", post(fs_copy))
+        .route("/api/fs/write", post(fs_write))
+        .route("/api/catalog", get(catalog_index))
+        .route("/api/catalog/mcp/install", post(install_mcp_catalog))
+        .route("/api/catalog/skills/install", post(install_skill_catalog))
         .route("/ws/session/{session_id}", get(websocket_route))
         .fallback_service(files)
         // Local bridge: only allow same-origin browser access (the Android WebView and
@@ -199,7 +213,36 @@ pub async fn serve(home: PathBuf, cwd: PathBuf, port: u16, static_dir: PathBuf) 
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     println!("Coomi Rust bridge {BRIDGE_VERSION} listening on http://127.0.0.1:{port}");
-    axum::serve(listener, app).await?;
+
+    // 引擎被终止（SIGTERM/SIGINT，如 app 退出时 Android 侧 destroy）时，
+    // 先清理所有由引擎启动的工具进程，再退出 —— 满足“关闭 app 后全部终止”。
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
+    #[cfg(unix)]
+    {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let mut int = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = term.recv() => { let _ = shutdown_tx.send(()).await; }
+                _ = int.recv() => { let _ = shutdown_tx.send(()).await; }
+            }
+        });
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            let _ = shutdown_tx.send(()).await;
+        });
+    }
+
+    tokio::select! {
+        result = axum::serve(listener, app) => { result?; }
+        _ = shutdown_rx.recv() => {
+            coomi_tools::terminate_all_managed().await;
+            println!("Coomi Rust bridge shutting down; all child processes terminated");
+        }
+    }
     Ok(())
 }
 
@@ -226,6 +269,366 @@ async fn runtime_health(State(state): State<AppState>) -> Json<Value> {
 
 async fn runtime_port(State(state): State<AppState>) -> Json<Value> {
     Json(json!({"port": state.port}))
+}
+
+/// 引擎磁盘上的会话列表（权威源）。前端以此为唯一事实，localStorage 仅作缓存，
+/// 修复“会话记录消失/串会话”问题。
+async fn list_sessions(State(state): State<AppState>) -> Json<Value> {    let store = SessionStore::new(&state.home);
+    let summaries = store.list(None).unwrap_or_default();
+    let mut sessions = Vec::with_capacity(summaries.len());
+    for summary in summaries {
+        let full = store.load(summary.id).ok();
+        sessions.push(json!({
+            "id": summary.id,
+            "provider_id": summary.provider_id,
+            "model": summary.model,
+            "cwd": summary.cwd.display().to_string(),
+            "updated_at": summary.updated_at,
+            "preview": summary.preview,
+            "created_at": full.as_ref().map(|s| s.created_at).unwrap_or(summary.updated_at),
+            "usage": full.as_ref().map(|s| json!({
+                "input_tokens": s.usage.input_tokens,
+                "output_tokens": s.usage.output_tokens,
+                "total_tokens": s.usage.total_tokens(),
+            })).unwrap_or_else(|| json!({"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})),
+        }));
+    }
+    Json(json!({ "sessions": sessions }))
+}
+
+/// 完整会话内容（含消息历史与 usage），供前端恢复历史会话渲染。
+async fn get_session(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let store = SessionStore::new(&state.home);
+    let session_id =
+        Uuid::parse_str(&id).map_err(|_| ApiError::bad_request("invalid session id"))?;
+    let session = store.load(session_id).map_err(|error| {
+        ApiError::internal(format!("failed to load session {id}: {error:#}"))
+    })?;
+    Ok(Json(json!(session)))
+}
+
+/// 已安装 MCP server 名 -> 是否启用（mcp_servers.json）。
+fn installed_mcp_enabled(home: &std::path::Path) -> BTreeMap<String, bool> {
+    let Ok(bytes) = std::fs::read(home.join("config").join("mcp_servers.json")) else {
+        return BTreeMap::new();
+    };
+    let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+        return BTreeMap::new();
+    };
+    value
+        .get("servers")
+        .and_then(Value::as_object)
+        .map(|servers| {
+            servers
+                .iter()
+                .map(|(name, server)| {
+                    (
+                        name.clone(),
+                        server.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 已安装 skill 目录名（home/skills 下的一级子目录）。
+fn installed_skill_ids(home: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(home.join("skills")) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+/// 内置 MCP / Skill 目录 + 安装状态（SKILL/MCP 管理界面数据源）。
+async fn catalog_index(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let mcp_catalog = coomi_catalogs::builtin_mcp().map_err(|e| ApiError::internal(e.to_string()))?;
+    let skill_catalog =
+        coomi_catalogs::builtin_skills().map_err(|e| ApiError::internal(e.to_string()))?;
+    let installed_mcp = installed_mcp_enabled(&state.home);
+    let installed_skills = installed_skill_ids(&state.home);
+
+    let mcp = mcp_catalog
+        .entries
+        .iter()
+        .map(|entry| {
+            let installed = installed_mcp.contains_key(&entry.id);
+            json!({
+                "id": entry.id,
+                "name": entry.name,
+                "description": entry.description,
+                "transport": entry.transport,
+                "required_parameters": entry.required_parameters,
+                "installed": installed,
+                "enabled": installed_mcp.get(&entry.id).copied().unwrap_or(false),
+            })
+        })
+        .collect::<Vec<_>>();
+    let skills = skill_catalog
+        .entries
+        .iter()
+        .map(|entry| json!({
+            "id": entry.id,
+            "name": entry.name,
+            "description": entry.description,
+            "repository": entry.repository,
+            "installed": installed_skills.iter().any(|id| id == &entry.id),
+        }))
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "mcp": mcp, "skills": skills })))
+}
+
+/// 安装 MCP server：{ "id": ..., "values": { "key": "value", ... } }
+async fn install_mcp_catalog(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let id = body
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("missing id"))?;
+    let values = body
+        .get("values")
+        .and_then(Value::as_object)
+        .map(|object| {
+            object
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        key.clone(),
+                        value.as_str().unwrap_or_default().to_string(),
+                    )
+                })
+                .collect::<BTreeMap<String, String>>()
+        })
+        .unwrap_or_default();
+    let installer = coomi_catalogs::CatalogInstaller::new(&state.home);
+    let path = installer
+        .install_mcp(id, &values)
+        .map_err(|e| ApiError::internal(format!("failed to install MCP {id}: {e:#}")))?;
+    Ok(Json(json!({ "ok": true, "id": id, "path": path.display().to_string() })))
+}
+
+/// 安装 Skill：{ "id": ... }
+async fn install_skill_catalog(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let id = body
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("missing id"))?;
+    let installer = coomi_catalogs::CatalogInstaller::new(&state.home);
+    let path = installer
+        .install_skill(id)
+        .map_err(|e| ApiError::internal(format!("failed to install Skill {id}: {e:#}")))?;
+    Ok(Json(json!({ "ok": true, "id": id, "path": path.display().to_string() })))
+}
+
+// ─────────────────────────── 会话 cwd ───────────────────────────
+
+/// 更新会话的工作目录（会话标记路径，绑定为会话执行目录）。
+async fn set_session_cwd(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let store = SessionStore::new(&state.home);
+    let session_id =
+        Uuid::parse_str(&id).map_err(|_| ApiError::bad_request("invalid session id"))?;
+    let mut session = store
+        .load(session_id)
+        .map_err(|e| ApiError::internal(format!("failed to load session {id}: {e:#}")))?;
+    let cwd = body
+        .get("cwd")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("missing cwd"))?
+        .trim()
+        .to_string();
+    if !cwd.starts_with('/') {
+        return Err(ApiError::bad_request("cwd must be an absolute path"));
+    }
+    let path = std::path::Path::new(&cwd);
+    if !path.is_dir() {
+        return Err(ApiError::bad_request(format!("directory does not exist: {cwd}")));
+    }
+    session.cwd = path.to_path_buf();
+    store
+        .save(&session)
+        .map_err(|e| ApiError::internal(format!("failed to save session {id}: {e:#}")))?;
+    Ok(Json(json!({ "ok": true, "cwd": cwd })))
+}
+
+// ─────────────────────────── 文件管理 ───────────────────────────
+
+fn abs_path(path: &str) -> Result<std::path::PathBuf, ApiError> {
+    let path = path.trim();
+    if !path.starts_with('/') {
+        return Err(ApiError::bad_request("path must be absolute"));
+    }
+    Ok(std::path::Path::new(path).to_path_buf())
+}
+
+/// 列出目录：GET /api/fs/list?path=...
+async fn fs_list(Query(params): Query<HashMap<String, String>>) -> Result<Json<Value>, ApiError> {
+    let path = params
+        .get("path")
+        .map(String::as_str)
+        .unwrap_or("/");
+    let dir = abs_path(path)?;
+    let entries = std::fs::read_dir(&dir)
+        .map_err(|e| ApiError::bad_request(format!("cannot read {}: {e}", dir.display())))?;
+    let mut items = Vec::new();
+    for entry in entries.flatten() {
+        let meta = entry.metadata().ok();
+        let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+        items.push(json!({
+            "name": entry.file_name().to_string_lossy().into_owned(),
+            "is_dir": is_dir,
+            "size": meta.as_ref().map(|m| m.len()).unwrap_or(0),
+            "modified": meta.as_ref()
+                .and_then(|m| m.modified().ok())
+                .map(|t| t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0))
+                .unwrap_or(0),
+        }));
+    }
+    items.sort_by(|a, b| {
+        let (ad, bd) = (a["is_dir"].as_bool().unwrap_or(false), b["is_dir"].as_bool().unwrap_or(false));
+        bd.cmp(&ad).then_with(|| a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or("")))
+    });
+    Ok(Json(json!({ "path": dir.display().to_string(), "entries": items })))
+}
+
+/// 读取文件内容（预览）：GET /api/fs/raw?path=...
+async fn fs_raw(Query(params): Query<HashMap<String, String>>) -> Result<axum::response::Response, ApiError> {
+    let path = params
+        .get("path")
+        .ok_or_else(|| ApiError::bad_request("missing path"))?;
+    let file = abs_path(path)?;
+    if !file.is_file() {
+        return Err(ApiError::bad_request(format!("not a file: {}", file.display())));
+    }
+    let bytes = std::fs::read(&file)
+        .map_err(|e| ApiError::internal(format!("failed to read {}: {e}", file.display())))?;
+    let kind = mime_for(&file);
+    Ok(axum::response::Response::builder()
+        .header("Content-Type", kind)
+        .header("Content-Disposition", "inline")
+        .body(axum::body::Body::from(bytes))
+        .expect("valid response"))
+}
+
+fn mime_for(path: &std::path::Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        "json" => "application/json",
+        "md" | "markdown" => "text/markdown",
+        "txt" | "log" | "toml" | "yaml" | "yml" | "sh" | "py" | "rs" | "js" | "ts" | "vue"
+        | "html" | "css" | "xml" | "conf" | "env" | "ini" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+async fn fs_mkdir(Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
+    let path = body
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("missing path"))?;
+    let dir = abs_path(path)?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| ApiError::internal(format!("failed to create {}: {e}", dir.display())))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn fs_delete(Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
+    let path = body
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("missing path"))?;
+    let target = abs_path(path)?;
+    if target.is_dir() {
+        std::fs::remove_dir_all(&target)
+            .map_err(|e| ApiError::internal(format!("failed to delete {}: {e}", target.display())))?;
+    } else if target.is_file() || target.is_symlink() {
+        std::fs::remove_file(&target)
+            .map_err(|e| ApiError::internal(format!("failed to delete {}: {e}", target.display())))?;
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn fs_rename(Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
+    let from = body
+        .get("from")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("missing from"))?;
+    let to = body
+        .get("to")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("missing to"))?;
+    let from_path = abs_path(from)?;
+    let to_path = abs_path(to)?;
+    std::fs::rename(&from_path, &to_path)
+        .map_err(|e| ApiError::internal(format!("failed to rename {}: {e}", from_path.display())))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn fs_copy(Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
+    let from = body
+        .get("from")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("missing from"))?;
+    let to = body
+        .get("to")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("missing to"))?;
+    let from_path = abs_path(from)?;
+    let to_path = abs_path(to)?;
+    copy_recursive(&from_path, &to_path)
+        .map_err(|e| ApiError::internal(format!("failed to copy {}: {e}", from_path.display())))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+fn copy_recursive(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    if from.is_dir() {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            copy_recursive(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else {
+        std::fs::copy(from, to).map(|_| ())
+    }
+}
+
+async fn fs_write(Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
+    let path = body
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("missing path"))?;
+    let content = body
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let target = abs_path(path)?;
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(&target, content)
+        .map_err(|e| ApiError::internal(format!("failed to write {}: {e}", target.display())))?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 async fn list_providers(State(state): State<AppState>) -> Json<Value> {
@@ -531,6 +934,23 @@ async fn websocket_session(socket: WebSocket, state: AppState, session_id: Strin
         }
     });
 
+    // Push the persisted session state (usage totals) as soon as the socket opens,
+    // so reopening a session never shows a stale zero counter.
+    if let Ok(parsed_id) = Uuid::parse_str(&session_id) {
+        if let Ok(session) = SessionStore::new(&state.home).load(parsed_id) {
+            context.send_event(json!({
+                "event_type": "session_loaded",
+                "session_id": session_id,
+                "cwd": session.cwd.display().to_string(),
+                "usage": {
+                    "input_tokens": session.usage.input_tokens,
+                    "output_tokens": session.usage.output_tokens,
+                    "total_tokens": session.usage.total_tokens(),
+                },
+            }));
+        }
+    }
+
     while let Some(Ok(message)) = source.next().await {
         let Message::Text(text) = message else {
             continue;
@@ -833,7 +1253,7 @@ async fn run_turn(
         &provider_config.id,
         &provider_config.model,
         &state.cwd,
-    );
+    )?;
 
     // Use the session's own working directory so history and context always belong
     // to the same project; fall back to the engine cwd only when the session's
@@ -916,12 +1336,24 @@ fn load_or_create_web_session(
     provider_id: &str,
     model: &str,
     cwd: &Path,
-) -> Session {
-    let mut session = store.load(session_id).unwrap_or_else(|_| {
-        let mut session = Session::new(provider_id, model, cwd.to_path_buf());
-        session.id = session_id;
-        session
-    });
+) -> Result<Session> {
+    let mut session = match store.load(session_id) {
+        Ok(session) => session,
+        Err(error) => {
+            if store.contains(session_id) {
+                // 文件在但解析失败：宁可让用户看到错误，也不静默用空会话覆盖历史。
+                // （此前 unwrap_or_else 会“吞掉”损坏文件，导致会话内容消失。）
+                anyhow::bail!(
+                    "session {} is unreadable/corrupt ({}); its file is kept on disk",
+                    session_id,
+                    error
+                );
+            }
+            let mut session = Session::new(provider_id, model, cwd.to_path_buf());
+            session.id = session_id;
+            session
+        }
+    };
     // Keep the session's original working directory: a session must only ever see
     // its own project context (history + cwd), never inherit the current engine cwd.
     // Only brand-new sessions adopt the current cwd; empty cwd only happens for
@@ -930,7 +1362,7 @@ fn load_or_create_web_session(
         session.cwd = cwd.to_path_buf();
     }
     session.switch_model(provider_id, model);
-    session
+    Ok(session)
 }
 
 struct BrowserObserver {
@@ -1372,6 +1804,13 @@ impl ApiError {
     fn bad_gateway(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_GATEWAY,
+            message: message.into(),
+        }
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
             message: message.into(),
         }
     }

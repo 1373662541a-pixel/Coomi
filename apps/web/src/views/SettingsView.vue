@@ -81,9 +81,19 @@ function isCurrent(providerId: string, model: string): boolean {
           <span class="rside">{{ config.providers.length }}</span>
           <CoomiIcon name="chevronRight" :size="15" class="arw" />
         </button>
+        <button class="row" @click="router.push('/catalog')">
+          <span class="ri"><CoomiIcon name="plug" :size="17" /></span>
+          <span class="rt"><span class="rmain">SKILL / MCP 管理</span></span>
+          <CoomiIcon name="chevronRight" :size="15" class="arw" />
+        </button>
         <button class="row" @click="router.push('/runtime')">
           <span class="ri"><CoomiIcon name="cpu" :size="17" /></span>
           <span class="rt"><span class="rmain">内置环境</span></span>
+          <CoomiIcon name="chevronRight" :size="15" class="arw" />
+        </button>
+        <button class="row" @click="router.push('/files')">
+          <span class="ri"><CoomiIcon name="folder" :size="17" /></span>
+          <span class="rt"><span class="rmain">文件管理</span></span>
           <CoomiIcon name="chevronRight" :size="15" class="arw" />
         </button>
         <button class="row" @click="router.push('/sessions')">

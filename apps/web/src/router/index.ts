@@ -8,5 +8,7 @@ export const router = createRouter({
     { path: '/settings', name: 'settings', component: () => import('@/views/SettingsView.vue') },
     { path: '/providers', name: 'providers', component: () => import('@/views/ProvidersView.vue') },
     { path: '/runtime', name: 'runtime', component: () => import('@/views/RuntimeView.vue') },
+    { path: '/catalog', name: 'catalog', component: () => import('@/views/CatalogView.vue') },
+    { path: '/files', name: 'files', component: () => import('@/views/FileManagerView.vue') },
   ],
 })

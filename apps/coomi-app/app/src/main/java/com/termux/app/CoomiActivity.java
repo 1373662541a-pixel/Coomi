@@ -16,6 +16,7 @@ import android.provider.OpenableColumns;
 import android.text.TextUtils;
 import android.view.View;
 import android.webkit.JavascriptInterface;
+import android.content.res.Configuration;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
@@ -59,6 +60,9 @@ public class CoomiActivity extends Activity {
     private static final int REQUEST_IMPORT_FILES = 2101;
     private static final int REQUEST_AUTHORIZE_TREE = 2102;
     private static final int REQUEST_EXPORT_FILE = 2103;
+
+    /** Intent extra：直达前端 hash 路由，如 "#/catalog"。 */
+    public static final String EXTRA_ROUTE = "coomi.route";
 
     private WebView mWebView;
     private View mSplash;
@@ -225,7 +229,12 @@ public class CoomiActivity extends Activity {
         if (mPageLoaded) return;
         mPageLoaded = true;
         Logger.logInfo(LOG_TAG, "Engine ready on port " + port);
-        runOnUiThread(() -> mWebView.loadUrl("http://127.0.0.1:" + port + "/"));
+        // 支持从控制台直达特定前端路由（如 SKILL/MCP 管理页 #/catalog）。
+        String route = getIntent().getStringExtra(EXTRA_ROUTE);
+        String url = "http://127.0.0.1:" + port + "/"
+            + (route != null && route.startsWith("#") ? route : "");
+        final String target = url;
+        runOnUiThread(() -> mWebView.loadUrl(target));
     }
 
     private void configureWebView() {
@@ -251,6 +260,8 @@ public class CoomiActivity extends Activity {
                 // 前端已经可见了，整块闪屏一起收掉，避免残留的 spinner 盖在页面上。
                 mSplash.setVisibility(View.GONE);
                 mWebView.setVisibility(View.VISIBLE);
+                // 页面加载完把系统深浅色同步给前端（重新加载会清掉之前注入的属性）。
+                applyThemeToWebView();
             }
 
             @Override
@@ -311,6 +322,27 @@ public class CoomiActivity extends Activity {
         finish();
     }
 
+    /** 系统是否处于深色模式（Theme.Coomi 刻意固定浅色，但 Web 内容需跟随系统）。 */
+    private boolean isSystemDark() {
+        int mode = getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
+        return mode == Configuration.UI_MODE_NIGHT_YES;
+    }
+
+    /** 把系统深浅色写入 <html data-theme>，前端 global.css 据此切换暗色主题。 */
+    private void applyThemeToWebView() {
+        if (mWebView == null) return;
+        runOnUiThread(() -> evaluateJavascript(
+            "document.documentElement.setAttribute('data-theme','" + (isSystemDark() ? "dark" : "light") + "')",
+            null));
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        // 系统切换深浅色时实时同步到 Web 内容（configChanges 含 uiMode，Activity 不重建）。
+        applyThemeToWebView();
+    }
+
     private final class AndroidBridge {
         @JavascriptInterface
         public void openDashboard() { runOnUiThread(CoomiActivity.this::openDashboard); }
@@ -342,6 +374,43 @@ public class CoomiActivity extends Activity {
         public void exportFile(String path, String suggestedName) {
             mPendingExportRequestId = null;
             launchExportPicker(path, suggestedName);
+        }
+
+        /** 用系统其它 app 打开文件（图片/文档等），走 FileProvider 授权。 */
+        @JavascriptInterface
+        public void openFile(String path) {
+            runOnUiThread(() -> {
+                try {
+                    File file = new File(path);
+                    if (!file.isFile()) {
+                        Toast.makeText(CoomiActivity.this, "文件不存在：" + path, Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    android.net.Uri uri = androidx.core.content.FileProvider.getUriForFile(
+                        CoomiActivity.this, getPackageName() + ".fileprovider", file);
+                    Intent intent = new Intent(Intent.ACTION_VIEW);
+                    intent.setDataAndType(uri, mimeFromName(file.getName()));
+                    intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    startActivity(intent);
+                } catch (Exception error) {
+                    Toast.makeText(CoomiActivity.this,
+                        "无法打开文件：" + error.getMessage(), Toast.LENGTH_SHORT).show();
+                }
+            });
+        }
+
+        private String mimeFromName(String name) {
+            String ext = name.contains(".") ? name.substring(name.lastIndexOf('.') + 1).toLowerCase() : "";
+            String mime = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext);
+            if (mime != null) return mime;
+            switch (ext) {
+                case "md": case "markdown": case "txt": case "log": case "sh":
+                case "py": case "rs": case "js": case "ts": case "vue": case "json":
+                case "toml": case "yaml": case "yml": case "conf": case "ini":
+                    return "text/plain";
+                case "svg": return "image/svg+xml";
+                default: return "application/octet-stream";
+            }
         }
 
         @JavascriptInterface
@@ -551,7 +620,8 @@ public class CoomiActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        finishAffinity();
+        // 需求：对话界面返回 → 控制台界面；控制台再返回才是退出 app。
+        openDashboard();
     }
 
     @Override

@@ -294,7 +294,7 @@ public class CoomiService extends Service {
     public void stopEngine(Consumer<CommandResult> callback) {
         mExecutor.execute(() -> {
             stopEngineSync();
-            callback.accept(new CommandResult(true, "stopped", "", 0));
+            if (callback != null) callback.accept(new CommandResult(true, "stopped", "", 0));
         });
     }
 
@@ -307,6 +307,10 @@ public class CoomiService extends Service {
             }
             if (process.isAlive()) process.destroyForcibly();
         }
+        // 兜底：清掉可能残留的 coomi 进程（Rust 侧收到 SIGTERM 会先清理全部工具子进程）
+        try {
+            execTermux("pkill -f '" + CoomiConstants.NATIVE_BINARY_NAME + "' 2>/dev/null; true");
+        } catch (Exception ignored) { /* best-effort */ }
         mEngineProcess = null;
         mIsEngineRunning = false;
     }

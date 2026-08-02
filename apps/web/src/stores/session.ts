@@ -22,6 +22,8 @@ export const useSessionStore = defineStore('session', () => {
     total: number; input: number; output: number; contextRatio: number
     contextUsed: number; contextWindow: number
   } | null>(null)
+  /** 当前会话的工作目录（会话标记路径，绑定为会话执行目录）。 */
+  const cwd = ref('')
   const loop = ref<LoopProgress>({ active: false, currentStep: 0, totalSteps: 0, status: '' })
 
   let currentAssistant: AssistantMessage | null = null
@@ -160,6 +162,20 @@ export const useSessionStore = defineStore('session', () => {
         loop.value = { ...loop.value, active: true, totalSteps: ev.total_steps, currentStep: ev.step_index, currentDescription: ev.step_description }
         break
       case 'turn_end': endAssistantStream(); cancelRunningTools(); connection.setRetry(null); runState.value = 'idle'; persistSoon(); break
+      case 'session_loaded': {
+        // 打开历史会话时，引擎把持久化的累计用量推过来，避免显示 0。
+        const u = ev.usage ?? {}
+        usage.value = {
+          total: u.total_tokens ?? usage.value?.total ?? 0,
+          input: u.input_tokens ?? usage.value?.input ?? 0,
+          output: u.output_tokens ?? usage.value?.output ?? 0,
+          contextRatio: usage.value?.contextRatio ?? 0,
+          contextUsed: usage.value?.contextUsed ?? 0,
+          contextWindow: usage.value?.contextWindow ?? 0,
+        }
+        if (typeof ev.cwd === 'string' && ev.cwd) cwd.value = ev.cwd
+        break
+      }
     }
   }
 
@@ -221,12 +237,69 @@ export const useSessionStore = defineStore('session', () => {
     connect()
   }
 
+  /** 从引擎 /api/sessions/{id} 恢复完整历史；成功返回 true。 */
+  async function restoreFromEngine(id: string): Promise<boolean> {
+    try {
+      const res = await fetch(`/api/sessions/${id}`)
+      if (!res.ok) return false
+      const session = await res.json()
+      const messages = (session.messages ?? []) as ChatMessageJson[]
+      if (messages.length === 0) return false
+      timeline.value = messagesToTimeline(messages)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** 把引擎磁盘会话消息转换为前端时间线（含工具调用卡片与结果回填）。 */
+  function messagesToTimeline(messages: ChatMessageJson[]): Timelineitem[] {
+    const items: Timelineitem[] = []
+    const toolResults = new Map<string, string>()
+    for (const m of messages) {
+      if (m.internal) continue
+      if (m.compaction_summary) {
+        const snippet = (m.content ?? '').slice(0, 120)
+        items.push({ kind: 'notice', id: nextId(), tone: 'info', text: `（上下文已压缩${snippet ? '：' + snippet + '…' : ''}）` })
+        continue
+      }
+      if (m.role === 'user') {
+        items.push({ kind: 'user', id: nextId(), content: m.content })
+      } else if (m.role === 'assistant') {
+        if (m.content) items.push({ kind: 'assistant', id: nextId(), content: m.content, streaming: false })
+        for (const tc of m.tool_calls ?? []) {
+          items.push({
+            kind: 'tool', callId: tc.id, toolName: tc.name,
+            arguments: tc.arguments as Record<string, unknown>,
+            status: 'success', expanded: false,
+          })
+        }
+      } else if (m.role === 'tool' && m.tool_call_id) {
+        toolResults.set(m.tool_call_id, m.content)
+      }
+    }
+    for (const item of items) {
+      if (item.kind === 'tool') {
+        const result = toolResults.get(item.callId)
+        if (result != null) {
+          const preview = result.length > 200 ? result.slice(0, 200) + '…' : result
+          item.resultPreview = preview
+          item.isError = /error|fail|exception|panic/i.test(result.slice(0, 500))
+        } else {
+          // 没有结果回填（比如被取消/未执行）的调用收尾为已取消
+          item.status = 'cancelled'
+          item.isError = true
+        }
+      }
+    }
+    return items
+  }
+
   /**
-   * 打开一条历史会话：先把本机记录铺回来，再用同一个 sessionId 重连。
-   * 引擎进程还活着就是真的续上了；重启过则只有这份本机记录，
-   * 所以补一条提示，避免用户以为模型还记得。
+   * 打开一条历史会话：优先从引擎磁盘拉完整历史（权威源，修复“会话消失/串话”），
+   * 引擎不可用才回退本机 localStorage 记录。
    */
-  function openSession(id: string) {
+  async function openSession(id: string) {
     if (id === sessionId.value) return
     flushPersistence()
     endAssistantStream()
@@ -235,13 +308,16 @@ export const useSessionStore = defineStore('session', () => {
     runState.value = 'idle'
     const targetId = isUuid(id) ? id : sessions.migrateId(id, createSessionId())
     sessionId.value = targetId
-    const restored = sessions.loadTranscript(targetId)
-    timeline.value = restored
-    if (restored.length > 0) {
-      timeline.value.push({
-        kind: 'notice', id: nextId(), tone: 'info',
-        text: '已恢复本机记录。若引擎重启过，模型这边的上下文可能已经清空。',
-      })
+    const restoredFromEngine = await restoreFromEngine(targetId)
+    if (!restoredFromEngine) {
+      const restored = sessions.loadTranscript(targetId)
+      timeline.value = restored
+      if (restored.length > 0) {
+        timeline.value.push({
+          kind: 'notice', id: nextId(), tone: 'info',
+          text: '已恢复本机记录。若引擎重启过，模型这边的上下文可能已经清空。',
+        })
+      }
     }
     connect()
   }
@@ -249,6 +325,25 @@ export const useSessionStore = defineStore('session', () => {
   function deleteSession(id: string) {
     sessions.remove(id)
     if (id === sessionId.value) newSession()
+  }
+
+  /** 更新当前会话的工作目录（会话标记路径）。成功后引擎后续 turn 都在该目录执行。 */
+  async function setSessionCwd(path: string): Promise<boolean> {
+    const id = sessionId.value
+    try {
+      const res = await fetch(`/api/sessions/${id}/cwd`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cwd: path }),
+      })
+      if (!res.ok) return false
+      cwd.value = path
+      const meta = sessions.find(id)
+      if (meta) { meta.cwd = path; sessions.setCurrentCwd(path) }
+      return true
+    } catch {
+      return false
+    }
   }
 
   function appendAssistant(content: string) {
@@ -275,7 +370,7 @@ export const useSessionStore = defineStore('session', () => {
   }
   function pushNotice(tone: 'info' | 'warn' | 'error' | 'success', text: string) { timeline.value.push({ kind: 'notice', id: nextId(), tone, text }) }
 
-  return { sessionId, timeline, runState, usage, loop, isBusy, pendingApproval, pendingQuestion, connect, disconnect, sendMessage, cancel, approve, answerQuestion, setPermissionMode, togglePlanMode, selectModel, completeFileTransfer, newSession, openSession, deleteSession }
+  return { sessionId, timeline, runState, usage, cwd, loop, isBusy, pendingApproval, pendingQuestion, connect, disconnect, sendMessage, cancel, approve, answerQuestion, setPermissionMode, togglePlanMode, selectModel, completeFileTransfer, newSession, openSession, deleteSession, setSessionCwd }
 })
 
 function fmtTokens(n: number): string { return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n) }
@@ -284,6 +379,16 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3
 
 function isUuid(value: string): boolean {
   return UUID_PATTERN.test(value)
+}
+
+/** 引擎磁盘上会话文件的原始消息结构（与 coomi-engine 的 ChatMessage 对应）。 */
+interface ChatMessageJson {
+  role: 'system' | 'user' | 'assistant' | 'tool'
+  content: string
+  tool_calls?: Array<{ id: string; name: string; arguments: unknown }>
+  tool_call_id?: string
+  compaction_summary?: boolean
+  internal?: boolean
 }
 
 function createSessionId(): string {
