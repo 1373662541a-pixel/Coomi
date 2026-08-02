@@ -24,6 +24,7 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import androidx.core.content.ContextCompat;
 
@@ -332,8 +333,7 @@ public class CoomiActivity extends Activity {
     private void applyThemeToWebView() {
         if (mWebView == null) return;
         runOnUiThread(() -> evaluateJavascript(
-            "document.documentElement.setAttribute('data-theme','" + (isSystemDark() ? "dark" : "light") + "')",
-            null));
+            "document.documentElement.setAttribute('data-theme','" + (isSystemDark() ? "dark" : "light") + "')"));
     }
 
     @Override

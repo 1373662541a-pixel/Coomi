@@ -82,17 +82,21 @@ function fmtTime(ts: number): string {
 
 // ── 操作 ──
 const renaming = ref<Entry | null>(null)
-const renameValue = ref('')
 const creating = ref<'dir' | 'file' | null>(null)
-const createName = ref('')
+const inputValue = ref('')
 
-function startRename(e: Entry) { renaming.value = e; renameValue.value = e.name; inputMode.value = 'rename' }
-function startCreate(kind: 'dir' | 'file') { creating.value = kind; createName.value = ''; inputMode.value = 'create' }
+function startRename(e: Entry) { renaming.value = e; inputValue.value = e.name; inputMode.value = 'rename' }
+function startCreate(kind: 'dir' | 'file') { creating.value = kind; inputValue.value = ''; inputMode.value = 'create' }
 
 const inputMode = ref<'none' | 'rename' | 'create'>('none')
 
-async function commitRename() {
-  const name = renameValue.value.trim()
+function commitInput() {
+  const name = inputValue.value.trim()
+  if (inputMode.value === 'rename') void commitRename(name)
+  else void commitCreate(name)
+}
+
+async function commitRename(name: string) {
   const target = renaming.value
   if (!target || !name) { inputMode.value = 'none'; return }
   try {
@@ -103,8 +107,7 @@ async function commitRename() {
   } catch (e) { notice.value = `重命名失败：${e instanceof Error ? e.message : e}` }
 }
 
-async function commitCreate() {
-  const name = createName.value.trim()
+async function commitCreate(name: string) {
   const kind = creating.value
   if (!name || !kind) { inputMode.value = 'none'; return }
   try {
@@ -240,10 +243,10 @@ onMounted(() => void load(path.value))
       <div v-if="inputMode !== 'none'" class="sheet-mask" @click.self="inputMode = 'none'">
         <div class="sheet">
           <p class="sheet-title">{{ inputMode === 'rename' ? '重命名' : creating === 'dir' ? '新建文件夹' : '新建文件' }}</p>
-          <input v-model="inputMode === 'rename' ? renameValue : createName" class="path-input" placeholder="名称" autofocus @keyup.enter="inputMode === 'rename' ? commitRename() : commitCreate()" />
+          <input v-model="inputValue" class="path-input" placeholder="名称" autofocus @keyup.enter="commitInput" />
           <div class="sheet-actions">
             <button class="btn ghost" @click="inputMode = 'none'">取消</button>
-            <button class="btn primary" @click="inputMode === 'rename' ? commitRename() : commitCreate()">确定</button>
+            <button class="btn primary" @click="commitInput">确定</button>
           </div>
         </div>
       </div>
