@@ -12,7 +12,7 @@ WorkingDirectory=/opt/coomi-stats
 EnvironmentFile=/etc/coomi-stats.env
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=/opt/coomi-stats/venv/bin/uvicorn stats_server:app --host 127.0.0.1 --port 8062 --workers 1
+ExecStart=/opt/coomi-stats/conda-env/bin/uvicorn stats_server:app --host 127.0.0.1 --port 8062 --workers 1
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
