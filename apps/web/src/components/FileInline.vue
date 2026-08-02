@@ -5,7 +5,7 @@
  * 用其它应用打开 / 复制路径。
  */
 import { computed, ref } from 'vue'
-import { authedFetch } from '@/bridge/http'
+import { authedFetch, engineToken } from '@/bridge/http'
 import CoomiIcon from './CoomiIcon.vue'
 
 const props = defineProps<{ paths: string[] }>()
@@ -23,7 +23,9 @@ function isTextFile(name: string): boolean {
 function isImage(name: string): boolean {
   return /\.(png|jpe?g|gif|webp|svg)$/i.test(name)
 }
-const previewSrc = computed(() => '/api/fs/raw?path=' + encodeURIComponent(activePath.value))
+const previewSrc = computed(() =>
+  '/api/fs/raw?path=' + encodeURIComponent(activePath.value)
+  + '&token=' + encodeURIComponent(engineToken()))
 
 function openSheet(path: string) {
   activePath.value = path

@@ -8,7 +8,7 @@ import { useRouter } from 'vue-router'
 import { useSessionStore } from '@/stores/session'
 import PageHead from '@/components/PageHead.vue'
 import CoomiIcon from '@/components/CoomiIcon.vue'
-import { authedFetch } from '@/bridge/http'
+import { authedFetch, engineToken } from '@/bridge/http'
 
 const router = useRouter()
 const session = useSessionStore()
@@ -158,7 +158,10 @@ async function paste() {
 
 // ── 预览（图片 / 文本 / 其它）──
 const previewOpen = ref(false)
-const previewSrc = computed(() => selected.value ? '/api/fs/raw?path=' + encodeURIComponent(path.value + '/' + selected.value.name) : '')
+const previewSrc = computed(() => selected.value
+  ? '/api/fs/raw?path=' + encodeURIComponent(path.value + '/' + selected.value.name)
+    + '&token=' + encodeURIComponent(engineToken())
+  : '')
 const previewText = ref('')
 async function openPreview() {
   const e = selected.value
