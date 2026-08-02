@@ -28,6 +28,8 @@ import android.widget.Toast;
 
 import androidx.core.content.ContextCompat;
 
+import com.termux.BuildConfig;
+
 import app.coomi.CoomiConstants;
 import app.coomi.CoomiDemo;
 import app.coomi.CoomiEngineMonitor;
@@ -247,7 +249,8 @@ public class CoomiActivity extends Activity {
         // The bridge serves everything over loopback HTTP; no local file access needed.
         s.setAllowContentAccess(false);
         s.setAllowFileAccess(false);
-        WebView.setWebContentsDebuggingEnabled(true);
+        // 调试端口仅在 debug 构建开启：release 构建不经调试端口暴露页面内存中的令牌/密钥。
+        WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG);
         mWebView.addJavascriptInterface(new AndroidBridge(), "CoomiAndroid");
 
         mWebView.setWebViewClient(new WebViewClient() {

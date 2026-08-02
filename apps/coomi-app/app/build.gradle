@@ -51,8 +51,8 @@ android {
         applicationId "com.coomi.android"
         minSdkVersion project.properties.minSdkVersion.toInteger()
         targetSdkVersion project.properties.targetSdkVersion.toInteger()
-        // v1.2.1 安全修复重发布：versionCode 16（修复 Skill 卸载路径穿越与 shell 屏蔽绕过）
-        versionCode 16
+        // v1.2.1 终版：versionCode 17（引擎全局记忆默认关闭与前端一致；WebView 调试端口仅 debug 开启）
+        versionCode 17
         versionName "1.2.1"
 
         if (appVersionName) versionName = appVersionName

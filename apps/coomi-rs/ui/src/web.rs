@@ -334,18 +334,18 @@ fn settings_path(home: &Path) -> PathBuf {
 }
 
 /// 全局会话记忆开关（引擎侧权威值）：关闭时工具不可读会话/配置/记忆目录，
-/// 且系统提示明确禁止读取历史记录。默认开启。
+/// 且系统提示明确禁止读取历史记录。与前端设置一致，默认关闭（隐私优先）。
 fn global_memory_enabled(home: &Path) -> bool {
     let Ok(bytes) = std::fs::read(settings_path(home)) else {
-        return true;
+        return false;
     };
     let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
-        return true;
+        return false;
     };
     value
         .get("global_memory")
         .and_then(Value::as_bool)
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 async fn get_global_memory(State(state): State<AppState>) -> Json<Value> {
@@ -359,7 +359,7 @@ async fn set_global_memory(
     let enabled = body
         .get("enabled")
         .and_then(Value::as_bool)
-        .unwrap_or(true);
+        .unwrap_or(false);
     let path = settings_path(&state.home);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
