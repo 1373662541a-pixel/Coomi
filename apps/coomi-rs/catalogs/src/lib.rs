@@ -140,7 +140,15 @@ impl CatalogInstaller {
 
     /// 卸载 Skill：删除 skills/{id} 目录与 config/skills.json 中的条目。
     pub fn uninstall_skill(&self, id: &str) -> Result<PathBuf> {
-        let destination = self.home.join("skills").join(id);
+        // 与安装一致：id 必须先在内置目录中解析出合法条目，杜绝路径穿越
+        // （id=".."、"%2E%2E%2F" 等经 URL 解码后越界删除任意目录）。
+        let catalog = builtin_skills()?;
+        let entry = catalog
+            .entries
+            .iter()
+            .find(|entry| entry.id.eq_ignore_ascii_case(id))
+            .with_context(|| format!("Skill `{id}` is not in the built-in catalog"))?;
+        let destination = self.home.join("skills").join(&entry.id);
         if destination.exists() {
             fs::remove_dir_all(&destination)
                 .with_context(|| format!("failed to remove {}", destination.display()))?;
@@ -374,5 +382,21 @@ mod tests {
             document.pointer("/servers/filesystem/enabled"),
             Some(&Value::Bool(true))
         );
+    }
+
+    #[test]
+    fn uninstall_skill_rejects_path_traversal_ids() {
+        // 卸载只接受内置目录中的合法 id：路径穿越（..、绝对路径、任意目录名）一律拒绝。
+        let home = tempfile::tempdir().expect("temporary home");
+        let installer = CatalogInstaller::new(home.path());
+        for malicious in ["..", "../x", "/etc", "a/b", "%2e%2e"] {
+            assert!(
+                installer.uninstall_skill(malicious).is_err(),
+                "uninstall should reject {malicious}"
+            );
+        }
+        // 不存在的合法目录 id 不会报错（视为已卸载），但也不得删到 skills 之外。
+        assert!(installer.uninstall_skill("frontend-design").is_ok());
+        assert!(home.path().join("skills").is_dir() || !home.path().join("skills").exists());
     }
 }

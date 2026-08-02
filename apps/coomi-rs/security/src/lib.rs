@@ -42,6 +42,9 @@ pub struct SecurityPolicy {
     mode: AccessMode,
     /// 工作区内的私有屏蔽区（如 .coomi/sessions）：任何模式（含 FullAccess）都不可访问。
     blocked: Vec<PathBuf>,
+    /// 屏蔽区的其它路径写法（词法规范化/原始形式），供 shell 命令文本匹配用
+    /// （Android 上 /data/data 与 /data/user/0 互为符号链接，两种写法都要拦）。
+    blocked_aliases: Vec<PathBuf>,
 }
 
 impl SecurityPolicy {
@@ -54,23 +57,69 @@ impl SecurityPolicy {
             workspace,
             mode,
             blocked: Vec::new(),
+            blocked_aliases: Vec::new(),
         })
     }
 
     pub fn with_blocked(mut self, blocked: impl IntoIterator<Item = PathBuf>) -> Self {
         // 与工具侧 resolve_path 的规范化保持一致：存在则 canonicalize（Android 上
-        // /data/data 是 /data/user/0 的符号链接），不存在则做词法规范化。
+        // /data/data 是 /data/user/0 的符号链接），不存在则做词法规范化；
+        // 同时保留多种写法供 shell 命令文本匹配（~、$HOME、相对形式）。
         self.blocked = blocked
             .into_iter()
             .filter_map(|path| {
                 let normalized = normalize_path(&path).ok()?;
+                self.blocked_aliases.push(normalized.clone());
                 if normalized.exists() {
-                    normalized.canonicalize().ok()
+                    let canonical = normalized.canonicalize().unwrap_or_else(|_| normalized);
+                    self.blocked_aliases.push(canonical.clone());
+                    Some(canonical)
                 } else {
                     Some(normalized)
                 }
             })
             .collect();
+        // 追加常见别名写法：~/.coomi/*、$HOME/.coomi/*、${HOME}/.coomi/* 以及
+        // 相对形式 .coomi/{name}（前提是路径含名为 .coomi 的祖先，即引擎私有目录）。
+        let home_forms: Vec<PathBuf> = self
+            .blocked_aliases
+            .iter()
+            .filter_map(|path| {
+                let ancestors = path.ancestors().collect::<Vec<_>>();
+                let coomi = ancestors
+                    .iter()
+                    .position(|component| component.file_name().and_then(|n| n.to_str()) == Some(".coomi"))?;
+                let relative = ancestors[..=coomi]
+                    .iter()
+                    .rev()
+                    .map(|component| component.file_name().unwrap_or_default().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                let tail = ancestors[..coomi]
+                    .iter()
+                    .rev()
+                    .map(|component| component.file_name().unwrap_or_default().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>();
+                let mut forms = vec![
+                    format!("~/{relative}"),
+                    format!("$HOME/{relative}"),
+                    format!("${{HOME}}/{relative}"),
+                ];
+                // .coomi/sessions 等相对形式（去掉 home 前缀）
+                forms.push(relative.clone());
+                // home 也可能以 ~/ 开头：~/.coomi/...
+                if let Some(last) = tail.last() {
+                    forms.push(format!("~/{last}/{relative}"));
+                    forms.push(format!("$HOME/{last}/{relative}"));
+                }
+                Some(forms)
+            })
+            .flatten()
+            .map(PathBuf::from)
+            .collect();
+        self.blocked_aliases.extend(home_forms);
+        self.blocked_aliases.sort();
+        self.blocked_aliases.dedup();
         self
     }
 
@@ -104,6 +153,27 @@ impl SecurityPolicy {
         let trimmed = command.trim();
         if trimmed.is_empty() {
             return Decision::Deny("empty shell command".into());
+        }
+
+        // 全局会话记忆关闭时：命令文本引用私有屏蔽区（~/.coomi 的会话/配置/记忆目录）
+        // 一律拒绝——shell 是文件工具之外唯一能读到这些路径的通道。
+        for alias in &self.blocked_aliases {
+            if trimmed.contains(alias.to_string_lossy().as_ref()) {
+                return Decision::Deny(
+                    "命令引用了被「全局会话记忆」策略屏蔽的私有目录".into(),
+                );
+            }
+        }
+        // 兜底：屏蔽区生效时，含 ~ / $HOME / ${HOME} 的写法无法静态判定，
+        // 转人工确认（防止 `cat ~/.coomi/sessions/...` 之类绕过字面匹配）。
+        if !self.blocked_aliases.is_empty()
+            && (trimmed.contains('~')
+                || trimmed.contains("$HOME")
+                || trimmed.contains("${HOME}"))
+        {
+            return Decision::Ask(
+                "命令使用了 ~ / $HOME 引用，可能访问被「全局会话记忆」屏蔽的私有目录，请确认".into(),
+            );
         }
 
         if destructive_command().is_match(trimmed) {
@@ -265,5 +335,18 @@ mod tests {
         std::fs::write(&other, b"hi").expect("write other");
         assert_eq!(policy.assess_read(&other), Decision::Allow);
         assert_eq!(policy.assess_write(&other), Decision::Allow);
+        // shell 通道同样被屏蔽：引用私有目录的命令一律拒绝。
+        let shell = format!("cat {}", private.display());
+        assert!(matches!(policy.assess_shell(&shell), Decision::Deny(_)));
+        let ok_shell = "cat notes.txt".to_string();
+        assert_eq!(policy.assess_shell(&ok_shell), Decision::Allow);
+        // 常见别名写法（~/.coomi/sessions、$HOME 形式）也要拦截。
+        let tilde = format!("cat ~/.coomi/sessions/session.json");
+        assert!(matches!(policy.assess_shell(&tilde), Decision::Deny(_)));
+        let home_var = "cat $HOME/.coomi/sessions/session.json".to_string();
+        assert!(matches!(policy.assess_shell(&home_var), Decision::Deny(_)));
+        // 无法静态判定的 ~ / $HOME 引用走人工确认（Ask）。
+        let ask_shell = "ls ~/project".to_string();
+        assert!(matches!(policy.assess_shell(&ask_shell), Decision::Ask(_)));
     }
 }
