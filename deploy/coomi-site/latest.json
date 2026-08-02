@@ -1,12 +1,12 @@
 {
   "version": "1.2.0",
-  "versionCode": 5,
+  "versionCode": 6,
   "platform": "android",
   "arch": "arm64-v8a",
   "minAndroid": "7.0",
   "file": "Coomi-Android-arm64-v1.2.0.apk",
   "size": 40893686,
-  "sha256": "5EDA1695762924B015B07E62FF76E96D04D288A5F7B0979C07BEA7D54D675F15",
+  "sha256": "03D5BEF6657AAABB2A88DC1BE5B5112E8FE779F86BFD2092A1AEA90AB38D3679",
   "publishedAt": "2026-08-02T16:40:00Z",
   "notes": "v1.2.0 更新内容：\n• 修复引擎无法启动\n• 打开应用先进控制台，再进入对话\n• 控制台新增文件管理入口（新建/重命名/删除/复制/粘贴/复制路径/打开）\n• SKILL/MCP 管理卡片化重做，安装需二次确认\n• 无权限目录明确提示「禁止访问」\n• 会话删除同步清理引擎记录，删除前二次确认\n• 修复对话界面右侧显示不全等布局问题"
 }
