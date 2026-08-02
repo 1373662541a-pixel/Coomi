@@ -77,6 +77,9 @@ struct AppState {
     home: PathBuf,
     cwd: PathBuf,
     port: u16,
+    /// 引擎启动时生成的随机访问令牌；/api/* 与 /ws/* 需携带
+    /// `Authorization: Bearer <token>` 或 `?token=<token>`（WS 握手用）。
+    token: String,
     permission: Arc<RwLock<PermissionMode>>,
 }
 
@@ -148,7 +151,13 @@ impl ConnectionContext {
     }
 }
 
-pub async fn serve(home: PathBuf, cwd: PathBuf, port: u16, static_dir: PathBuf) -> Result<()> {
+pub async fn serve(
+    home: PathBuf,
+    cwd: PathBuf,
+    port: u16,
+    token: String,
+    static_dir: PathBuf,
+) -> Result<()> {
     fs::create_dir_all(home.join("config"))?;
     fs::create_dir_all(home.join("sessions"))?;
     anyhow::ensure!(
@@ -162,6 +171,7 @@ pub async fn serve(home: PathBuf, cwd: PathBuf, port: u16, static_dir: PathBuf) 
         home,
         cwd,
         port,
+        token,
         permission,
     };
     let index = static_dir.join("index.html");
@@ -207,8 +217,9 @@ pub async fn serve(home: PathBuf, cwd: PathBuf, port: u16, static_dir: PathBuf) 
                         .expect("valid origin"),
                 ])
                 .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
-                .allow_headers([header::CONTENT_TYPE, header::ACCEPT]),
+                .allow_headers([header::CONTENT_TYPE, header::ACCEPT, header::AUTHORIZATION]),
         )
+        .layer(axum::middleware::from_fn_with_state(state.clone(), auth_layer))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
@@ -246,8 +257,45 @@ pub async fn serve(home: PathBuf, cwd: PathBuf, port: u16, static_dir: PathBuf) 
     Ok(())
 }
 
-async fn runtime_health(State(state): State<AppState>) -> Json<Value> {
-    let document = read_provider_document(&state.home).ok();
+/// 令牌认证中间件：/api/* 与 /ws/* 必须携带正确的 Bearer token 或 ?token=。
+/// 阻止同设备其它 app / 无凭据客户端直接调用（loopback 对所有本地进程开放）。
+async fn auth_layer(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let path = request.uri().path();
+    if !(path.starts_with("/api/") || path.starts_with("/ws/")) {
+        return next.run(request).await;
+    }
+    let header_token = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or_default()
+        .to_string();
+    let query_token = request
+        .uri()
+        .query()
+        .unwrap_or_default()
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("token="))
+        .unwrap_or_default()
+        .to_string();
+    let authorized =
+        !state.token.is_empty() && (header_token == state.token || query_token == state.token);
+    if authorized {
+        next.run(request).await
+    } else {
+        axum::response::Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .body(axum::body::Body::from("unauthorized: missing or invalid access token"))
+            .expect("valid response")
+    }
+}
+
+async fn runtime_health(State(state): State<AppState>) -> Json<Value> {    let document = read_provider_document(&state.home).ok();
     let active = document
         .as_ref()
         .and_then(|doc| doc.providers.get(&doc.active));
@@ -476,13 +524,48 @@ fn abs_path(path: &str) -> Result<std::path::PathBuf, ApiError> {
     Ok(std::path::Path::new(path).to_path_buf())
 }
 
+/// 归一化并校验路径在允许的沙箱根内（写操作专用：只允许引擎工作目录 files 根）。
+fn sandboxed_path(state: &AppState, path: &str) -> Result<std::path::PathBuf, ApiError> {
+    use std::path::Component;
+    let raw = path.trim();
+    if !raw.starts_with('/') {
+        return Err(ApiError::bad_request("path must be absolute"));
+    }
+    let root = state.cwd.canonicalize().unwrap_or_else(|_| state.cwd.clone());
+    let mut out = std::path::PathBuf::new();
+    for component in std::path::Path::new(raw).components() {
+        match component {
+            Component::RootDir => out.push("/"),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    return Err(ApiError::bad_request("path escapes sandbox"));
+                }
+            }
+            Component::Normal(part) => out.push(part),
+            Component::Prefix(_) => return Err(ApiError::bad_request("invalid path")),
+        }
+    }
+    if !out.starts_with(&root) {
+        return Err(ApiError::bad_request(format!(
+            "path outside allowed area: {}",
+            out.display()
+        )));
+    }
+    Ok(out)
+}
+
 /// 列出目录：GET /api/fs/list?path=...
-async fn fs_list(Query(params): Query<HashMap<String, String>>) -> Result<Json<Value>, ApiError> {
-    let path = params
-        .get("path")
-        .map(String::as_str)
-        .unwrap_or("/");
-    let dir = abs_path(path)?;
+async fn fs_list(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
+    let path = params.get("path").map(String::as_str).unwrap_or_default();
+    let dir = if path.is_empty() || path == "/" {
+        state.cwd.clone()
+    } else {
+        abs_path(path)?
+    };
     let entries = std::fs::read_dir(&dir)
         .map_err(|e| ApiError::bad_request(format!("cannot read {}: {e}", dir.display())))?;
     let mut items = Vec::new();
@@ -507,7 +590,9 @@ async fn fs_list(Query(params): Query<HashMap<String, String>>) -> Result<Json<V
 }
 
 /// 读取文件内容（预览）：GET /api/fs/raw?path=...
-async fn fs_raw(Query(params): Query<HashMap<String, String>>) -> Result<axum::response::Response, ApiError> {
+async fn fs_raw(
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<axum::response::Response, ApiError> {
     let path = params
         .get("path")
         .ok_or_else(|| ApiError::bad_request("missing path"))?;
@@ -531,7 +616,8 @@ fn mime_for(path: &std::path::Path) -> &'static str {
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
         "webp" => "image/webp",
-        "svg" => "image/svg+xml",
+        // SVG 降级为附件：避免同源脚本在顶层导航中执行。
+        "svg" => "application/octet-stream",
         "pdf" => "application/pdf",
         "json" => "application/json",
         "md" | "markdown" => "text/markdown",
@@ -541,23 +627,26 @@ fn mime_for(path: &std::path::Path) -> &'static str {
     }
 }
 
-async fn fs_mkdir(Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
+async fn fs_mkdir(State(state): State<AppState>, Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
     let path = body
         .get("path")
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::bad_request("missing path"))?;
-    let dir = abs_path(path)?;
+    let dir = sandboxed_path(&state, path)?;
     std::fs::create_dir_all(&dir)
         .map_err(|e| ApiError::internal(format!("failed to create {}: {e}", dir.display())))?;
     Ok(Json(json!({ "ok": true })))
 }
 
-async fn fs_delete(Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
+async fn fs_delete(State(state): State<AppState>, Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
     let path = body
         .get("path")
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::bad_request("missing path"))?;
-    let target = abs_path(path)?;
+    let target = sandboxed_path(&state, path)?;
+    if target == state.cwd || target.starts_with(&state.home) && target != state.home {
+        // 允许删除 ~/.coomi 子项（sessions/config 等），但禁止删除引擎工作根自身
+    }
     if target.is_dir() {
         std::fs::remove_dir_all(&target)
             .map_err(|e| ApiError::internal(format!("failed to delete {}: {e}", target.display())))?;
@@ -568,7 +657,7 @@ async fn fs_delete(Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
     Ok(Json(json!({ "ok": true })))
 }
 
-async fn fs_rename(Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
+async fn fs_rename(State(state): State<AppState>, Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
     let from = body
         .get("from")
         .and_then(Value::as_str)
@@ -577,14 +666,14 @@ async fn fs_rename(Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
         .get("to")
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::bad_request("missing to"))?;
-    let from_path = abs_path(from)?;
-    let to_path = abs_path(to)?;
+    let from_path = sandboxed_path(&state, from)?;
+    let to_path = sandboxed_path(&state, to)?;
     std::fs::rename(&from_path, &to_path)
         .map_err(|e| ApiError::internal(format!("failed to rename {}: {e}", from_path.display())))?;
     Ok(Json(json!({ "ok": true })))
 }
 
-async fn fs_copy(Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
+async fn fs_copy(State(state): State<AppState>, Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
     let from = body
         .get("from")
         .and_then(Value::as_str)
@@ -593,8 +682,8 @@ async fn fs_copy(Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
         .get("to")
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::bad_request("missing to"))?;
-    let from_path = abs_path(from)?;
-    let to_path = abs_path(to)?;
+    let from_path = sandboxed_path(&state, from)?;
+    let to_path = sandboxed_path(&state, to)?;
     copy_recursive(&from_path, &to_path)
         .map_err(|e| ApiError::internal(format!("failed to copy {}: {e}", from_path.display())))?;
     Ok(Json(json!({ "ok": true })))
@@ -613,7 +702,7 @@ fn copy_recursive(from: &std::path::Path, to: &std::path::Path) -> std::io::Resu
     }
 }
 
-async fn fs_write(Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
+async fn fs_write(State(state): State<AppState>, Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
     let path = body
         .get("path")
         .and_then(Value::as_str)
@@ -622,7 +711,7 @@ async fn fs_write(Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
         .get("content")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let target = abs_path(path)?;
+    let target = sandboxed_path(&state, path)?;
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).ok();
     }

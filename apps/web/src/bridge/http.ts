@@ -15,14 +15,34 @@ function deriveBase(): string {
 
 export const API_BASE = deriveBase()
 
+/** 引擎访问令牌：由 Android 侧注入页面 URL query（?token=…）。 */
+export function engineToken(): string {
+  try {
+    return new URLSearchParams(window.location.search).get('token') ?? ''
+  } catch {
+    return ''
+  }
+}
+
+/** 带引擎令牌的 fetch：所有 /api/* 与 /ws/* 请求必须携带 Bearer token。 */
+export async function authedFetch(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  const headers = new Headers(init?.headers)
+  const token = engineToken()
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+  return fetch(input, { ...init, headers })
+}
+
 export async function apiGet<T>(path: string): Promise<T> {
-  const r = await fetch(`${API_BASE}${path}`, { headers: { Accept: 'application/json' } })
+  const r = await authedFetch(`${API_BASE}${path}`, { headers: { Accept: 'application/json' } })
   if (!r.ok) throw new Error(`GET ${path} → ${r.status}`)
   return r.json() as Promise<T>
 }
 
 export async function apiSend<T>(path: string, method: 'POST' | 'DELETE', body?: unknown): Promise<T> {
-  const r = await fetch(`${API_BASE}${path}`, {
+  const r = await authedFetch(`${API_BASE}${path}`, {
     method,
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     body: body !== undefined ? JSON.stringify(body) : undefined,

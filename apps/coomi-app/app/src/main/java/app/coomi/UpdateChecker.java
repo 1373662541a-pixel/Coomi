@@ -5,6 +5,7 @@ import android.app.DownloadManager;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.net.Uri;
@@ -87,9 +88,11 @@ public final class UpdateChecker {
     }
 
     private static void downloadAndInstall(Context context, String apkUrl, String version) {
+        // 远端 version 拼入文件名前做净化，防路径穿越。
+        String safeVersion = version.replaceAll("[^A-Za-z0-9._-]", "_");
         File dir = new File(context.getFilesDir(), "downloads");
         if (!dir.isDirectory()) dir.mkdirs();
-        File target = new File(dir, "coomi-update-" + version + ".apk");
+        File target = new File(dir, "coomi-update-" + safeVersion + ".apk");
         if (target.isFile()) target.delete();
 
         DownloadManager.Request request = new DownloadManager.Request(Uri.parse(apkUrl));
@@ -123,6 +126,11 @@ public final class UpdateChecker {
                         Toast.makeText(ctx, "更新包下载失败", Toast.LENGTH_LONG).show();
                         return;
                     }
+                    // 安装前校验签名与当前安装一致，防止更新源被篡改。
+                    if (!signatureMatches(ctx, downloaded)) {
+                        Toast.makeText(ctx, "更新包签名校验失败，已取消安装", Toast.LENGTH_LONG).show();
+                        return;
+                    }
                     Uri uri = FileProvider.getUriForFile(ctx, ctx.getPackageName() + ".fileprovider", downloaded);
                     Intent install = new Intent(Intent.ACTION_VIEW);
                     install.setDataAndType(uri, "application/vnd.android.package-archive");
@@ -136,6 +144,23 @@ public final class UpdateChecker {
         };
         context.registerReceiver(receiver,
             new android.content.IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE));
+    }
+
+    /** 校验下载的 APK 签名证书与当前安装一致（防 MITM/被篡改的更新包）。 */
+    private static boolean signatureMatches(Context context, File apk) {
+        try {
+            PackageManager pm = context.getPackageManager();
+            PackageInfo current = pm.getPackageInfo(context.getPackageName(), PackageManager.GET_SIGNATURES);
+            PackageInfo remote = pm.getPackageArchiveInfo(apk.getAbsolutePath(), PackageManager.GET_SIGNATURES);
+            if (current == null || remote == null
+                || current.signatures == null || remote.signatures == null
+                || current.signatures.length == 0 || remote.signatures.length == 0) {
+                return false;
+            }
+            return current.signatures[0].toCharsString().equals(remote.signatures[0].toCharsString());
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     /** 供 Dashboard 使用：弹结果对话框。 */

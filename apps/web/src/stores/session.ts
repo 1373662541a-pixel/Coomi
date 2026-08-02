@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed, shallowRef } from 'vue'
 import { createTransport, type Transport } from '@/bridge'
+import { authedFetch } from '@/bridge/http'
 import { isDemoMode } from '@/bridge/demoMode'
 import type { AgentEvent } from '@/protocol/events'
 import type { InboundEnvelope } from '@/protocol/commands'
@@ -240,7 +241,7 @@ export const useSessionStore = defineStore('session', () => {
   /** 从引擎 /api/sessions/{id} 恢复完整历史；成功返回 true。 */
   async function restoreFromEngine(id: string): Promise<boolean> {
     try {
-      const res = await fetch(`/api/sessions/${id}`)
+      const res = await authedFetch(`/api/sessions/${id}`)
       if (!res.ok) return false
       const session = await res.json()
       const messages = (session.messages ?? []) as ChatMessageJson[]
@@ -331,7 +332,7 @@ export const useSessionStore = defineStore('session', () => {
   async function setSessionCwd(path: string): Promise<boolean> {
     const id = sessionId.value
     try {
-      const res = await fetch(`/api/sessions/${id}/cwd`, {
+      const res = await authedFetch(`/api/sessions/${id}/cwd`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ cwd: path }),

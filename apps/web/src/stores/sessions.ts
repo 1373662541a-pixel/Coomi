@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { isDemoMode } from '@/bridge/demoMode'
+import { authedFetch } from '@/bridge/http'
 import type { Timelineitem } from './viewModel'
 
 /**
@@ -254,7 +255,7 @@ export const useSessionsStore = defineStore('sessions', () => {
    */
   async function syncFromEngine(): Promise<boolean> {
     try {
-      const res = await fetch('/api/sessions')
+      const res = await authedFetch('/api/sessions')
       if (!res.ok) return false
       const data = await res.json()
       const remote = (data.sessions ?? []) as Array<{

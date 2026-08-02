@@ -77,6 +77,9 @@ enum Command {
         /// Loopback port to listen on.
         #[arg(long, default_value_t = 8765)]
         port: u16,
+        /// Access token required for /api/* and /ws/* (Bearer header or ?token=).
+        #[arg(long, default_value = "")]
+        token: String,
         /// Built frontend directory to serve.
         #[arg(long)]
         static_dir: PathBuf,
@@ -152,8 +155,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let paths = resolve_paths(&cli)?;
     match &cli.command {
-        Some(Command::Serve { port, static_dir }) => {
-            web::serve(paths.home, paths.cwd, *port, static_dir.clone()).await?
+        Some(Command::Serve { port, token, static_dir }) => {
+            web::serve(paths.home, paths.cwd, *port, token.clone(), static_dir.clone()).await?
         }
         Some(Command::Models) => print_models(&load_registry(&paths.home)?),
         Some(Command::Sessions { all }) => print_sessions(

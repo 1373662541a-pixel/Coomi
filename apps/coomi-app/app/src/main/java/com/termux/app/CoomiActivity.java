@@ -230,9 +230,11 @@ public class CoomiActivity extends Activity {
         if (mPageLoaded) return;
         mPageLoaded = true;
         Logger.logInfo(LOG_TAG, "Engine ready on port " + port);
+        // 访问令牌：由 Android 侧注入 URL query，前端 JS 读取后用于所有 API/WS 调用。
+        String token = mCoomiService != null ? mCoomiService.getEngineToken() : "";
         // 支持从控制台直达特定前端路由（如 SKILL/MCP 管理页 #/catalog）。
         String route = getIntent().getStringExtra(EXTRA_ROUTE);
-        String url = "http://127.0.0.1:" + port + "/"
+        String url = "http://127.0.0.1:" + port + "/?token=" + token
             + (route != null && route.startsWith("#") ? route : "");
         final String target = url;
         runOnUiThread(() -> mWebView.loadUrl(target));
@@ -270,6 +272,16 @@ public class CoomiActivity extends Activity {
                 if ("coomi".equals(request.getUrl().getScheme())
                     && "dashboard".equals(request.getUrl().getHost())) {
                     openDashboard();
+                    return true;
+                }
+                // 外部链接（非本机 loopback）交给系统浏览器，避免远程页面留在 WebView
+                // 内继续持有 JS bridge（防跨域调用 openFile/exportFile 等敏感桥方法）。
+                String host = request.getUrl().getHost();
+                if (!"127.0.0.1".equals(host) && !"localhost".equals(host)) {
+                    try {
+                        Intent external = new Intent(Intent.ACTION_VIEW, request.getUrl());
+                        startActivity(external);
+                    } catch (Exception ignored) { /* 无浏览器则留在 WebView */ }
                     return true;
                 }
                 return false;

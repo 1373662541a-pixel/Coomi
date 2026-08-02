@@ -32,6 +32,8 @@ public class CoomiService extends Service {
 
     private volatile Process mEngineProcess;
     private volatile int mEnginePort = CoomiConstants.DEFAULT_ENGINE_PORT;
+    /** 每次引擎启动生成的随机访问令牌（WebView 经 URL query 注入，防同设备 app 直连）。 */
+    private volatile String mEngineToken = "";
     private volatile boolean mIsEngineRunning;
     private volatile boolean mUpdateInProgress;
 
@@ -233,6 +235,8 @@ public class CoomiService extends Service {
             }
 
             int port = findFreePort();
+            String token = generateToken();
+            mEngineToken = token;
             String command = termuxEnvironment()
                 + "export RUST_BACKTRACE=1; cd " + shellQuote(home()) + "; "
                 + "exec >>" + shellQuote(CoomiConstants.ENGINE_LOG_PATH) + " 2>&1; "
@@ -240,6 +244,7 @@ public class CoomiService extends Service {
                 + " --home " + shellQuote(CoomiConstants.COOMI_CONFIG_DIR)
                 + " --cwd " + shellQuote(home())
                 + " serve --port " + port
+                + " --token " + shellQuote(token)
                 + " --static-dir " + shellQuote(web.getAbsolutePath());
             ProcessBuilder builder = new ProcessBuilder("/system/bin/sh", "-c", command);
             builder.redirectErrorStream(true);
@@ -349,13 +354,27 @@ public class CoomiService extends Service {
     }
 
     private static int findFreePort() {
-        for (int port : CoomiConstants.PORT_CANDIDATES) {
+        // 随机高位端口（缩小同设备其它 app 枚举命中的概率）。
+        java.util.Random random = new java.util.Random();
+        for (int attempt = 0; attempt < 50; attempt++) {
+            int port = 20000 + random.nextInt(40000);
             try (java.net.ServerSocket socket = new java.net.ServerSocket(port)) {
                 return socket.getLocalPort();
             } catch (Exception ignored) {}
         }
         return CoomiConstants.DEFAULT_ENGINE_PORT;
     }
+
+    /** 生成 128 位十六进制随机令牌（Android 端与 WebView 共享，不落盘不写 JS）。 */
+    private static String generateToken() {
+        byte[] bytes = new byte[64];
+        new java.security.SecureRandom().nextBytes(bytes);
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) sb.append(String.format("%02x", b));
+        return sb.toString();
+    }
+
+    public String getEngineToken() { return mEngineToken; }
 
     private boolean checkHealth(int port) {
         try {
