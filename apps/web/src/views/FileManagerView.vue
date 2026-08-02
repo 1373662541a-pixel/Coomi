@@ -45,7 +45,11 @@ async function api(method: string, url: string, body?: unknown): Promise<any> {
     body: body ? JSON.stringify(body) : undefined,
   })
   const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(data.message ?? `HTTP ${res.status}`)
+  if (!res.ok) {
+    // 无权限目录（应用私有目录之上）明确提示「禁止访问」。
+    if (res.status === 403) throw new Error('禁止访问')
+    throw new Error(data.error ?? data.message ?? `HTTP ${res.status}`)
+  }
   return data
 }
 
@@ -207,7 +211,7 @@ onMounted(() => void load(path.value))
       </div>
 
       <p v-if="notice" class="notice">{{ notice }}</p>
-      <p v-if="error" class="notice err">加载失败：{{ error }}</p>
+      <p v-if="error" class="notice err">{{ error === '禁止访问' ? '禁止访问' : `加载失败：${error}` }}</p>
 
       <!-- 工具条 -->
       <div class="toolbar">
@@ -281,6 +285,8 @@ onMounted(() => void load(path.value))
 </template>
 
 <style scoped>
+.page { display: flex; flex-direction: column; height: 100%; background: var(--page); }
+.body { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 12px calc(var(--safe-bottom) + 24px); }
 .crumbs { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; margin-bottom: 10px; }
 .crumb {
   padding: 5px 6px; border-radius: var(--r-sm); font-size: 13px; color: var(--blue);
@@ -326,9 +332,9 @@ onMounted(() => void load(path.value))
 .btn.primary { background: var(--blue); color: #fff; }
 .btn.ghost { background: var(--fill-strong); color: var(--text); }
 .preview { height: 72vh; display: flex; flex-direction: column; }
-.pv-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.pv-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
 .pv-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-size: 14px; }
-.pv-actions { display: flex; gap: 6px; }
+.pv-actions { display: flex; gap: 6px; flex-shrink: 0; }
 .pv-body { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; }
 .pv-img { max-width: 100%; max-height: 100%; border-radius: var(--r-sm); }
 .pv-text { width: 100%; margin: 0; padding: 10px; background: var(--code-bg); border-radius: var(--r-sm); font-family: var(--font-mono); font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-all; color: var(--code-text); }

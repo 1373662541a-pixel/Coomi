@@ -48,6 +48,7 @@ public class CoomiDashboardActivity extends Activity {
     private View mOpenWebUiButton;
     private View mWebUiButtonContainer;
     private View mCatalogButton;
+    private View mFilesButton;
     private View mCheckUpdateButton;
     private View mPermissionSettingsButton;
     private View mProviderSettingsButton;
@@ -91,6 +92,7 @@ public class CoomiDashboardActivity extends Activity {
         mOpenWebUiButton = findViewById(R.id.btn_open_webui);
         mWebUiButtonContainer = findViewById(R.id.webui_button_container);
         mCatalogButton = findViewById(R.id.btn_open_catalog);
+        mFilesButton = findViewById(R.id.btn_open_files);
         mCheckUpdateButton = findViewById(R.id.btn_check_update);
         mPermissionSettingsButton = findViewById(R.id.btn_permission_settings);
         mProviderSettingsButton = findViewById(R.id.btn_provider_settings);
@@ -103,6 +105,7 @@ public class CoomiDashboardActivity extends Activity {
         mOpenTerminalButton.setOnClickListener(v -> openTerminal());
         mOpenWebUiButton.setOnClickListener(v -> openWebUi());
         mCatalogButton.setOnClickListener(v -> openCatalog());
+        mFilesButton.setOnClickListener(v -> openFiles());
         mCheckUpdateButton.setOnClickListener(v -> checkUpdate());
         mPermissionSettingsButton.setOnClickListener(v -> openPermissionSettings());
         mProviderSettingsButton.setOnClickListener(v -> openProviderSettings());
@@ -317,6 +320,13 @@ public class CoomiDashboardActivity extends Activity {
     private void openCatalog() {
         Intent intent = new Intent(this, com.termux.app.CoomiActivity.class);
         intent.putExtra(com.termux.app.CoomiActivity.EXTRA_ROUTE, "#/catalog");
+        startActivity(intent);
+    }
+
+    /** 打开应用内文件管理页（WebView 直达 #/files）。 */
+    private void openFiles() {
+        Intent intent = new Intent(this, com.termux.app.CoomiActivity.class);
+        intent.putExtra(com.termux.app.CoomiActivity.EXTRA_ROUTE, "#/files");
         startActivity(intent);
     }
 

@@ -1,12 +1,12 @@
 {
-  "version": "1.1.0",
-  "versionCode": 4,
+  "version": "1.2.0",
+  "versionCode": 5,
   "platform": "android",
   "arch": "arm64-v8a",
   "minAndroid": "7.0",
-  "file": "Coomi-Android-arm64-v1.1.0.apk",
-  "size": 46062453,
-  "sha256": "3f0b387931fff161a26d7be2daea5f7e0f2aa99cfc6c17c81b7c432bc9b7da34",
-  "publishedAt": "2026-08-02T05:00:00Z",
-  "notes": "v1.1.0 更新内容：\n• 独立包名 com.coomi.android\n• 修复联网搜索与工具执行\n• 会话上下文隔离（按目录）\n• 停止按钮真正终止工具调用\n• 会话/目录管理、文件管理、SKILL/MCP 管理\n• 暗色主题跟随系统、检查更新"
+  "file": "Coomi-Android-arm64-v1.2.0.apk",
+  "size": 40894050,
+  "sha256": "ACE1AEBCFFBCC8AA6D074E130070F2B2C0C97F17812C2B252EA6F45D287DF646",
+  "publishedAt": "2026-08-02T16:40:00Z",
+  "notes": "v1.2.0 更新内容：\n• 修复引擎无法启动\n• 打开应用先进控制台，再进入对话\n• 控制台新增文件管理入口（新建/重命名/删除/复制/粘贴/复制路径/打开）\n• SKILL/MCP 管理卡片化重做，安装需二次确认\n• 无权限目录明确提示「禁止访问」\n• 会话删除同步清理引擎记录，删除前二次确认\n• 修复对话界面右侧显示不全等布局问题"
 }

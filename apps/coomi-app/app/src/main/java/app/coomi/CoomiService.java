@@ -378,8 +378,12 @@ public class CoomiService extends Service {
 
     private boolean checkHealth(int port) {
         try {
-            HttpURLConnection connection = (HttpURLConnection) new URL(
-                "http://127.0.0.1:" + port + CoomiConstants.HEALTH_ENDPOINT).openConnection();
+            String url = "http://127.0.0.1:" + port + CoomiConstants.HEALTH_ENDPOINT;
+            // 兜底：即使引擎侧未放行探活端点，也携带令牌重试。
+            if (mEngineToken != null && !mEngineToken.isEmpty()) {
+                url += "?token=" + java.net.URLEncoder.encode(mEngineToken, "UTF-8");
+            }
+            HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
             connection.setConnectTimeout(HEALTH_CHECK_TIMEOUT_MS);
             connection.setReadTimeout(HEALTH_CHECK_TIMEOUT_MS);
             int responseCode = connection.getResponseCode();

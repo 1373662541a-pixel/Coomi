@@ -2,8 +2,8 @@
 /**
  * 会话历史整页版（抽屉的补充：多了搜索结果计数和「清空全部」）。
  *
- * 列表来自本机 localStorage —— bridge 没有列出会话的接口，引擎侧的会话也只在
- * 内存里，所以这页管的是本机记录，页底把这件事说清楚。
+ * 列表来自引擎磁盘会话（/api/sessions 为权威源），本地 localStorage 保存标题/置顶等
+ * 元数据与最近对话正文；删除会话会同时删除引擎磁盘记录与本地记录。
  */
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
@@ -17,6 +17,7 @@ const session = useSessionStore()
 const sessions = useSessionsStore()
 
 const menuFor = ref<SessionMeta | null>(null)
+const askDelete = ref<SessionMeta | null>(null)
 const askClear = ref(false)
 
 function open(id: string) {
@@ -34,8 +35,9 @@ function doPin() {
   menuFor.value = null
 }
 
-function doDelete() {
-  if (menuFor.value) session.deleteSession(menuFor.value.id)
+function confirmDelete() {
+  if (askDelete.value) session.deleteSession(askDelete.value.id)
+  askDelete.value = null
   menuFor.value = null
 }
 
@@ -92,8 +94,9 @@ function doClear() {
       </template>
       <button v-if="sessions.metas.length" class="btn btn-danger wide" @click="askClear = true">清空全部记录</button>
       <p class="note">
-        历史保存在这台手机上，最近 12 条会留完整对话内容。用同一个会话继续时，只要引擎进程
-        还活着就是真的接上了上下文；引擎重启过的话，就只剩本机这份记录。
+        历史会话保存在引擎里（这台手机的应用私有目录），最近 12 条会留完整对话内容。
+        用同一个会话继续时，只要引擎进程还活着就是真的接上了上下文；引擎重启过的话，
+        就只剩本机这份记录。
       </p>
 
     </main>
@@ -104,10 +107,22 @@ function doClear() {
         <button class="sact" @click="doPin">
           <CoomiIcon name="pin" :size="17" /><span>{{ menuFor.pinned ? '取消置顶' : '置顶' }}</span>
         </button>
-        <button class="sact danger" @click="doDelete">
+        <button class="sact danger" @click="askDelete = menuFor; menuFor = null">
           <CoomiIcon name="trash" :size="17" /><span>删除会话</span>
         </button>
         <button class="sact plain" @click="menuFor = null"><span>取消</span></button>
+      </div>
+    </div>
+
+    <div v-if="askDelete" class="scrim" @click.self="askDelete = null">
+      <div class="sheet">
+        <div class="grip" />
+        <p class="stitle">删除这个会话？</p>
+        <p class="ssub">「{{ askDelete.title }}」的引擎记录与本机记录都会被删除，无法恢复。</p>
+        <div class="sacts">
+          <button class="btn" @click="askDelete = null">取消</button>
+          <button class="btn btn-danger" @click="confirmDelete">删除</button>
+        </div>
       </div>
     </div>
 

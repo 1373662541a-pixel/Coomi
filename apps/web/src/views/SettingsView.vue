@@ -165,5 +165,5 @@ function isCurrent(providerId: string, model: string): boolean {
 .conn { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-3); }
 .conn i { width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); }
 .conn.on i { background: var(--ok); }
-.sid { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-3); }
+.sid { max-width: 45vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 11.5px; color: var(--text-3); }
 </style>

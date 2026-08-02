@@ -180,7 +180,9 @@ function onAnswer(callId: string, text: string) { session.answerQuestion(callId,
   transition: transform .3s cubic-bezier(.22, .68, .19, 1), border-radius .3s;
 }
 .shell.pushed {
-  transform: translateX(46px) scale(.94);
+  /* origin 为 left center 时，scale(.94) 使右边缘内缩 6%；
+     translateX(6%) 精确抵消，保证右侧始终贴住屏幕右缘（不会右侧被裁）。 */
+  transform: translateX(6%) scale(.94);
   border-radius: 20px;
   overflow: hidden;
   box-shadow: var(--shadow-2);

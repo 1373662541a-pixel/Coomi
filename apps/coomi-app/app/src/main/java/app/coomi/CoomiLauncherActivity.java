@@ -237,10 +237,11 @@ public class CoomiLauncherActivity extends Activity {
             return;
         }
 
-        // Chat is the product's main surface; the dashboard is reachable from inside it.
-        Logger.logInfo(LOG_TAG, "All ready, routing to chat");
+        // 控制台是 app 的主界面：打开 app 先进控制台（引擎状态 + 各功能入口），
+        // 从控制台再进入对话，符合安卓用户「回到主界面」的交互习惯。
+        Logger.logInfo(LOG_TAG, "All ready, routing to dashboard");
         mStatusText.setText(R.string.coomi_starting);
-        Intent intent = new Intent(this, com.termux.app.CoomiActivity.class);
+        Intent intent = new Intent(this, CoomiDashboardActivity.class);
         startActivity(intent);
         finish();
     }

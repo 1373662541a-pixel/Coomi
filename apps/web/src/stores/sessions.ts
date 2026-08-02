@@ -177,6 +177,8 @@ export const useSessionsStore = defineStore('sessions', () => {
       /* ignore */
     }
     persist()
+    // 同步删除引擎磁盘上的会话记录（权威源），否则下次 syncFromEngine 时“复活”。
+    authedFetch(`/api/sessions/${id}`, { method: 'DELETE' }).catch(() => {})
   }
 
   /** Migrate pre-Rust session ids while preserving the local transcript and metadata. */
@@ -243,6 +245,8 @@ export const useSessionsStore = defineStore('sessions', () => {
       } catch {
         /* ignore */
       }
+      // 同步删除引擎磁盘记录，避免清空后从引擎列表“复活”。
+      authedFetch(`/api/sessions/${m.id}`, { method: 'DELETE' }).catch(() => {})
     }
     metas.value = []
     persist()

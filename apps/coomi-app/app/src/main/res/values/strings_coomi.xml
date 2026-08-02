@@ -97,6 +97,8 @@
     <string name="coomi_dash_browser_desc">用系统浏览器访问本机引擎</string>
     <string name="coomi_dash_catalog">SKILL / MCP 管理</string>
     <string name="coomi_dash_catalog_desc">安装与管理 Skills 和 MCP Server</string>
+    <string name="coomi_dash_files">文件管理</string>
+    <string name="coomi_dash_files_desc">浏览独立环境，管理项目文件</string>
     <string name="coomi_dash_check_update">检查更新</string>
     <string name="coomi_dash_check_update_desc">从更新源获取新版本并下载安装</string>
     <string name="coomi_dash_checking">正在检查更新…</string>

@@ -80,7 +80,7 @@ function submitCustom() {
   width: 30px; height: 30px; border-radius: 9px;
   background: var(--blue-soft); color: var(--blue);
 }
-.question { padding-top: 4px; font-size: 15.5px; font-weight: 600; line-height: 1.5; color: var(--text); }
+.question { flex: 1; min-width: 0; word-break: break-word; padding-top: 4px; font-size: 15.5px; font-weight: 600; line-height: 1.5; color: var(--text); }
 
 .options { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
 .opt {

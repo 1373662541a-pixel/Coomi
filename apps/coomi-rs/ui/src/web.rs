@@ -189,7 +189,7 @@ pub async fn serve(
             post(discover_provider_models),
         )
         .route("/api/sessions", get(list_sessions))
-        .route("/api/sessions/{id}", get(get_session))
+        .route("/api/sessions/{id}", get(get_session).delete(delete_session))
         .route("/api/sessions/{id}/cwd", post(set_session_cwd))
         .route("/api/fs/list", get(fs_list))
         .route("/api/fs/raw", get(fs_raw))
@@ -268,6 +268,11 @@ async fn auth_layer(
     if !(path.starts_with("/api/") || path.starts_with("/ws/")) {
         return next.run(request).await;
     }
+    // 运行时探活端点放行：Android 侧在引擎启动阶段无法携带令牌做健康检查，
+    // 若此处拦截，引擎会被误判为「未启动」而陷入无限重启。
+    if path == "/api/runtime/health" || path == "/api/runtime/port" {
+        return next.run(request).await;
+    }
     let header_token = request
         .headers()
         .get(header::AUTHORIZATION)
@@ -283,8 +288,10 @@ async fn auth_layer(
         .find_map(|pair| pair.strip_prefix("token="))
         .unwrap_or_default()
         .to_string();
-    let authorized =
-        !state.token.is_empty() && (header_token == state.token || query_token == state.token);
+    // token 为空时视为未启用令牌认证（例如命令行手动启动引擎调试），不做拦截。
+    let authorized = state.token.is_empty()
+        || header_token == state.token
+        || query_token == state.token;
     if authorized {
         next.run(request).await
     } else {
@@ -356,6 +363,20 @@ async fn get_session(
         ApiError::internal(format!("failed to load session {id}: {error:#}"))
     })?;
     Ok(Json(json!(session)))
+}
+
+/// 删除会话磁盘记录（与会话列表权威源一致，删除后不会在刷新时“复活”）。
+async fn delete_session(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let store = SessionStore::new(&state.home);
+    let session_id =
+        Uuid::parse_str(&id).map_err(|_| ApiError::bad_request("invalid session id"))?;
+    let deleted = store
+        .delete(session_id)
+        .map_err(|error| ApiError::internal(format!("failed to delete session {id}: {error:#}")))?;
+    Ok(Json(json!({ "deleted": deleted })))
 }
 
 /// 已安装 MCP server 名 -> 是否启用（mcp_servers.json）。
@@ -566,8 +587,14 @@ async fn fs_list(
     } else {
         abs_path(path)?
     };
-    let entries = std::fs::read_dir(&dir)
-        .map_err(|e| ApiError::bad_request(format!("cannot read {}: {e}", dir.display())))?;
+    let entries = std::fs::read_dir(&dir).map_err(|e| match e.kind() {
+        // 应用私有目录之外的系统目录（/data、/storage 等）对引擎无权限：
+        // 明确提示「禁止访问」，而不是笼统的 400 加载失败。
+        std::io::ErrorKind::PermissionDenied => {
+            ApiError::forbidden(format!("禁止访问：{}", dir.display()))
+        }
+        _ => ApiError::bad_request(format!("cannot read {}: {e}", dir.display())),
+    })?;
     let mut items = Vec::new();
     for entry in entries.flatten() {
         let meta = entry.metadata().ok();
@@ -600,8 +627,12 @@ async fn fs_raw(
     if !file.is_file() {
         return Err(ApiError::bad_request(format!("not a file: {}", file.display())));
     }
-    let bytes = std::fs::read(&file)
-        .map_err(|e| ApiError::internal(format!("failed to read {}: {e}", file.display())))?;
+    let bytes = std::fs::read(&file).map_err(|e| match e.kind() {
+        std::io::ErrorKind::PermissionDenied => {
+            ApiError::forbidden(format!("禁止访问：{}", file.display()))
+        }
+        _ => ApiError::internal(format!("failed to read {}: {e}", file.display())),
+    })?;
     let kind = mime_for(&file);
     Ok(axum::response::Response::builder()
         .header("Content-Type", kind)
@@ -1894,6 +1925,13 @@ impl ApiError {
         }
     }
 
+    fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: message.into(),
+        }
+    }
+
     fn bad_gateway(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_GATEWAY,
@@ -2001,7 +2039,8 @@ mod tests {
         store.save(&second).expect("save second session");
 
         let loaded =
-            load_or_create_web_session(&store, second.id, "provider", "model", project.path());
+            load_or_create_web_session(&store, second.id, "provider", "model", project.path())
+                .expect("load session");
         let serialized = serde_json::to_string(&loaded.messages).expect("serialize messages");
         assert!(serialized.contains("SECOND_SESSION_ONLY"));
         assert!(!serialized.contains("FIRST_SESSION_ONLY"));

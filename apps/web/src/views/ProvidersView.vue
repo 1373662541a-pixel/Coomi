@@ -298,7 +298,7 @@ function back() {
 .tile.on { background: var(--blue-soft); color: var(--blue); }
 .ctitle { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .cname { font-size: 15px; font-weight: 620; color: var(--text); }
-.cid { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-3); }
+.cid { min-width: 0; word-break: break-all; font-family: var(--font-mono); font-size: 11.5px; color: var(--text-3); }
 .badge {
   flex-shrink: 0; padding: 3px 10px; border-radius: var(--r-pill);
   background: var(--blue-soft); color: var(--blue); font-size: 11.5px; font-weight: 650;
