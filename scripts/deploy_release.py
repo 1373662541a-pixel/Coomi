@@ -20,20 +20,39 @@ import paramiko
 
 
 def parse_ssh_config(path):
-    """从 SSH-Agent 配置文件里解析 host/port/user/password。"""
+    """从 SSH-Agent 配置文件里解析 host/port/user/password（按行解析，避免“密码认证”误匹配）。"""
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         text = f.read()
-    ip = re.search(r"服务器IP:?\s*([\d.]+)", text)
-    port = re.search(r"SSH端口:?\s*(\d+)", text)
-    user = re.search(r"用户名:?\s*(\w+)", text)
-    pwd = re.search(r"密码:?\s*(\S+)", text)
+    ip = port = user = pwd = None
+    for line in text.splitlines():
+        raw = line.strip()
+        raw = raw.lstrip("-*·\u00b7")
+        raw = raw.strip()
+        if not raw or ":" not in raw and "：" not in raw:
+            continue
+        sep = "：" if "：" in raw else ":"
+        if sep not in raw:
+            continue
+        key, _, value = raw.partition(sep)
+        key = key.strip()
+        value = value.strip()
+        if not value:
+            continue
+        if "IP" in key and ip is None:
+            ip = value
+        elif "端口" in key and port is None:
+            port = value
+        elif "用户名" in key and user is None:
+            user = value
+        elif key == "密码" and pwd is None:
+            pwd = value
     if not (ip and pwd):
         raise SystemExit(f"无法从 {path} 解析连接信息")
     return {
-        "host": ip.group(1),
-        "port": int(port.group(1)) if port else 22,
-        "user": user.group(1) if user else "root",
-        "password": pwd.group(1).rstrip(),
+        "host": ip,
+        "port": int(port) if port else 22,
+        "user": user or "root",
+        "password": pwd,
     }
 
 
