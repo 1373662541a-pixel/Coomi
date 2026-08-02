@@ -644,8 +644,12 @@ async fn fs_delete(State(state): State<AppState>, Json(body): Json<Value>) -> Re
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::bad_request("missing path"))?;
     let target = sandboxed_path(&state, path)?;
-    if target == state.cwd || target.starts_with(&state.home) && target != state.home {
-        // 允许删除 ~/.coomi 子项（sessions/config 等），但禁止删除引擎工作根自身
+    // 禁止删除引擎工作根与配置根本身（防误删整片用户数据）。
+    if target == state.cwd {
+        return Err(ApiError::bad_request("cannot delete the engine working root"));
+    }
+    if target == state.home {
+        return Err(ApiError::bad_request("cannot delete the config root"));
     }
     if target.is_dir() {
         std::fs::remove_dir_all(&target)

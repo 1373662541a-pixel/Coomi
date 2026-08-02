@@ -8,6 +8,7 @@ import { useRouter } from 'vue-router'
 import { useSessionStore } from '@/stores/session'
 import PageHead from '@/components/PageHead.vue'
 import CoomiIcon from '@/components/CoomiIcon.vue'
+import { authedFetch } from '@/bridge/http'
 
 const router = useRouter()
 const session = useSessionStore()
@@ -38,7 +39,7 @@ const crumbs = computed(() => {
 })
 
 async function api(method: string, url: string, body?: unknown): Promise<any> {
-  const res = await fetch(url, {
+  const res = await authedFetch(url, {
     method,
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
     body: body ? JSON.stringify(body) : undefined,
@@ -166,7 +167,7 @@ async function openPreview() {
   previewText.value = ''
   if (isTextFile(e.name)) {
     try {
-      const res = await fetch(previewSrc.value)
+      const res = await authedFetch(previewSrc.value)
       previewText.value = (await res.text()).slice(0, 200000)
     } catch { previewText.value = '（无法读取）' }
   }

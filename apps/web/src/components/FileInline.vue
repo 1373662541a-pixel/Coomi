@@ -5,6 +5,7 @@
  * 用其它应用打开 / 复制路径。
  */
 import { computed, ref } from 'vue'
+import { authedFetch } from '@/bridge/http'
 import CoomiIcon from './CoomiIcon.vue'
 
 const props = defineProps<{ paths: string[] }>()
@@ -30,7 +31,7 @@ function openSheet(path: string) {
   previewText.value = ''
   open.value = true
   if (isTextFile(path)) {
-    void fetch(previewSrc.value)
+    void authedFetch(previewSrc.value)
       .then(r => r.text())
       .then(t => { previewText.value = t.slice(0, 200000) })
       .catch(() => { previewText.value = '（无法读取）' })

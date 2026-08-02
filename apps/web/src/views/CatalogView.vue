@@ -7,6 +7,7 @@ import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import PageHead from '@/components/PageHead.vue'
 import CoomiIcon from '@/components/CoomiIcon.vue'
+import { authedFetch } from '@/bridge/http'
 
 const router = useRouter()
 
@@ -46,7 +47,7 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const res = await fetch('/api/catalog')
+    const res = await authedFetch('/api/catalog')
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const data = await res.json()
     mcp.value = data.mcp ?? []
@@ -64,7 +65,7 @@ async function installMcp() {
   busy.value = item.id
   notice.value = ''
   try {
-    const res = await fetch('/api/catalog/mcp/install', {
+    const res = await authedFetch('/api/catalog/mcp/install', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: item.id, values: installValues.value }),
@@ -85,7 +86,7 @@ async function installSkill(item: SkillItem) {
   busy.value = item.id
   notice.value = ''
   try {
-    const res = await fetch('/api/catalog/skills/install', {
+    const res = await authedFetch('/api/catalog/skills/install', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: item.id }),
