@@ -86,8 +86,18 @@ android {
         debug {
             storeFile file('testkey_untrusted.jks')
             keyAlias 'alias'
-            storePassword 'xrj45yWGLbsO7W0v'
-            keyPassword 'xrj45yWGLbsO7W0v'
+            // 签名口令从 local.properties 读取（不入库）；缺失时明确报错，禁止明文回退。
+            def signingProps = new Properties()
+            def signingPropsFile = rootProject.file('local.properties')
+            if (signingPropsFile.exists()) {
+                signingPropsFile.withInputStream { signingProps.load(it) }
+            }
+            storePassword signingProps.getProperty('coomi.signing.storePassword')
+            keyPassword signingProps.getProperty('coomi.signing.keyPassword')
+            if (!storePassword || !keyPassword) {
+                throw new GradleException(
+                    '签名口令缺失：请在 local.properties 配置 coomi.signing.storePassword 与 coomi.signing.keyPassword')
+            }
         }
     }
 
