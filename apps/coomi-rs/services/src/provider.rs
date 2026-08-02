@@ -93,8 +93,7 @@ impl HttpModelProvider {
         let mut body = json!({
             "model": request.model,
             "messages": openai_messages(&request.messages)?,
-            "stream": true,
-            "stream_options": {"include_usage": true}
+            "stream": true
         });
         if !request.tools.is_empty() {
             body["tools"] = Value::Array(

@@ -128,8 +128,16 @@
     --user-bubble: var(--blue);
     --user-text: #ffffff;
   }
-}
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+/* 点击不出现蓝色高亮方块：WebView 的 tap highlight / focus ring 全部去掉，
+   交互反馈交给各组件自己的 :active 样式。 */
+*:focus { outline: none !important; }
+*:focus-visible { outline: none !important; }
+button, a, [role="button"], input, textarea, select, label {
+  -webkit-tap-highlight-color: transparent !important;
+  -webkit-touch-callout: none;
+}
+::selection { background: var(--blue-soft); }
 html, body, #app { height: 100%; margin: 0; }
 body {
   background: var(--bg);

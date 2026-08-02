@@ -9,12 +9,14 @@ import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSessionStore } from '@/stores/session'
 import { useSessionsStore, formatSessionTime, type SessionMeta } from '@/stores/sessions'
+import { useConfigStore } from '@/stores/config'
 import PageHead from '@/components/PageHead.vue'
 import CoomiIcon from '@/components/CoomiIcon.vue'
 
 const router = useRouter()
 const session = useSessionStore()
 const sessions = useSessionsStore()
+const config = useConfigStore()
 
 const menuFor = ref<SessionMeta | null>(null)
 const askDelete = ref<SessionMeta | null>(null)
@@ -69,36 +71,36 @@ function doClear() {
     </div>
 
     <main class="body">
+      <!-- 历史会话列表始终可见；「全局会话记忆」开关只控制模型能否读取这些记录。 -->
       <p v-if="sessions.metas.length === 0" class="empty">
         还没有历史会话。回到对话随便说点什么，标题会用你的第一句话。
       </p>
       <p v-else-if="sessions.filtered.length === 0" class="empty">没有匹配「{{ sessions.query }}」的会话。</p>
 
-      <template v-for="g in sessions.groups" :key="g.label">
-        <p class="sec-label">{{ g.label }}</p>
-        <div class="group">
-          <div v-for="m in g.items" :key="m.id" class="row" :class="{ cur: m.id === session.sessionId }">
-            <button class="rmain" @click="open(m.id)">
-              <span class="rtitle">
-                <CoomiIcon v-if="m.pinned" name="pin" :size="13" class="pin" />
-                <span class="ttext">{{ m.title }}</span>
-              </span>
-              <span class="rmeta">
-                <span v-if="m.id === session.sessionId" class="badge">当前</span>
-                {{ formatSessionTime(m.updatedAt) }} · {{ m.turns }} 轮
-              </span>
-            </button>
-            <button class="more" aria-label="更多" @click="menuFor = m"><CoomiIcon name="more" :size="18" /></button>
+        <template v-for="g in sessions.groups" :key="g.label">
+          <p class="sec-label">{{ g.label }}</p>
+          <div class="group">
+            <div v-for="m in g.items" :key="m.id" class="row" :class="{ cur: m.id === session.sessionId }">
+              <button class="rmain" @click="open(m.id)">
+                <span class="rtitle">
+                  <CoomiIcon v-if="m.pinned" name="pin" :size="13" class="pin" />
+                  <span class="ttext">{{ m.title }}</span>
+                </span>
+                <span class="rmeta">
+                  <span v-if="m.id === session.sessionId" class="badge">当前</span>
+                  {{ formatSessionTime(m.updatedAt) }} · {{ m.turns }} 轮
+                </span>
+              </button>
+              <button class="more" aria-label="更多" @click="menuFor = m"><CoomiIcon name="more" :size="18" /></button>
+            </div>
           </div>
-        </div>
-      </template>
-      <button v-if="sessions.metas.length" class="btn btn-danger wide" @click="askClear = true">清空全部记录</button>
-      <p class="note">
-        历史会话保存在引擎里（这台手机的应用私有目录），最近 12 条会留完整对话内容。
-        用同一个会话继续时，只要引擎进程还活着就是真的接上了上下文；引擎重启过的话，
-        就只剩本机这份记录。
-      </p>
-
+        </template>
+        <button v-if="sessions.metas.length" class="btn btn-danger wide" @click="askClear = true">清空全部记录</button>
+        <p class="note">
+          历史会话保存在引擎里（这台手机的应用私有目录），最近 12 条会留完整对话内容。
+          用同一个会话继续时，只要引擎进程还活着就是真的接上了上下文；引擎重启过的话，
+          就只剩本机这份记录。
+        </p>
     </main>
     <div v-if="menuFor" class="scrim" @click.self="menuFor = null">
       <div class="sheet">

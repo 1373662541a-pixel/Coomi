@@ -35,6 +35,8 @@ public class CoomiService extends Service {
     /** 每次引擎启动生成的随机访问令牌（WebView 经 URL query 注入，防同设备 app 直连）。 */
     private volatile String mEngineToken = "";
     private volatile boolean mIsEngineRunning;
+    /** 引擎启动流程进行中（含部署检查/进程拉起/健康探测），供控制台显示「引擎启动中」。 */
+    private volatile boolean mIsEngineStarting;
     private volatile boolean mUpdateInProgress;
 
     private static String prefix() { return TermuxConstants.TERMUX_PREFIX_DIR_PATH; }
@@ -221,9 +223,11 @@ public class CoomiService extends Service {
     }
 
     private CommandResult startEngineSync() {
+        mIsEngineStarting = true;
         try {
             if (mEngineProcess != null && mEngineProcess.isAlive()) {
                 if (checkHealth(mEnginePort)) {
+                    mIsEngineStarting = false;
                     return new CommandResult(true, "already running", "", 0);
                 }
                 // 进程活着但健康检查失败（假死/端口错乱）：先清理旧进程再重启，
@@ -232,11 +236,13 @@ public class CoomiService extends Service {
                 stopEngineSync();
             }
             if (!isDeployComplete()) {
+                mIsEngineStarting = false;
                 return new CommandResult(false, "", "coomi-rs is not deployed", -1);
             }
             File binary = nativeBinary();
             File web = ensureCurrentWebAssets();
             if (!binary.isFile() || !new File(web, "index.html").isFile()) {
+                mIsEngineStarting = false;
                 return new CommandResult(false, "", "native binary or frontend is missing", -1);
             }
 
@@ -278,6 +284,8 @@ public class CoomiService extends Service {
             mEngineProcess = null;
             mIsEngineRunning = false;
             return new CommandResult(false, "", e.getMessage(), -1);
+        } finally {
+            mIsEngineStarting = false;
         }
     }
 
@@ -318,12 +326,14 @@ public class CoomiService extends Service {
             }
             if (process.isAlive()) process.destroyForcibly();
         }
-        // 兜底：清掉可能残留的 coomi 进程（Rust 侧收到 SIGTERM 会先清理全部工具子进程）
+        // 兜底：清掉可能残留的 coomi 进程（Rust 侧收到 SIGTERM 会先清理全部工具子进程）。
+        // ^/[^ ]*libcoomi\.so 锚定引擎二进制路径开头，避免误匹配执行本命令的 shell 自身。
         try {
-            execTermux("pkill -f '" + CoomiConstants.NATIVE_BINARY_NAME + "' 2>/dev/null; true");
+            execTermux("pkill -f '^/[^ ]*" + CoomiConstants.NATIVE_BINARY_NAME + "' 2>/dev/null; true");
         } catch (Exception ignored) { /* best-effort */ }
         mEngineProcess = null;
         mIsEngineRunning = false;
+        mIsEngineStarting = false;
     }
 
     public void restartEngine(Consumer<CommandResult> callback) {
@@ -335,6 +345,11 @@ public class CoomiService extends Service {
 
     public void getEngineStatus(Consumer<CommandResult> callback) {
         mExecutor.execute(() -> {
+            // 启动流程进行中（无论进程是否已拉起）都报 starting，控制台显示「引擎启动中」。
+            if (mIsEngineStarting) {
+                callback.accept(new CommandResult(true, "starting", "", 0));
+                return;
+            }
             boolean alive = mIsEngineRunning && mEngineProcess != null && mEngineProcess.isAlive();
             String status = alive ? (checkHealth(mEnginePort) ? "running" : "starting") : "stopped";
             callback.accept(new CommandResult(true, status, "", 0));
@@ -384,12 +399,9 @@ public class CoomiService extends Service {
 
     private boolean checkHealth(int port) {
         try {
-            String url = "http://127.0.0.1:" + port + CoomiConstants.HEALTH_ENDPOINT;
-            // 兜底：即使引擎侧未放行探活端点，也携带令牌重试。
-            if (mEngineToken != null && !mEngineToken.isEmpty()) {
-                url += "?token=" + java.net.URLEncoder.encode(mEngineToken, "UTF-8");
-            }
-            HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
+            // health 端点已由引擎免认证放行（仅返回最小字段），无需携带令牌。
+            HttpURLConnection connection = (HttpURLConnection) new URL(
+                "http://127.0.0.1:" + port + CoomiConstants.HEALTH_ENDPOINT).openConnection();
             connection.setConnectTimeout(HEALTH_CHECK_TIMEOUT_MS);
             connection.setReadTimeout(HEALTH_CHECK_TIMEOUT_MS);
             int responseCode = connection.getResponseCode();

@@ -40,6 +40,8 @@ pub enum Decision {
 pub struct SecurityPolicy {
     workspace: PathBuf,
     mode: AccessMode,
+    /// 工作区内的私有屏蔽区（如 .coomi/sessions）：任何模式（含 FullAccess）都不可访问。
+    blocked: Vec<PathBuf>,
 }
 
 impl SecurityPolicy {
@@ -48,7 +50,28 @@ impl SecurityPolicy {
             .as_ref()
             .canonicalize()
             .with_context(|| format!("invalid workspace {}", workspace.as_ref().display()))?;
-        Ok(Self { workspace, mode })
+        Ok(Self {
+            workspace,
+            mode,
+            blocked: Vec::new(),
+        })
+    }
+
+    pub fn with_blocked(mut self, blocked: impl IntoIterator<Item = PathBuf>) -> Self {
+        // 与工具侧 resolve_path 的规范化保持一致：存在则 canonicalize（Android 上
+        // /data/data 是 /data/user/0 的符号链接），不存在则做词法规范化。
+        self.blocked = blocked
+            .into_iter()
+            .filter_map(|path| {
+                let normalized = normalize_path(&path).ok()?;
+                if normalized.exists() {
+                    normalized.canonicalize().ok()
+                } else {
+                    Some(normalized)
+                }
+            })
+            .collect();
+        self
     }
 
     pub fn workspace(&self) -> &Path {
@@ -106,6 +129,15 @@ impl SecurityPolicy {
         let Ok(path) = normalize_path(path) else {
             return Decision::Deny("path could not be normalized".into());
         };
+        // 私有屏蔽区优先于权限模式：会话/配置/记忆目录在全局会话记忆关闭时
+        // 对工具完全不可见（FullAccess 也一样被拦）。
+        for blocked in &self.blocked {
+            if path.starts_with(blocked) {
+                return Decision::Deny(
+                    "该路径属于会话/配置私有区，已被「全局会话记忆」策略屏蔽".into(),
+                );
+            }
+        }
         if self.mode == AccessMode::FullAccess {
             return Decision::Allow;
         }
@@ -212,5 +244,26 @@ mod tests {
             policy.assess_shell("Remove-Item -Recurse src"),
             Decision::Deny(_)
         ));
+    }
+
+    #[test]
+    fn blocked_private_dirs_are_denied_even_in_full_access() {
+        // 全局会话记忆关闭时：会话/配置私有目录在 FullAccess 下也不可访问。
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let private = workspace.path().join(".coomi").join("sessions");
+        std::fs::create_dir_all(&private).expect("create private dir");
+        let policy = SecurityPolicy::new(workspace.path(), AccessMode::FullAccess)
+            .expect("security policy")
+            .with_blocked([private.clone()]);
+        let probe = private.join("session.json");
+        std::fs::write(&probe, b"{}").expect("write probe");
+        // 与生产链路一致：工具侧先 resolve_path（canonicalize）再 assess_read。
+        let probe = policy.resolve_path(&probe).expect("resolve probe");
+        assert!(matches!(policy.assess_read(&probe), Decision::Deny(_)));
+        // 工作区内其它路径在 FullAccess 下仍可正常读写。
+        let other = workspace.path().join("notes.txt");
+        std::fs::write(&other, b"hi").expect("write other");
+        assert_eq!(policy.assess_read(&other), Decision::Allow);
+        assert_eq!(policy.assess_write(&other), Decision::Allow);
     }
 }

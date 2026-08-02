@@ -60,6 +60,14 @@ function isCurrent(providerId: string, model: string): boolean {
           </span>
           <span class="sw" :class="{ on: config.planMode }" />
         </button>
+        <button class="row" @click="config.toggleGlobalMemory()">
+          <span class="ri" :class="{ on: config.globalMemory }"><CoomiIcon name="clock" :size="17" /></span>
+          <span class="rt">
+            <span class="rmain">全局会话记忆</span>
+            <span class="rsub">开启后 Coomi 可读取所有历史会话文件</span>
+          </span>
+          <span class="sw" :class="{ on: config.globalMemory }" />
+        </button>
       </div>
 
       <p class="sec-label">模型</p>

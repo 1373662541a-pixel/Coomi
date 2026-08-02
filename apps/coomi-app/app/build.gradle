@@ -51,9 +51,9 @@ android {
         applicationId "com.coomi.android"
         minSdkVersion project.properties.minSdkVersion.toInteger()
         targetSdkVersion project.properties.targetSdkVersion.toInteger()
-        // v1.2.0 修复重发布：versionCode 6 确保已装 1.2.0(5) 的用户能收到更新提示。
-        versionCode 6
-        versionName "1.2.0"
+        // v1.2.1 发布：versionCode 15
+        versionCode 15
+        versionName "1.2.1"
 
         if (appVersionName) versionName = appVersionName
         validateVersionName(versionName)

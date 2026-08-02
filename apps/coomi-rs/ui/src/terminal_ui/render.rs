@@ -2728,13 +2728,14 @@ mod tests {
         for name in [
             "Filesystem",
             "Git",
-            "Fetch",
             "Memory",
             "Playwright",
             "GitHub",
         ] {
             assert!(rendered.contains(name), "missing MCP catalog item {name}");
         }
+        // Fetch 由引擎内置工具提供，不再出现在 MCP 安装目录中。
+        assert!(!rendered.contains("Fetch"), "Fetch should not be in MCP catalog");
 
         state.settings.as_mut().expect("settings").tab = SettingsTab::Skills;
         let rendered = rendered_rows(&state, 110, 34).join("\n");

@@ -93,6 +93,18 @@ export const useConfigStore = defineStore('config', () => {
   }
   function togglePlanMode() { planMode.value = !planMode.value }
 
+  /**
+   * 全局会话记忆：关闭（默认）时 Coomi 无法读取任何历史会话文件；
+   * 开启后它才能读取所有历史会话记录。历史会话列表始终可见，与本开关无关。
+   */
+  const globalMemory = ref(localStorage.getItem('coomi.globalMemory') === '1')
+  function toggleGlobalMemory() {
+    globalMemory.value = !globalMemory.value
+    localStorage.setItem('coomi.globalMemory', globalMemory.value ? '1' : '0')
+    // 同步引擎侧：关闭时引擎屏蔽会话/配置目录的工具访问 + 系统提示加隐私禁令。
+    void apiSend('/api/runtime/global-memory', 'POST', { enabled: globalMemory.value }).catch(() => {})
+  }
+
   /** 新增/更新 Provider。空 apiKey 表示沿用旧 key（后端语义）。 */
   async function upsertProvider(input: ProviderInput): Promise<boolean> {
     if (usingMock.value) {
@@ -186,9 +198,10 @@ export const useConfigStore = defineStore('config', () => {
   }
 
   return {
-    permissionMode, planMode, providers, activeId, loading, usingMock, lastError,
+    permissionMode, planMode, globalMemory, providers, activeId, loading, usingMock, lastError,
     currentProviderId, currentModel, currentProvider,
     fetchProviders, selectModel, setPermissionMode, cyclePermissionMode, togglePlanMode,
+    toggleGlobalMemory,
     upsertProvider, deleteProvider, activateProvider, copyProvider, revealProviderKey, discoverModels,
   }
 })

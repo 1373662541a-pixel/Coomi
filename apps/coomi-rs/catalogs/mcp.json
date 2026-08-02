@@ -24,14 +24,6 @@
       ]
     },
     {
-      "id": "fetch",
-      "name": "Fetch",
-      "description": "Fetch web pages and return model-friendly text.",
-      "transport": "stdio",
-      "command": "uvx",
-      "args": ["--with", "mcp==1.16.0", "mcp-server-fetch"]
-    },
-    {
       "id": "memory",
       "name": "Memory",
       "description": "Store durable entities and relations in a local knowledge graph.",

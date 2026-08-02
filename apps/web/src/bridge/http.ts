@@ -15,13 +15,28 @@ function deriveBase(): string {
 
 export const API_BASE = deriveBase()
 
-/** 引擎访问令牌：由 Android 侧注入页面 URL query（?token=…）。 */
-export function engineToken(): string {
+/**
+ * 引擎访问令牌：由 Android 侧注入页面 URL query（?token=…）。
+ * 仅在模块加载时读取一次，并立即用 history.replaceState 从地址栏/浏览器历史中
+ * 清除，避免令牌持久留在系统浏览器历史、跨设备同步或扩展可见范围内。
+ */
+const ENGINE_TOKEN: string = (() => {
   try {
-    return new URLSearchParams(window.location.search).get('token') ?? ''
+    const token = new URLSearchParams(window.location.search).get('token') ?? ''
+    if (token && window.history?.replaceState) {
+      const url = new URL(window.location.href)
+      url.searchParams.delete('token')
+      window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`)
+    }
+    return token
   } catch {
     return ''
   }
+})()
+
+/** 引擎访问令牌（模块加载时已捕获；URL query 已即时清除）。 */
+export function engineToken(): string {
+  return ENGINE_TOKEN
 }
 
 /** 带引擎令牌的 fetch：所有 /api/* 与 /ws/* 请求必须携带 Bearer token。 */

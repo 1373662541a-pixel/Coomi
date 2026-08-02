@@ -179,6 +179,7 @@ pub async fn serve(
     let app = Router::new()
         .route("/api/runtime/health", get(runtime_health))
         .route("/api/runtime/port", get(runtime_port))
+        .route("/api/runtime/global-memory", get(get_global_memory).post(set_global_memory))
         .route("/api/providers", get(list_providers).post(upsert_provider))
         .route("/api/providers/{id}", delete(delete_provider))
         .route("/api/providers/{id}/activate", post(activate_provider))
@@ -200,7 +201,9 @@ pub async fn serve(
         .route("/api/fs/write", post(fs_write))
         .route("/api/catalog", get(catalog_index))
         .route("/api/catalog/mcp/install", post(install_mcp_catalog))
+        .route("/api/catalog/mcp/{id}", delete(uninstall_mcp_catalog))
         .route("/api/catalog/skills/install", post(install_skill_catalog))
+        .route("/api/catalog/skills/{id}", delete(uninstall_skill_catalog))
         .route("/ws/session/{session_id}", get(websocket_route))
         .fallback_service(files)
         // Local bridge: only allow same-origin browser access (the Android WebView and
@@ -268,11 +271,34 @@ async fn auth_layer(
     if !(path.starts_with("/api/") || path.starts_with("/ws/")) {
         return next.run(request).await;
     }
-    // 运行时探活端点放行：Android 侧在引擎启动阶段无法携带令牌做健康检查，
+    // 运行时探活端点：Android 侧在引擎启动阶段无法携带令牌做健康检查，
     // 若此处拦截，引擎会被误判为「未启动」而陷入无限重启。
     // （/api/runtime/port 仅前端带令牌调用，不放行。）
     if path == "/api/runtime/health" {
-        return next.run(request).await;
+        let header_token = request
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .unwrap_or_default()
+            .to_string();
+        let query_token = request
+            .uri()
+            .query()
+            .unwrap_or_default()
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("token="))
+            .unwrap_or_default()
+            .to_string();
+        let has_token = !state.token.is_empty()
+            && (header_token == state.token || query_token == state.token);
+        if has_token {
+            // 带令牌：返回完整状态（含 cwd / 模型等明细）。
+            return next.run(request).await;
+        }
+        // 无令牌探活（Android 启动探测 / 本地探测）：只回最小字段，
+        // 不暴露 cwd 绝对路径、激活模型等配置明细。
+        return Json(json!({ "status": "ok", "version": BRIDGE_VERSION })).into_response();
     }
     let header_token = request
         .headers()
@@ -301,6 +327,59 @@ async fn auth_layer(
             .body(axum::body::Body::from("unauthorized: missing or invalid access token"))
             .expect("valid response")
     }
+}
+
+fn settings_path(home: &Path) -> PathBuf {
+    home.join("config").join("settings.json")
+}
+
+/// 全局会话记忆开关（引擎侧权威值）：关闭时工具不可读会话/配置/记忆目录，
+/// 且系统提示明确禁止读取历史记录。默认开启。
+fn global_memory_enabled(home: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(settings_path(home)) else {
+        return true;
+    };
+    let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+        return true;
+    };
+    value
+        .get("global_memory")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
+async fn get_global_memory(State(state): State<AppState>) -> Json<Value> {
+    Json(json!({ "enabled": global_memory_enabled(&state.home) }))
+}
+
+async fn set_global_memory(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let enabled = body
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let path = settings_path(&state.home);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| ApiError::internal(format!("failed to create config dir: {e}")))?;
+    }
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&json!({ "global_memory": enabled }))
+            .map_err(|e| ApiError::internal(format!("failed to serialize settings: {e}")))?,
+    )
+    .map_err(|e| ApiError::internal(format!("failed to write settings: {e}")))?;
+    Ok(Json(json!({ "enabled": enabled })))
+}
+
+/// 会话/配置私有区：全局会话记忆关闭时，工具对这些目录一律拒绝访问。
+fn blocked_private_dirs(home: &Path) -> Vec<PathBuf> {
+    ["sessions", "config", "memory", "projects", "cache"]
+        .iter()
+        .map(|name| home.join(name))
+        .collect()
 }
 
 async fn runtime_health(State(state): State<AppState>) -> Json<Value> {    let document = read_provider_document(&state.home).ok();
@@ -463,7 +542,8 @@ async fn install_mcp_catalog(
     let id = body
         .get("id")
         .and_then(Value::as_str)
-        .ok_or_else(|| ApiError::bad_request("missing id"))?;
+        .ok_or_else(|| ApiError::bad_request("missing id"))?
+        .to_string();
     let values = body
         .get("values")
         .and_then(Value::as_object)
@@ -479,11 +559,61 @@ async fn install_mcp_catalog(
                 .collect::<BTreeMap<String, String>>()
         })
         .unwrap_or_default();
-    let installer = coomi_catalogs::CatalogInstaller::new(&state.home);
-    let path = installer
-        .install_mcp(id, &values)
-        .map_err(|e| ApiError::internal(format!("failed to install MCP {id}: {e:#}")))?;
+    // 预校验必填参数：缺失返回 400（客户端可读提示），而不是笼统的 500。
+    if let Ok(catalog) = coomi_catalogs::builtin_mcp() {
+        if let Some(entry) = catalog
+            .entries
+            .iter()
+            .find(|entry| entry.id.eq_ignore_ascii_case(&id))
+        {
+            for parameter in &entry.required_parameters {
+                if values
+                    .get(&parameter.key)
+                    .is_none_or(|value| value.trim().is_empty())
+                {
+                    return Err(ApiError::bad_request(format!(
+                        "缺少必填参数 {}（{}），请填写后再安装",
+                        parameter.key, parameter.label
+                    )));
+                }
+            }
+        }
+    }
+    let home = state.home.clone();
+    let task_id = id.clone();
+    // spawn_blocking：安装包含网络下载（reqwest::blocking），不能在 tokio worker 线程执行。
+    let path = tokio::task::spawn_blocking(move || {
+        let installer = coomi_catalogs::CatalogInstaller::new(&home);
+        installer.install_mcp(&task_id, &values)
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("MCP install task failed: {e}")))?
+    .map_err(|e| ApiError::internal(format!("failed to install MCP {id}: {e:#}")))?;
     Ok(Json(json!({ "ok": true, "id": id, "path": path.display().to_string() })))
+}
+
+/// 卸载 MCP server：从 config/mcp_servers.json 移除对应条目。
+async fn uninstall_mcp_catalog(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let path = state.home.join("config").join("mcp_servers.json");
+    if !path.exists() {
+        return Ok(Json(json!({ "ok": true, "deleted": false })));
+    }
+    let bytes = std::fs::read(&path)
+        .map_err(|e| ApiError::internal(format!("failed to read MCP config {}: {e}", path.display())))?;
+    let mut document = serde_json::from_slice::<Value>(&bytes)
+        .map_err(|e| ApiError::internal(format!("invalid MCP config {}: {e}", path.display())))?;
+    let removed = document
+        .get_mut("servers")
+        .and_then(Value::as_object_mut)
+        .map(|servers| servers.remove(&id).is_some())
+        .unwrap_or(false);
+    std::fs::write(&path, serde_json::to_vec_pretty(&document)
+        .map_err(|e| ApiError::internal(format!("failed to serialize MCP config {}: {e}", path.display())))?)
+        .map_err(|e| ApiError::internal(format!("failed to write MCP config {}: {e}", path.display())))?;
+    Ok(Json(json!({ "ok": true, "id": id, "deleted": removed })))
 }
 
 /// 安装 Skill：{ "id": ... }
@@ -494,11 +624,35 @@ async fn install_skill_catalog(
     let id = body
         .get("id")
         .and_then(Value::as_str)
-        .ok_or_else(|| ApiError::bad_request("missing id"))?;
-    let installer = coomi_catalogs::CatalogInstaller::new(&state.home);
-    let path = installer
-        .install_skill(id)
-        .map_err(|e| ApiError::internal(format!("failed to install Skill {id}: {e:#}")))?;
+        .ok_or_else(|| ApiError::bad_request("missing id"))?
+        .to_string();
+    let home = state.home.clone();
+    let task_id = id.clone();
+    // spawn_blocking：Skill 安装含网络下载（reqwest::blocking），不能在 tokio worker 线程执行。
+    let path = tokio::task::spawn_blocking(move || {
+        let installer = coomi_catalogs::CatalogInstaller::new(&home);
+        installer.install_skill(&task_id)
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("Skill install task failed: {e}")))?
+    .map_err(|e| ApiError::internal(format!("failed to install Skill {id}: {e:#}")))?;
+    Ok(Json(json!({ "ok": true, "id": id, "path": path.display().to_string() })))
+}
+
+/// 卸载 Skill：删除 skills/{id} 目录与 config/skills.json 条目。
+async fn uninstall_skill_catalog(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let home = state.home.clone();
+    let task_id = id.clone();
+    let path = tokio::task::spawn_blocking(move || {
+        let installer = coomi_catalogs::CatalogInstaller::new(&home);
+        installer.uninstall_skill(&task_id)
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("Skill uninstall task failed: {e}")))?
+    .map_err(|e| ApiError::internal(format!("failed to uninstall Skill {id}: {e:#}")))?;
     Ok(Json(json!({ "ok": true, "id": id, "path": path.display().to_string() })))
 }
 
@@ -1395,9 +1549,20 @@ async fn run_turn(
         PermissionMode::Ask => AccessMode::WorkspaceWrite,
         PermissionMode::Auto | PermissionMode::Full => AccessMode::FullAccess,
     };
-    let policy = SecurityPolicy::new(&cwd, policy_mode)?;
+    let global_memory = global_memory_enabled(&state.home);
+    let mut policy = SecurityPolicy::new(&cwd, policy_mode)?;
+    if !global_memory {
+        // 全局会话记忆关闭：会话/配置/记忆目录对工具完全不可见。
+        policy = policy.with_blocked(blocked_private_dirs(&state.home));
+    }
     let instructions = coomi_engine::discover_project_instructions(&cwd)?;
-    let prompt_context = system_prompt(&state.home, &cwd, policy_mode, &instructions);
+    let prompt_context = system_prompt(
+        &state.home,
+        &cwd,
+        policy_mode,
+        &instructions,
+        global_memory,
+    );
     let scheduler = AgentScheduler::new(
         cwd.clone(),
         state.home.clone(),
@@ -1430,7 +1595,9 @@ async fn run_turn(
     let agent = Agent::new(prompt_context)
         .with_max_tool_rounds(96)
         .with_input_queue(Arc::clone(&context.input_queue));
-    agent
+    // 无论成败都先保存会话：报错/中断时本轮已产生的消息（用户提问、工具结果、
+    // 部分回复）不丢失；否则下次继续时会话停留在旧历史（表现为「读不了上文」）。
+    let turn_result = agent
         .run_turn(
             &mut session,
             prompt.to_owned(),
@@ -1439,18 +1606,20 @@ async fn run_turn(
             &approval,
             &observer,
         )
-        .await?;
+        .await;
     store.save(&session)?;
+    turn_result?;
 
     while session
         .loop_state
         .as_ref()
         .is_some_and(|loop_state| loop_state.status == LoopStatus::Active)
     {
-        agent
+        let loop_result = agent
             .continue_loop(&mut session, &provider, &tools, &approval, &observer)
-            .await?;
+            .await;
         store.save(&session)?;
+        loop_result?;
     }
     Ok(())
 }
@@ -1729,7 +1898,13 @@ impl ApprovalHandler for BrowserApproval {
     }
 }
 
-fn system_prompt(home: &Path, cwd: &Path, policy: AccessMode, instructions: &str) -> String {
+fn system_prompt(
+    home: &Path,
+    cwd: &Path,
+    policy: AccessMode,
+    instructions: &str,
+    global_memory: bool,
+) -> String {
     let skills = list_installed_skills(home)
         .unwrap_or_default()
         .into_iter()
@@ -1747,6 +1922,16 @@ fn system_prompt(home: &Path, cwd: &Path, policy: AccessMode, instructions: &str
     if !instructions.trim().is_empty() {
         prompt.push_str("\n\nProject instructions:\n");
         prompt.push_str(instructions);
+    }
+    if !global_memory {
+        prompt.push_str(
+            "\n\nPrivacy: global session memory is OFF. You must NOT read, search, or quote \
+             any file under the engine's private directories (sessions/, config/, memory/, \
+             projects/, cache/ under ~/.coomi). They contain the user's private history and \
+             credentials. This prohibition includes using shell commands. Work only within \
+             the current session; if the user asks about previous conversations, say you \
+             cannot access them because global session memory is off.",
+        );
     }
     prompt
 }
@@ -2020,9 +2205,12 @@ mod tests {
             )
             .expect("save shared memory");
 
-        let prompt = system_prompt(home.path(), project.path(), AccessMode::FullAccess, "");
+        let prompt = system_prompt(home.path(), project.path(), AccessMode::FullAccess, "", true);
         assert!(!prompt.contains("CROSS_SESSION_SENTINEL"));
         assert!(!prompt.contains("Persistent memory:"));
+        // 全局会话记忆关闭时，系统提示必须包含隐私禁令。
+        let locked = system_prompt(home.path(), project.path(), AccessMode::FullAccess, "", false);
+        assert!(locked.contains("global session memory is OFF"));
     }
 
     #[test]

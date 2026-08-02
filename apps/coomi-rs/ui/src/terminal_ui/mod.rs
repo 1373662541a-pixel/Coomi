@@ -3555,26 +3555,26 @@ mod tests {
     fn settings_merge_curated_catalogs_and_confirm_installed_deletions() {
         let (_home, mut state) = test_state();
         state.open_overlay(OverlayKind::Settings);
-        assert_eq!(settings_mcp_items(&state).len(), 6);
+        assert_eq!(settings_mcp_items(&state).len(), 5);
         assert_eq!(settings_skill_items(&state).len(), 8);
 
         let settings = state.settings.as_mut().expect("settings");
         settings.tab = SettingsTab::Mcp;
         settings.mcp_servers.push(ConfiguredMcp {
-            name: "fetch".into(),
+            name: "filesystem".into(),
             transport: "stdio".into(),
             enabled: true,
-            target: "uvx".into(),
+            target: "npx".into(),
         });
         settings.selected = state
             .mcp_entries
             .iter()
-            .position(|entry| entry.id == "fetch")
-            .expect("fetch entry");
+            .position(|entry| entry.id == "filesystem")
+            .expect("filesystem entry");
         request_selected_mcp_delete(&mut state);
         assert_eq!(
             state.confirm_delete,
-            Some(DeleteTarget::Mcp("fetch".into()))
+            Some(DeleteTarget::Mcp("filesystem".into()))
         );
     }
 }

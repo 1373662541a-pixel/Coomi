@@ -51,7 +51,6 @@ public class CoomiDashboardActivity extends Activity {
     private View mFilesButton;
     private View mCheckUpdateButton;
     private View mPermissionSettingsButton;
-    private View mProviderSettingsButton;
     private View mStorageSettingsButton;
 
     private CoomiService mCoomiService;
@@ -95,7 +94,6 @@ public class CoomiDashboardActivity extends Activity {
         mFilesButton = findViewById(R.id.btn_open_files);
         mCheckUpdateButton = findViewById(R.id.btn_check_update);
         mPermissionSettingsButton = findViewById(R.id.btn_permission_settings);
-        mProviderSettingsButton = findViewById(R.id.btn_provider_settings);
         mStorageSettingsButton = findViewById(R.id.btn_storage_settings);
 
         mOpenChatButton.setOnClickListener(v -> openChat());
@@ -108,7 +106,6 @@ public class CoomiDashboardActivity extends Activity {
         mFilesButton.setOnClickListener(v -> openFiles());
         mCheckUpdateButton.setOnClickListener(v -> checkUpdate());
         mPermissionSettingsButton.setOnClickListener(v -> openPermissionSettings());
-        mProviderSettingsButton.setOnClickListener(v -> openProviderSettings());
         mStorageSettingsButton.setOnClickListener(v -> openStorageSettings());
 
         // Start auto-refresh
@@ -176,13 +173,18 @@ public class CoomiDashboardActivity extends Activity {
         mCoomiService.getEngineStatus(result -> {
             if (!result.success) return;
             runOnUiThread(() -> {
-                boolean running = result.stdout.trim().equals("running");
-                mStatusIndicator.setBackgroundResource(
-                    running ? R.drawable.coomi_dot_ok : R.drawable.coomi_dot_idle);
-                mStatusText.setText(running
-                    ? R.string.coomi_dash_engine_running
-                    : R.string.coomi_dash_engine_stopped);
-                mRestartButton.setEnabled(true);
+                String status = result.stdout.trim();
+                boolean running = status.equals("running");
+                boolean starting = status.equals("starting");
+                int indicator = running ? R.drawable.coomi_dot_ok
+                    : starting ? R.drawable.coomi_dot_warn
+                    : R.drawable.coomi_dot_idle;
+                int label = running ? R.string.coomi_dash_engine_running
+                    : starting ? R.string.coomi_dash_engine_starting
+                    : R.string.coomi_dash_engine_stopped;
+                mStatusIndicator.setBackgroundResource(indicator);
+                mStatusText.setText(label);
+                mRestartButton.setEnabled(!starting);
                 mStopButton.setEnabled(running);
                 if (mWebUiButtonContainer != null) {
                     mWebUiButtonContainer.setVisibility(running ? View.VISIBLE : View.GONE);
@@ -200,13 +202,6 @@ public class CoomiDashboardActivity extends Activity {
     private void openPermissionSettings() {
         Intent intent = new Intent(this, CoomiLauncherActivity.class);
         intent.putExtra(CoomiLauncherActivity.EXTRA_SETTINGS_MODE, true);
-        startActivity(intent);
-    }
-
-    private void openProviderSettings() {
-        Intent intent = new Intent(this, CoomiSetupActivity.class);
-        intent.putExtra(CoomiSetupActivity.EXTRA_START_STEP, CoomiConstants.STEP_AUTH);
-        intent.putExtra(CoomiSetupActivity.EXTRA_SETTINGS_MODE, true);
         startActivity(intent);
     }
 

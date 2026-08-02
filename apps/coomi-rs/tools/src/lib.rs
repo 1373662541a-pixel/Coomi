@@ -1026,12 +1026,28 @@ impl CoreTools {
             Ok(path) => path,
             Err(error) => return ToolResult::error(error),
         };
-        let content = match tokio::fs::read_to_string(&path).await {
-            Ok(content) => content,
+        // 大文件只读头部：全量 read_to_string 会把超大文件（日志/导出等）整个读进
+        // 内存并做编码转换，导致工具长时间无结果。
+        const MAX_READ: u64 = 2 * 1024 * 1024; // 2 MiB
+        use tokio::io::AsyncReadExt;
+        let handle = match tokio::fs::File::open(&path).await {
+            Ok(handle) => handle,
             Err(error) => {
                 return ToolResult::error(format!("failed to read {}: {error}", path.display()));
             }
         };
+        let mut bytes = Vec::new();
+        if let Err(error) = handle.take(MAX_READ + 1).read_to_end(&mut bytes).await {
+            return ToolResult::error(format!("failed to read {}: {error}", path.display()));
+        }
+        let truncated = bytes.len() as u64 > MAX_READ;
+        bytes.truncate(MAX_READ as usize);
+        let mut content = String::from_utf8_lossy(&bytes).into_owned();
+        if truncated {
+            content.push_str(&format!(
+                "\n…（文件超过 {MAX_READ} 字节，已截断，只显示开头部分）"
+            ));
+        }
         let offset = usize_arg(arguments, "offset").unwrap_or(1).max(1);
         let limit = usize_arg(arguments, "limit").unwrap_or(500).clamp(1, 2_000);
         let lines = content
@@ -2224,9 +2240,9 @@ mod tests {
         let result = tools
             .call(
                 &ToolCall {
-                    id: "configure-fetch".into(),
+                    id: "configure-memory".into(),
                     name: "configure_mcp".into(),
-                    arguments: json!({"catalog_id": "fetch"}),
+                    arguments: json!({"catalog_id": "memory"}),
                 },
                 &Approve,
             )
@@ -2234,7 +2250,7 @@ mod tests {
         assert!(result.success, "{}", result.output);
         let config = std::fs::read_to_string(home.path().join("config/mcp_servers.json"))
             .expect("MCP configuration");
-        assert!(config.contains("mcp==1.16.0"));
+        assert!(config.contains("server-memory"));
     }
 
     #[test]

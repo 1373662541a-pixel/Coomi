@@ -103,6 +103,7 @@ function openDashboard() {
       </button>
 
       <div class="list">
+        <!-- 历史会话列表始终可见；「全局会话记忆」开关只控制模型能否读取这些记录。 -->
         <p v-if="isEmpty" class="empty">
           还没有历史会话。<br />随便说点什么，标题会用你的第一句话。
         </p>

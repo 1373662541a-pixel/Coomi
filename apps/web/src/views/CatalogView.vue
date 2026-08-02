@@ -4,7 +4,7 @@
  * 数据来自引擎 /api/catalog；安装走 /api/catalog/{mcp,skills}/install。
  * 交互：点击「安装」→ 弹出确认（名称/描述/来源/生效方式）→ MCP 再填参数，Skill 直接安装。
  */
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import PageHead from '@/components/PageHead.vue'
 import CoomiIcon from '@/components/CoomiIcon.vue'
@@ -37,6 +37,15 @@ const askSkill = ref<SkillItem | null>(null)
 const installingMcp = ref<McpItem | null>(null)
 const installValues = ref<Record<string, string>>({})
 
+/** 必填参数是否都已填写（未填完不允许安装，避免 500）。 */
+const installReady = computed(() => {
+  const item = installingMcp.value
+  if (!item) return false
+  return item.required_parameters.every(
+    p => (installValues.value[p.key] ?? '').trim().length > 0,
+  )
+})
+
 function confirmMcpInstall(item: McpItem) {
   askMcp.value = item
 }
@@ -52,6 +61,58 @@ function proceedMcp() {
 
 function confirmSkillInstall(item: SkillItem) {
   askSkill.value = item
+}
+
+// ── MCP 卸载（已安装项可卸载，带确认）──
+const askUninstall = ref<McpItem | null>(null)
+
+function confirmUninstall(item: McpItem) {
+  askUninstall.value = item
+}
+
+async function uninstallMcp() {
+  const item = askUninstall.value
+  if (!item) return
+  busy.value = item.id
+  notice.value = ''
+  try {
+    const res = await authedFetch(`/api/catalog/mcp/${item.id}`, { method: 'DELETE' })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error ?? data.message ?? `HTTP ${res.status}`)
+    notice.value = `已卸载 MCP「${item.name}」，重启引擎或新开会话后生效`
+    askUninstall.value = null
+    await load()
+  } catch (e) {
+    notice.value = `卸载失败：${e instanceof Error ? e.message : String(e)}`
+  } finally {
+    busy.value = null
+  }
+}
+
+// ── Skill 卸载（带确认）──
+const askSkillUninstall = ref<SkillItem | null>(null)
+
+function confirmSkillUninstall(item: SkillItem) {
+  askSkillUninstall.value = item
+}
+
+async function uninstallSkill() {
+  const item = askSkillUninstall.value
+  if (!item) return
+  busy.value = item.id
+  notice.value = ''
+  try {
+    const res = await authedFetch(`/api/catalog/skills/${item.id}`, { method: 'DELETE' })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error ?? data.message ?? `HTTP ${res.status}`)
+    notice.value = `已卸载 Skill「${item.name}」，重启引擎或新开会话后生效`
+    askSkillUninstall.value = null
+    await load()
+  } catch (e) {
+    notice.value = `卸载失败：${e instanceof Error ? e.message : String(e)}`
+  } finally {
+    busy.value = null
+  }
 }
 
 function proceedSkill() {
@@ -94,7 +155,7 @@ async function installMcp() {
       body: JSON.stringify({ id: item.id, values: installValues.value }),
     })
     const data = await res.json()
-    if (!res.ok) throw new Error(data.message ?? `HTTP ${res.status}`)
+    if (!res.ok) throw new Error(data.error ?? data.message ?? `HTTP ${res.status}`)
     notice.value = `已安装 MCP「${item.name}」，重启引擎或新开会话后生效`
     closeInstallForm()
     await load()
@@ -115,7 +176,7 @@ async function installSkill(item: SkillItem) {
       body: JSON.stringify({ id: item.id }),
     })
     const data = await res.json()
-    if (!res.ok) throw new Error(data.message ?? `HTTP ${res.status}`)
+    if (!res.ok) throw new Error(data.error ?? data.message ?? `HTTP ${res.status}`)
     notice.value = `已安装 Skill「${item.name}」，重启引擎或新开会话后生效`
     await load()
   } catch (e) {
@@ -174,7 +235,9 @@ onMounted(load)
             >
               {{ busy === item.id ? '安装中…' : '安装' }}
             </button>
-            <span v-else class="done"><CoomiIcon name="check" :size="14" /></span>
+            <button v-else class="act danger" :disabled="busy !== null" @click="confirmUninstall(item)">
+              卸载
+            </button>
           </div>
         </div>
       </template>
@@ -204,10 +267,25 @@ onMounted(load)
             >
               {{ busy === item.id ? '安装中…' : '安装' }}
             </button>
-            <span v-else class="done"><CoomiIcon name="check" :size="14" /></span>
+            <button v-else class="act danger" :disabled="busy !== null" @click="confirmSkillUninstall(item)">
+              卸载
+            </button>
           </div>
         </div>
       </template>
+
+      <!-- MCP 卸载确认 -->
+      <div v-if="askUninstall" class="sheet-mask" @click.self="askUninstall = null">
+        <div class="sheet">
+          <div class="grip" />
+          <div class="stitle"><CoomiIcon name="plug" :size="17" />卸载 MCP「{{ askUninstall.name }}」？</div>
+          <p class="sdesc">将从 config/mcp_servers.json 中移除该服务，重启引擎或新开会话后生效。</p>
+          <div class="sheet-actions">
+            <button class="btn ghost" @click="askUninstall = null">取消</button>
+            <button class="btn danger-solid" :disabled="busy !== null" @click="uninstallMcp">确认卸载</button>
+          </div>
+        </div>
+      </div>
 
       <!-- MCP 安装确认 -->
       <div v-if="askMcp" class="sheet-mask" @click.self="askMcp = null">
@@ -223,6 +301,19 @@ onMounted(load)
           <div class="sheet-actions">
             <button class="btn ghost" @click="askMcp = null">取消</button>
             <button class="btn primary" @click="proceedMcp">继续配置</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Skill 卸载确认 -->
+      <div v-if="askSkillUninstall" class="sheet-mask" @click.self="askSkillUninstall = null">
+        <div class="sheet">
+          <div class="grip" />
+          <div class="stitle"><CoomiIcon name="wrench" :size="17" />卸载 Skill「{{ askSkillUninstall.name }}」？</div>
+          <p class="sdesc">将删除已安装的 Skill 目录与配置记录，重启引擎或新开会话后生效。</p>
+          <div class="sheet-actions">
+            <button class="btn ghost" @click="askSkillUninstall = null">取消</button>
+            <button class="btn danger-solid" :disabled="busy !== null" @click="uninstallSkill">确认卸载</button>
           </div>
         </div>
       </div>
@@ -254,7 +345,7 @@ onMounted(load)
           <div class="stitle">配置 {{ installingMcp.name }}</div>
           <p class="sdesc">{{ installingMcp.description }}</p>
           <label v-for="p in installingMcp.required_parameters" :key="p.key" class="field">
-            <span>{{ p.label }}</span>
+            <span>{{ p.label }}<em v-if="!p.secret" class="req">必填</em></span>
             <input
               v-model="installValues[p.key]"
               :type="p.secret ? 'password' : 'text'"
@@ -265,8 +356,8 @@ onMounted(load)
           <p v-if="installingMcp.required_parameters.length === 0" class="sdesc">该 MCP 无需额外配置，直接安装即可。</p>
           <div class="sheet-actions">
             <button class="btn ghost" @click="closeInstallForm">取消</button>
-            <button class="btn primary" :disabled="busy !== null" @click="installMcp">
-              {{ busy === installingMcp.id ? '安装中…' : '安装' }}
+            <button class="btn primary" :disabled="busy !== null || !installReady" @click="installMcp">
+              {{ busy === installingMcp.id ? '安装中…' : installReady ? '安装' : '请填写必填项' }}
             </button>
           </div>
         </div>
@@ -276,6 +367,12 @@ onMounted(load)
 </template>
 
 <style scoped>
+.page { display: flex; flex-direction: column; height: 100%; background: var(--page); }
+.body {
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: 14px 12px calc(var(--safe-bottom) + 24px);
+  -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain;
+}
 .tabs { display: flex; gap: 8px; margin-bottom: 14px; }
 .tab {
   flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px;
@@ -334,6 +431,7 @@ onMounted(load)
 }
 .act:active { opacity: 0.85; }
 .act:disabled { opacity: 0.5; }
+.act.danger { background: var(--danger-soft); color: var(--danger); }
 .done { flex-shrink: 0; width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; border-radius: 50%; background: var(--ok-soft, #e6f4ea); color: var(--ok, #2e9e5b); }
 
 /* ── 弹层 ── */
@@ -361,6 +459,7 @@ onMounted(load)
 }
 .sinfo span { display: flex; align-items: center; gap: 6px; }
 .field { display: flex; flex-direction: column; gap: 5px; margin-top: 12px; font-size: 12.5px; color: var(--text-2); }
+.req { margin-left: 5px; padding: 0 5px; border-radius: 4px; background: var(--blue-soft); color: var(--blue); font-style: normal; font-size: 10px; font-weight: 650; }
 .field input {
   height: 42px; padding: 0 12px; border-radius: var(--r-md); border: 1px solid var(--border);
   background: var(--bg-input); color: var(--text); font-size: 15px;
@@ -370,5 +469,6 @@ onMounted(load)
 .btn { min-height: 42px; border-radius: var(--r-md); font-size: 14.5px; font-weight: 600; }
 .btn.primary { background: var(--blue); color: #fff; }
 .btn.ghost { background: var(--fill-strong); color: var(--text); }
+.btn.danger-solid { background: var(--danger, #d43d2e); color: #fff; }
 .btn:disabled { opacity: 0.6; }
 </style>

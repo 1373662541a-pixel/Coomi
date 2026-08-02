@@ -326,29 +326,6 @@
                 </LinearLayout>
                 <View style="@style/Coomi.Divider"/>
                 <LinearLayout
-                    android:id="@+id/btn_provider_settings"
-                    style="@style/Coomi.Row"
-                    android:clickable="true"
-                    android:focusable="true">
-                    <ImageView
-                        android:layout_width="@dimen/coomi_icon_m"
-                        android:layout_height="@dimen/coomi_icon_m"
-                        android:src="@drawable/coomi_ic_key"
-                        android:tint="@color/coomi_text_2"
-                        android:contentDescription="@null"/>
-                    <LinearLayout
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:layout_marginStart="@dimen/coomi_space_m"
-                        android:orientation="vertical">
-                        <TextView style="@style/Coomi.Text.Body" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/coomi_dash_provider_settings"/>
-                        <TextView style="@style/Coomi.Text.Caption" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="2dp" android:text="@string/coomi_dash_provider_settings_desc"/>
-                    </LinearLayout>
-                    <ImageView android:layout_width="@dimen/coomi_icon_s" android:layout_height="@dimen/coomi_icon_s" android:src="@drawable/coomi_ic_chevron_right" android:tint="@color/coomi_text_3" android:contentDescription="@null"/>
-                </LinearLayout>
-                <View style="@style/Coomi.Divider"/>
-                <LinearLayout
                     android:id="@+id/btn_storage_settings"
                     style="@style/Coomi.Row"
                     android:clickable="true"
