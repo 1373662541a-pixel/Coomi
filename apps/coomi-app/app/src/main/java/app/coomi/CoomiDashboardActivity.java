@@ -269,7 +269,7 @@ public class CoomiDashboardActivity extends Activity {
         // Open Termux shell for debugging. TERMUX_DIR must match the bootstrap's baked-in
         // home path, so it comes from TermuxConstants rather than a literal.
         Intent intent = new Intent(this, TermuxActivity.class);
-        intent.putExtra("com.termux.app.TERMUX_DIR", TermuxConstants.TERMUX_HOME_DIR_PATH);
+        intent.putExtra("com.coomi.android.app.TERMUX_DIR", TermuxConstants.TERMUX_HOME_DIR_PATH);
         startActivity(intent);
     }
 

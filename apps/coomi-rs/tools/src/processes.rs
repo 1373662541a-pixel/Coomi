@@ -20,11 +20,34 @@ pub struct ProcessManager {
 
 struct ManagedProcess {
     child: Child,
+    /// Process-group id (Unix only): the shell is spawned with `process_group(0)` so that
+    /// descendants (`cmd &` inside the shell) share the group and can be killed together.
+    pgid: Option<u32>,
     stdin: Option<ChildStdin>,
     stdout: Arc<AsyncMutex<Vec<u8>>>,
     stderr: Arc<AsyncMutex<Vec<u8>>>,
     stdout_offset: usize,
     stderr_offset: usize,
+}
+
+/// Best-effort kill of a managed process: first the whole process group (child plus any
+/// descendants) via `kill -9 -<pgid>`, then the direct child as a fallback. If the process
+/// already exited, skip the group kill to avoid hitting a reused pgid.
+async fn kill_managed(process: &Arc<AsyncMutex<ManagedProcess>>) {
+    let pgid = {
+        let mut guard = process.lock().await;
+        if let Ok(Some(_)) = guard.child.try_wait() {
+            return;
+        }
+        guard.pgid
+    };
+    if let Some(pgid) = pgid {
+        let _ = std::process::Command::new("kill")
+            .arg("-9")
+            .arg(format!("-{pgid}"))
+            .status();
+    }
+    let _ = process.lock().await.child.kill().await;
 }
 
 impl ProcessManager {
@@ -58,10 +81,16 @@ impl ProcessManager {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        #[cfg(unix)]
+        process.process_group(0);
         let mut child = match process.spawn() {
             Ok(child) => child,
             Err(error) => return ToolResult::error(format!("failed to start shell: {error}")),
         };
+        #[cfg(unix)]
+        let pgid = child.id();
+        #[cfg(not(unix))]
+        let pgid = None;
         let stdin = child.stdin.take();
         let stdout_buffer = Arc::new(AsyncMutex::new(Vec::new()));
         let stderr_buffer = Arc::new(AsyncMutex::new(Vec::new()));
@@ -92,6 +121,7 @@ impl ProcessManager {
         let session_id = Uuid::new_v4().to_string();
         let managed = Arc::new(AsyncMutex::new(ManagedProcess {
             child,
+            pgid,
             stdin,
             stdout: stdout_buffer,
             stderr: stderr_buffer,
@@ -219,9 +249,22 @@ impl ProcessManager {
         let Some(process) = process else {
             return ToolResult::error(format!("unknown process session: {id}"));
         };
-        match process.lock().await.child.kill().await {
-            Ok(()) => ToolResult::success(format!("terminated {id}")),
-            Err(error) => ToolResult::error(format!("failed to terminate {id}: {error}")),
+        kill_managed(&process).await;
+        ToolResult::success(format!("terminated {id}"))
+    }
+
+    /// Kill every managed process. Used when a turn is cancelled so no orphaned
+    /// shell keeps running after the agent stopped.
+    pub async fn terminate_all(&self) {
+        let processes: Vec<Arc<AsyncMutex<ManagedProcess>>> = self
+            .processes
+            .lock()
+            .expect("process registry lock")
+            .drain()
+            .map(|(_, process)| process)
+            .collect();
+        for process in processes {
+            kill_managed(&process).await;
         }
     }
 

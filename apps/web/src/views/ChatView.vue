@@ -12,6 +12,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useSessionStore } from '@/stores/session'
 import { useSessionsStore } from '@/stores/sessions'
 import { useConfigStore } from '@/stores/config'
+import { apiGet } from '@/bridge/http'
 import { DEMO_PROMPT, isUnattended, shouldAutoplay } from '@/bridge/demoMode'
 import { useAutoScroll } from '@/composables/useAutoScroll'
 import type { Timelineitem, ToolCard } from '@/stores/viewModel'
@@ -64,6 +65,10 @@ let ro: ResizeObserver | null = null
 
 onMounted(() => {
   session.connect()
+  // 记录引擎当前工作目录，会话列表据此把不同项目的会话隔离开。
+  void apiGet<{ cwd?: string }>('/api/runtime/health')
+    .then(h => { if (h?.cwd) sessions.setCurrentCwd(h.cwd) })
+    .catch(() => { /* 引擎未就绪时保持空 cwd，列表退化为全部显示 */ })
   if (config.providers.length === 0) void config.fetchProviders()
   // 高度只要变就重新贴底（内部有 rAF 合并，不怕高频触发）
   if (typeof ResizeObserver !== 'undefined') {

@@ -44,15 +44,15 @@ android {
     }
 
     defaultConfig {
-        // NOTE: applicationId is intentionally "com.termux" so that the official Termux
-        // bootstrap works unmodified. apt/dpkg/bash in the bootstrap have
-        // /data/data/com.termux baked in at compile time; any other package name breaks them.
-        // Consequence: this app cannot be installed alongside the real Termux app.
-        applicationId "com.termux"
+        // NOTE: applicationId is "com.coomi.android" (Coomi's own package name).
+        // The official Termux bootstrap has /data/data/com.termux baked into apt/dpkg/bash
+        // at compile time, so package installation (pkg/apt) may fail until a bootstrap
+        // rebuilt for com.coomi.android is supplied; bash and most core tools work via $PREFIX.
+        applicationId "com.coomi.android"
         minSdkVersion project.properties.minSdkVersion.toInteger()
         targetSdkVersion project.properties.targetSdkVersion.toInteger()
-        versionCode 3
-        versionName "1.0.0"
+        versionCode 4
+        versionName "1.1.0"
 
         if (appVersionName) versionName = appVersionName
         validateVersionName(versionName)
@@ -62,7 +62,7 @@ android {
         // 演示包开关：只有 demo 构建类型会打成 true，见 buildTypes.demo。
         buildConfigField "boolean", "COOMI_DEMO", "false"
 
-        manifestPlaceholders.TERMUX_PACKAGE_NAME = "com.termux"
+        manifestPlaceholders.TERMUX_PACKAGE_NAME = "com.coomi.android"
         manifestPlaceholders.TERMUX_APP_NAME = "Coomi"
         manifestPlaceholders.TERMUX_API_APP_NAME = "Coomi:API"
         manifestPlaceholders.TERMUX_BOOT_APP_NAME = "Coomi:Boot"
@@ -261,7 +261,7 @@ def validateVersionName(String versionName) {
  * Stage the bootstrap zip that gets embedded into the APK via the libtermux-bootstrap NDK module.
  *
  * We use the official Termux bootstrap from references/termux-bootstrap/ rather than downloading
- * a custom one, which is why applicationId must stay "com.termux" (see defaultConfig above).
+ * a custom one (see defaultConfig above for the package-name caveat).
  */
 def stageBootstrap(String arch) {
     def target = new File(projectDir, "src/main/cpp/bootstrap-" + arch + ".zip")

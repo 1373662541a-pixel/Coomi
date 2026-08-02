@@ -150,7 +150,7 @@ export const useSessionStore = defineStore('session', () => {
       case 'compression': pushNotice('info', `上下文已压缩 ${fmtTokens(ev.before)} → ${fmtTokens(ev.after)}`); break
       case 'connection_retry': connection.setRetry(`${ev.message}（${ev.attempt}/${ev.max_attempts}）`); break
       case 'agent_error': endAssistantStream(); pushNotice(ev.is_fatal ? 'error' : 'warn', ev.message); if (ev.is_fatal) runState.value = 'idle'; break
-      case 'agent_cancelled': endAssistantStream(); pushNotice('warn', '已停止本轮执行'); break
+      case 'agent_cancelled': endAssistantStream(); cancelRunningTools(); pushNotice('warn', '已停止本轮执行'); break
       case 'bg_task_detached': pushNotice('info', `↪ 已转入后台任务 #${ev.task_id}（${ev.tool_name}）`); break
       case 'bg_task_completed': pushNotice(ev.is_error ? 'error' : 'success', `${ev.is_error ? '✕' : '✓'} 后台任务 #${ev.task_id} ${ev.is_error ? '失败' : '完成'}`); break
       case 'loop_progress':
@@ -159,8 +159,22 @@ export const useSessionStore = defineStore('session', () => {
       case 'loop_step_start':
         loop.value = { ...loop.value, active: true, totalSteps: ev.total_steps, currentStep: ev.step_index, currentDescription: ev.step_description }
         break
-      case 'turn_end': endAssistantStream(); connection.setRetry(null); runState.value = 'idle'; persistSoon(); break
+      case 'turn_end': endAssistantStream(); cancelRunningTools(); connection.setRetry(null); runState.value = 'idle'; persistSoon(); break
     }
+  }
+
+  function cancelRunningTools() {
+    // 停止后引擎可能不会逐个补发 tool_done：把仍在运行/准备中的工具卡片
+    // 收尾为「已取消」，否则卡片会永远停在旋转的「运行中」状态。
+    let changed = false
+    for (const item of timeline.value) {
+      if (item.kind === 'tool' && (item.status === 'running' || item.status === 'starting')) {
+        item.status = 'cancelled'
+        item.isError = true
+        changed = true
+      }
+    }
+    if (changed) persistSoon()
   }
 
   function sendMessage(text: string) {

@@ -27,6 +27,8 @@ export interface SessionMeta {
   updatedAt: number
   turns: number
   pinned: boolean
+  /** 创建该会话时的工作目录；用于把不同项目的会话隔离开。 */
+  cwd?: string
 }
 
 export interface SessionGroup {
@@ -64,6 +66,12 @@ export function formatSessionTime(ts: number): string {
 export const useSessionsStore = defineStore('sessions', () => {
   const metas = ref<SessionMeta[]>(readMetas())
   const query = ref('')
+  /** 引擎当前工作目录（来自 /api/runtime/health），用于会话按项目隔离。 */
+  const currentCwd = ref('')
+
+  function setCurrentCwd(cwd: string) {
+    currentCwd.value = cwd
+  }
 
   const sorted = computed(() =>
     [...metas.value].sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt)
@@ -75,7 +83,7 @@ export const useSessionsStore = defineStore('sessions', () => {
     return sorted.value.filter(m => m.title.toLowerCase().includes(q))
   })
 
-  /** 置顶 / 今天 / 昨天 / 7 天内 / 更早 —— 空组不出现。 */
+  /** 置顶 / 今天 / 昨天 / 7 天内 / 更早 / 其它目录 —— 空组不出现。 */
   const groups = computed<SessionGroup[]>(() => {
     const buckets: SessionGroup[] = [
       { label: '置顶', items: [] },
@@ -83,12 +91,17 @@ export const useSessionsStore = defineStore('sessions', () => {
       { label: '昨天', items: [] },
       { label: '7 天内', items: [] },
       { label: '更早', items: [] },
+      { label: '其它目录', items: [] },
     ]
     const today = dayStart()
     const yesterday = dayStart(1)
     const week = dayStart(7)
+    const current = currentCwd.value
     for (const m of filtered.value) {
       if (m.pinned) buckets[0].items.push(m)
+      // 会话属于其它工作目录时归入「其它目录」，避免把别的项目的会话混进当前项目。
+      // cwd 为空的是旧数据，按当前项目对待。
+      else if (current && m.cwd && m.cwd !== current) buckets[5].items.push(m)
       else if (m.updatedAt >= today) buckets[1].items.push(m)
       else if (m.updatedAt >= yesterday) buckets[2].items.push(m)
       else if (m.updatedAt >= week) buckets[3].items.push(m)
@@ -126,7 +139,7 @@ export const useSessionsStore = defineStore('sessions', () => {
   function ensure(id: string, title = '新对话'): SessionMeta {
     let m = find(id)
     if (!m) {
-      m = { id, title, createdAt: Date.now(), updatedAt: Date.now(), turns: 0, pinned: false }
+      m = { id, title, createdAt: Date.now(), updatedAt: Date.now(), turns: 0, pinned: false, cwd: currentCwd.value || undefined }
       metas.value.unshift(m)
       persistMeta()
     }
@@ -235,7 +248,7 @@ export const useSessionsStore = defineStore('sessions', () => {
   }
 
   return {
-    metas, query, sorted, filtered, groups,
+    metas, query, sorted, filtered, groups, currentCwd, setCurrentCwd,
     ensure, touch, rename, togglePin, remove, find, deriveTitle,
     saveTranscript, loadTranscript, migrateId, clearAll,
   }

@@ -39,7 +39,7 @@ use tokio::process::Command;
 
 pub use crate::agents::AgentScheduler;
 use crate::agents::snapshots_json;
-use crate::processes::ProcessManager;
+pub use crate::processes::ProcessManager;
 
 const DEFAULT_MAX_OUTPUT: usize = 48_000;
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
@@ -50,7 +50,7 @@ pub struct CoreTools {
     skills_directory: Option<PathBuf>,
     config_home: Option<PathBuf>,
     max_output: usize,
-    processes: ProcessManager,
+    processes: Arc<ProcessManager>,
     plan: Arc<Mutex<Option<PlanState>>>,
     loop_state: Arc<Mutex<Option<LoopState>>>,
     agent_scheduler: Option<Arc<AgentScheduler>>,
@@ -68,7 +68,7 @@ impl CoreTools {
             skills_directory: None,
             config_home: None,
             max_output: DEFAULT_MAX_OUTPUT,
-            processes: ProcessManager::default(),
+            processes: Arc::new(ProcessManager::default()),
             plan: Arc::new(Mutex::new(None)),
             loop_state: Arc::new(Mutex::new(None)),
             agent_scheduler: None,
@@ -97,6 +97,10 @@ impl CoreTools {
         self.plan = Arc::new(Mutex::new(plan));
         self.loop_state = Arc::new(Mutex::new(loop_state));
         self
+    }
+
+    pub fn process_manager(&self) -> Arc<ProcessManager> {
+        Arc::clone(&self.processes)
     }
 
     pub fn with_skills_directory(mut self, directory: PathBuf) -> Self {
@@ -139,6 +143,7 @@ impl CoreTools {
             "shell" => self.shell(call, approval).await,
             "apply_patch" => self.apply_patch(call, approval).await,
             "web_search" => self.web_search(&call.arguments).await,
+            "fetch" => self.fetch_url(&call.arguments).await,
             "view_image" => self.view_image(&call.arguments).await,
             "request_user_input" => self.request_user_input(&call.arguments, approval).await,
             "request_file_import" => self.request_file_transfer(call, approval, "import").await,
@@ -408,12 +413,42 @@ impl CoreTools {
                 ));
             }
         };
+        let mut failures = Vec::new();
+
+        // Preferred endpoint: Bing RSS. It returns stable, lightweight XML from mainland
+        // China (cn.bing.com) without JavaScript rendering or aggressive bot detection.
+        match client
+            .get("https://cn.bing.com/search")
+            .query(&[("format", "rss"), ("q", query)])
+            .header("Accept", "application/rss+xml, application/xml, text/xml")
+            .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.7")
+            .header(
+                "User-Agent",
+                "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/125 Mobile Safari/537.36",
+            )
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => match read_body_capped(response).await {
+                Ok(body) => {
+                    let results = parse_bing_rss(&body, limit);
+                    if !results.is_empty() {
+                        return ToolResult::success(results.join("\n"));
+                    }
+                    failures.push("Bing RSS returned no parseable items".to_string());
+                }
+                Err(error) => failures.push(format!("Bing RSS response read failed: {error}")),
+            },
+            Ok(response) => failures.push(format!("Bing RSS: HTTP {}", response.status())),
+            Err(error) => failures.push(format!("Bing RSS: {error}")),
+        }
+
+        // Fallback: plain-HTML search endpoints.
         let endpoints = [
             "https://cn.bing.com/search",
             "https://html.duckduckgo.com/html/",
             "https://lite.duckduckgo.com/lite/",
         ];
-        let mut failures = Vec::new();
         let mut html = None;
         for endpoint in endpoints {
             let response = client
@@ -421,20 +456,25 @@ impl CoreTools {
                 .query(&[("q", query)])
                 .header("Accept", "text/html,application/xhtml+xml")
                 .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.7")
-                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/125 Mobile Safari/537.36")
+                .header(
+                    "User-Agent",
+                    "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/125 Mobile Safari/537.36",
+                )
                 .send()
                 .await;
             match response {
-                Ok(response) if response.status().is_success() => match response.text().await {
-                    Ok(body) if !body.trim().is_empty() => {
-                        html = Some(body);
-                        break;
+                Ok(response) if response.status().is_success() => {
+                    match read_body_capped(response).await {
+                        Ok(body) if !body.trim().is_empty() => {
+                            html = Some(body);
+                            break;
+                        }
+                        Ok(_) => failures.push(format!("{endpoint}: empty response")),
+                        Err(error) => {
+                            failures.push(format!("{endpoint}: response read failed: {error}"))
+                        }
                     }
-                    Ok(_) => failures.push(format!("{endpoint}: empty response")),
-                    Err(error) => {
-                        failures.push(format!("{endpoint}: response read failed: {error}"))
-                    }
-                },
+                }
                 Ok(response) => failures.push(format!("{endpoint}: HTTP {}", response.status())),
                 Err(error) => failures.push(format!("{endpoint}: {error}")),
             }
@@ -442,33 +482,34 @@ impl CoreTools {
         let Some(html) = html else {
             return web_search_unavailable(failures.join("; "));
         };
-        let result_re = Regex::new(
-            r#"(?is)<a[^>]+(?:class=['\"][^'\"]*(?:result__a|result-link)[^'\"]*['\"][^>]*href=['\"]([^'\"]+)['\"]|href=['\"]([^'\"]+)['\"][^>]*class=['\"][^'\"]*(?:result__a|result-link)[^'\"]*['\"])[^>]*>(.*?)</a>"#,
-        ).expect("valid search result regex");
         let tag_re = Regex::new(r"<[^>]+>").expect("valid HTML tag regex");
         let mut results = Vec::new();
-        for captures in result_re.captures_iter(&html).take(limit) {
-            let raw_url = captures
-                .get(1)
-                .or_else(|| captures.get(2))
-                .map_or("", |value| value.as_str());
-            let url = normalize_search_url(raw_url);
-            let title = captures.get(3).map_or("", |value| value.as_str());
-            let title = decode_html(&tag_re.replace_all(title, ""));
+        let bing_re = Regex::new(
+            r#"(?is)<li[^>]+class=['\"][^'\"]*b_algo[^'\"]*['\"][^>]*>.*?<h2[^>]*>\s*<a[^>]+href=['\"]([^'\"]+)['\"][^>]*>(.*?)</a>"#,
+        )
+        .expect("valid Bing result regex");
+        for captures in bing_re.captures_iter(&html).take(limit) {
+            let url = normalize_search_url(captures.get(1).map_or("", |value| value.as_str()));
+            let title = decode_html(
+                &tag_re.replace_all(captures.get(2).map_or("", |value| value.as_str()), ""),
+            );
             if !title.trim().is_empty() && !url.is_empty() {
                 results.push(format!("- {title}\n  {url}"));
             }
         }
         if results.is_empty() {
-            let bing_re = Regex::new(
-                r#"(?is)<li[^>]+class=['\"][^'\"]*b_algo[^'\"]*['\"][^>]*>.*?<h2[^>]*>\s*<a[^>]+href=['\"]([^'\"]+)['\"][^>]*>(.*?)</a>"#,
+            let result_re = Regex::new(
+                r#"(?is)<a[^>]+(?:class=['\"][^'\"]*(?:result__a|result-link)[^'\"]*['\"][^>]*href=['\"]([^'\"]+)['\"]|href=['\"]([^'\"]+)['\"][^>]*class=['\"][^'\"]*(?:result__a|result-link)[^'\"]*['\"])[^>]*>(.*?)</a>"#,
             )
-            .expect("valid Bing result regex");
-            for captures in bing_re.captures_iter(&html).take(limit) {
-                let url = normalize_search_url(captures.get(1).map_or("", |value| value.as_str()));
-                let title = decode_html(
-                    &tag_re.replace_all(captures.get(2).map_or("", |value| value.as_str()), ""),
-                );
+            .expect("valid search result regex");
+            for captures in result_re.captures_iter(&html).take(limit) {
+                let raw_url = captures
+                    .get(1)
+                    .or_else(|| captures.get(2))
+                    .map_or("", |value| value.as_str());
+                let url = normalize_search_url(raw_url);
+                let title = captures.get(3).map_or("", |value| value.as_str());
+                let title = decode_html(&tag_re.replace_all(title, ""));
                 if !title.trim().is_empty() && !url.is_empty() {
                     results.push(format!("- {title}\n  {url}"));
                 }
@@ -479,6 +520,125 @@ impl CoreTools {
         } else {
             ToolResult::success(results.join("\n"))
         }
+    }
+
+    /// Built-in `fetch` tool: reads a web page over HTTP(S) and returns its readable text.
+    /// This is the embedded equivalent of the mcp-server-fetch `fetch` tool so that web
+    /// fetching works on Android out of the box (no python/npx runtime required).
+    async fn fetch_url(&self, arguments: &Value) -> ToolResult {
+        let Some(url) = string_arg(arguments, "url") else {
+            return ToolResult::error("missing string argument: url");
+        };
+        let max_length = usize_arg(arguments, "max_length")
+            .unwrap_or(20_000)
+            .clamp(1_000, 100_000);
+        let parsed = match reqwest::Url::parse(url.trim()) {
+            Ok(parsed) => parsed,
+            Err(error) => return ToolResult::error(format!("invalid URL: {error}")),
+        };
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return ToolResult::error("only http and https URLs are supported");
+        }
+        let client = match reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+        {
+            Ok(client) => client,
+            Err(error) => {
+                return ToolResult::error(format!("HTTP client initialization failed: {error}"))
+            }
+        };
+        // Follow redirects manually so every hop can be re-checked against local/private
+        // addresses (SSRF guard). Never follow more than 8 hops.
+        let mut current = parsed;
+        let mut response = None;
+        for _ in 0..8 {
+            if is_blocked_url(&current).await {
+                return ToolResult::error(format!(
+                    "blocked URL resolving to a local/private address: {current}"
+                ));
+            }
+            let result = client
+                .get(current.clone())
+                .header(
+                    "Accept",
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                )
+                .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.7")
+                .header(
+                    "User-Agent",
+                    "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/125 Mobile Safari/537.36",
+                )
+                .send()
+                .await;
+            let received = match result {
+                Ok(received) => received,
+                Err(error) => return ToolResult::error(format!("request failed: {error}")),
+            };
+            if received.status().is_redirection() {
+                let Some(location) = received
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                else {
+                    break;
+                };
+                match current.join(location) {
+                    Ok(next) if matches!(next.scheme(), "http" | "https") => current = next,
+                    Ok(_) => {
+                        return ToolResult::error("redirect to a non-http(s) URL is not allowed")
+                    }
+                    Err(error) => {
+                        return ToolResult::error(format!("invalid redirect location: {error}"))
+                    }
+                }
+                continue;
+            }
+            response = Some(received);
+            break;
+        }
+        let Some(response) = response else {
+            return ToolResult::error("too many redirects or redirect without a location header");
+        };
+        if !response.status().is_success() {
+            return ToolResult::error(format!("HTTP {}", response.status()));
+        }
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if content_type.starts_with("image/")
+            || content_type.starts_with("audio/")
+            || content_type.starts_with("video/")
+            || content_type.contains("octet-stream")
+            || content_type.contains("application/zip")
+            || content_type.contains("application/pdf")
+        {
+            return ToolResult::error(format!("unsupported binary content type: {content_type}"));
+        }
+        // Cap the body read to avoid OOM on huge pages (Android is memory-constrained).
+        let body = match read_body_capped(response).await {
+            Ok(body) => body,
+            Err(error) => return ToolResult::error(error),
+        };
+        let text = if looks_like_html(&body) {
+            html_to_text(&body)
+        } else {
+            collapse_whitespace(&body)
+        };
+        let mut text = text.trim().to_string();
+        if text.is_empty() {
+            return ToolResult::error("page contained no readable text");
+        }
+        if text.chars().count() > max_length {
+            let truncated: String = text.chars().take(max_length).collect();
+            text = format!("{truncated}\n\n[content truncated at {max_length} characters]");
+        }
+        ToolResult::success(text)
     }
 
     async fn view_image(&self, arguments: &Value) -> ToolResult {
@@ -1209,7 +1369,7 @@ impl ToolRuntime for CoreTools {
             },
             ToolSpec {
                 name: "web_search".into(),
-                description: "Search the web using the configured provider's native search or the built-in HTTP adapter. If this tool reports unavailable, explain the failure once and do not replace it with shell commands such as curl or wget.".into(),
+                description: "Search the web and return ranked result links with short snippets. Use the fetch tool to read the full content of a result page. If this tool reports unavailable, explain the failure once and do not replace it with shell commands such as curl or wget.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -1217,6 +1377,19 @@ impl ToolRuntime for CoreTools {
                         "limit": {"type": "integer", "minimum": 1, "maximum": 10}
                     },
                     "required": ["query"],
+                    "additionalProperties": false
+                }),
+            },
+            ToolSpec {
+                name: "fetch".into(),
+                description: "Fetch a web page over HTTP(S) and return its readable text content. Use it to read the pages found by web_search, or to access any public web page. Only http/https URLs are allowed; JavaScript is not executed.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string"},
+                        "max_length": {"type": "integer", "minimum": 1000, "maximum": 100000}
+                    },
+                    "required": ["url"],
                     "additionalProperties": false
                 }),
             },
@@ -1637,8 +1810,231 @@ fn decode_html(value: &str) -> String {
         .replace("&amp;", "&")
         .replace("&quot;", "\"")
         .replace("&#x27;", "'")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
+        .replace("&nbsp;", " ")
+        .replace("&#x2F;", "/")
+        .replace("&#x2f;", "/")
+        .replace("&#58;", ":")
+        .replace("&ldquo;", "\"")
+        .replace("&rdquo;", "\"")
+        .replace("&lsquo;", "'")
+        .replace("&rsquo;", "'")
+        .replace("&mdash;", "—")
+        .replace("&ndash;", "–")
+        .replace("&hellip;", "…")
+        .replace("&middot;", "·")
+}
+
+fn collapse_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Maximum bytes read from any remote body (web_search / fetch) to avoid OOM on Android.
+const MAX_BODY_BYTES: usize = 512 * 1024;
+
+/// Read a response body capped at [`MAX_BODY_BYTES`], lossy-decoded to UTF-8.
+async fn read_body_capped(mut response: reqwest::Response) -> Result<String, String> {
+    let mut body = Vec::new();
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                let remaining = MAX_BODY_BYTES - body.len();
+                body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+                if body.len() >= MAX_BODY_BYTES {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(error) => return Err(format!("response read failed: {error}")),
+        }
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
+fn looks_like_html(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    body.trim_start().starts_with('<') && (lower.contains("<html") || lower.contains("<!doctype"))
+}
+
+/// SSRF guard: reject URLs that resolve to loopback, private, link-local, unspecified,
+/// multicast or broadcast addresses (and DNS names resolving to them). Also covers the
+/// cloud metadata address 169.254.169.254 via the link-local check.
+async fn is_blocked_url(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return true;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return ip_is_blocked(&ip);
+    }
+    // Resolve the hostname; a failure to resolve is treated as unreachable/blocked.
+    let port = url.port_or_known_default().unwrap_or(80);
+    match tokio::net::lookup_host((host, port)).await {
+        Ok(addresses) => addresses.map(|address| address.ip()).any(|ip| ip_is_blocked(&ip)),
+        Err(_) => true,
+    }
+}
+
+/// Extract the IPv4 address embedded in a NAT64 (`64:ff9b::/32`, RFC 6052) or 6to4
+/// (`2002::/16`) IPv6 address, if any. Used to extend the SSRF guard to those
+/// transition prefixes.
+fn embedded_ipv4(v6: &std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
+    let octets = v6.octets();
+    // NAT64 family 64:ff9b::/32 (RFC 6052):
+    //  - PL=96 (64:ff9b::/96): bytes 4..11 are zero, IPv4 is the last 32 bits.
+    //  - PL=32..64 (u bits live in bytes 4..7): IPv4 is at bytes 8..11, tail is zero.
+    if octets[..4] == [0x00, 0x64, 0xff, 0x9b] {
+        if octets[4..12] == [0, 0, 0, 0, 0, 0, 0, 0] {
+            return Some(std::net::Ipv4Addr::new(
+                octets[12], octets[13], octets[14], octets[15],
+            ));
+        }
+        if octets[12..16] == [0, 0, 0, 0] {
+            return Some(std::net::Ipv4Addr::new(
+                octets[8], octets[9], octets[10], octets[11],
+            ));
+        }
+        return None;
+    }
+    // 6to4: 2002::/16, IPv4 at bytes 2..5.
+    if octets[..2] == [0x20, 0x02] {
+        return Some(std::net::Ipv4Addr::new(octets[2], octets[3], octets[4], octets[5]));
+    }
+    None
+}
+
+fn ip_is_blocked(ip: &std::net::IpAddr) -> bool {
+    // Reject IPv4-mapped IPv6 addresses (e.g. [::ffff:127.0.0.1]) by checking the
+    // embedded IPv4 address, which is what a connection actually targets.
+    if let std::net::IpAddr::V6(v6) = ip {
+        if let Some(v4) = v6.to_ipv4_mapped() {
+            return ip_is_blocked(&std::net::IpAddr::V4(v4));
+        }
+        // NAT64 / 6to4 transition prefixes embed an IPv4 address (e.g. carrier NAT64
+        // on cellular networks); check that address as well.
+        let octets = v6.octets();
+        if octets[..4] == [0x00, 0x64, 0xff, 0x9b] {
+            if let Some(v4) = embedded_ipv4(v6) {
+                if ip_is_blocked(&std::net::IpAddr::V4(v4)) {
+                    return true;
+                }
+            }
+            // Fail-closed: non-standard NAT64 gateways may place the embedded IPv4 at
+            // any of the RFC 6052 / other window positions. If *any* window decodes to
+            // a loopback/private/link-local address, block it. 0.0.0.0 is deliberately
+            // excluded here (it is common in the u-byte region of legitimate addresses).
+            for window in [
+                &octets[4..8],
+                &octets[5..9],
+                &octets[6..10],
+                &octets[7..11],
+                &octets[8..12],
+                &octets[9..13],
+                &octets[12..16],
+            ] {
+                let candidate = std::net::Ipv4Addr::new(window[0], window[1], window[2], window[3]);
+                if candidate.is_loopback()
+                    || candidate.is_private()
+                    || candidate.is_link_local()
+                {
+                    return true;
+                }
+            }
+        } else if let Some(v4) = embedded_ipv4(v6) {
+            // 6to4 (2002::/16): fixed window, treat like the mapped case.
+            return ip_is_blocked(&std::net::IpAddr::V4(v4));
+        }
+    }
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+        }
+    }
+}
+
+fn html_to_text(body: &str) -> String {
+    // NOTE: regex crate does not support backreferences (`\1`), so each tag kind is
+    // matched with its own literal pair instead of one alternation with a backref.
+    let tag_pairs = [
+        r"(?is)<script\b[^>]*>.*?</script>",
+        r"(?is)<style\b[^>]*>.*?</style>",
+        r"(?is)<noscript\b[^>]*>.*?</noscript>",
+        r"(?is)<svg\b[^>]*>.*?</svg>",
+        r"(?is)<head\b[^>]*>.*?</head>",
+    ];
+    let tag_re = Regex::new(r"<[^>]+>").expect("valid HTML tag regex");
+    let mut stripped = body.to_string();
+    for pattern in tag_pairs {
+        let block_re = Regex::new(pattern).expect("valid block regex");
+        stripped = block_re.replace_all(&stripped, " ").into_owned();
+    }
+    let text = tag_re.replace_all(&stripped, " ");
+    collapse_whitespace(&decode_html(&text))
+}
+
+/// Parse Bing's RSS search results (`format=rss`): title, link and a short snippet per item.
+fn parse_bing_rss(body: &str, limit: usize) -> Vec<String> {
+    let item_re = Regex::new(r"(?is)<item>(.*?)</item>").expect("valid RSS item regex");
+    let title_re = Regex::new(r"(?is)<title>(.*?)</title>").expect("valid RSS title regex");
+    let link_re = Regex::new(r"(?is)<link>(.*?)</link>").expect("valid RSS link regex");
+    let desc_re =
+        Regex::new(r"(?is)<description>(.*?)</description>").expect("valid RSS description regex");
+    let cdata_re = Regex::new(r"(?is)<!\[CDATA\[(.*?)\]\]>").expect("valid CDATA regex");
+    let tag_re = Regex::new(r"<[^>]+>").expect("valid HTML tag regex");
+    let mut results = Vec::new();
+    for item in item_re.captures_iter(body).take(limit) {
+        let block = &item[1];
+        let title = title_re
+            .captures(block)
+            .map_or("", |m| m.get(1).map_or("", |v| v.as_str()));
+        let link = link_re
+            .captures(block)
+            .map_or("", |m| m.get(1).map_or("", |v| v.as_str()));
+        let description = desc_re
+            .captures(block)
+            .map_or("", |m| m.get(1).map_or("", |v| v.as_str()));
+        let title = strip_cdata_and_tags(&tag_re, &cdata_re, title);
+        let url = normalize_search_url(link);
+        if !title.trim().is_empty() && !url.is_empty() {
+            let mut line = format!("- {title}\n  {url}");
+            let snippet = strip_cdata_and_tags(&tag_re, &cdata_re, description);
+            let snippet = collapse_whitespace(&snippet);
+            if !snippet.is_empty() {
+                line.push_str("\n  ");
+                line.push_str(&snippet.chars().take(280).collect::<String>());
+            }
+            results.push(line);
+        }
+    }
+    results
+}
+
+fn strip_cdata_and_tags(tag_re: &Regex, cdata_re: &Regex, value: &str) -> String {
+    let value = value.trim();
+    let value = if let Some(captures) = cdata_re.captures(value) {
+        captures.get(1).map_or("", |v| v.as_str())
+    } else {
+        value
+    };
+    let value = tag_re.replace_all(value, "");
+    decode_html(&value).trim().to_string()
 }
 
 fn normalize_search_url(value: &str) -> String {
@@ -1839,5 +2235,79 @@ mod tests {
         let config = std::fs::read_to_string(home.path().join("config/mcp_servers.json"))
             .expect("MCP configuration");
         assert!(config.contains("mcp==1.16.0"));
+    }
+
+    #[test]
+    fn html_to_text_strips_scripts_styles_and_markup() {
+        let html = "<!doctype html><html><head><title>T</title></head><body>\
+            <script>alert(1)</script><style>.x{}</style>\
+            <p>Hello&nbsp;<b>world</b>!</p></body></html>";
+        let text = html_to_text(html);
+        assert!(text.contains("Hello"));
+        assert!(text.contains("world"));
+        assert!(!text.contains("alert"), "script content must be stripped: {text}");
+        assert!(!text.contains("script"), "script tag must be stripped: {text}");
+        assert!(!text.contains("style"), "style tag must be stripped: {text}");
+        assert!(!text.contains("&nbsp;"), "entities must be decoded: {text}");
+    }
+
+    #[test]
+    fn html_to_text_handles_script_with_angle_brackets() {
+        let html = "<html><body>a<script>function f() { if (a < b) {} }</script>b</body></html>";
+        let text = html_to_text(html);
+        assert_eq!(text, "a b");
+    }
+
+    #[test]
+    fn parse_bing_rss_extracts_items() {
+        let rss = r#"<?xml version="1.0"?><rss><channel><item><title><![CDATA[Example &amp; Result]]></title><link>https://example.com/a?q=1</link><description><![CDATA[<p>First snippet</p>]]></description></item><item><title><![CDATA[Second]]></title><link>https://example.com/b</link><description><![CDATA[Second snippet]]></description></item></channel></rss>"#;
+        let results = parse_bing_rss(rss, 10);
+        assert_eq!(results.len(), 2);
+        assert!(results[0].contains("Example & Result"));
+        assert!(results[0].contains("https://example.com/a?q=1"));
+        assert!(results[0].contains("First snippet"));
+        assert!(results[1].contains("Second"));
+    }
+
+    #[test]
+    fn ip_is_blocked_rejects_loopback_private_and_mapped_addresses() {
+        let blocked = [
+            "127.0.0.1",
+            "::1",
+            "10.0.0.5",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "0.0.0.0",
+            "::ffff:127.0.0.1",
+            "::ffff:10.0.0.1",
+            // NAT64 (64:ff9b::/96, /48 and other RFC 6052 layouts) and 6to4 (2002::/16)
+            // embed an IPv4 address.
+            "64:ff9b::a00:1",
+            "64:ff9b:0:0:7f00:1::",
+            "64:ff9b:7f00:1:0:0:0:0",
+            "64:ff9b:0:a00:1::",
+            // PL=64 layout: IPv4 at bytes 9..12 (u byte at byte 8).
+            "64:ff9b:0:0:7f:0:100::",
+            "2002:7f00:1::",
+            "2002:a00:1::",
+        ];
+        for value in blocked {
+            let ip: std::net::IpAddr = value.parse().expect("valid IP");
+            assert!(ip_is_blocked(&ip), "{value} must be blocked");
+        }
+        let allowed = [
+            "8.8.8.8",
+            "1.1.1.1",
+            "2606:4700:4700::1111",
+            "2001:4860:4860::8888",
+            // Legitimate NAT64-mapped public address must not be over-blocked.
+            "64:ff9b::808:808",
+            "64:ff9b::8.8.8.8",
+        ];
+        for value in allowed {
+            let ip: std::net::IpAddr = value.parse().expect("valid IP");
+            assert!(!ip_is_blocked(&ip), "{value} must be allowed");
+        }
     }
 }

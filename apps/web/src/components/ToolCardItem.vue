@@ -28,6 +28,7 @@ const st = computed(() => {
   switch (props.card.status) {
     case 'success': return { label: '', cls: 'ok', spin: false, icon: 'check' }
     case 'error': return { label: '失败', cls: 'err', spin: false, icon: 'close' }
+    case 'cancelled': return { label: '已取消', cls: 'cancelled', spin: false, icon: 'close' }
     case 'awaiting_approval': return { label: '待授权', cls: 'wait', spin: false, icon: 'shield' }
     case 'cache_hit': return { label: '缓存', cls: 'cache', spin: false, icon: 'bolt' }
     case 'starting': return { label: '准备', cls: 'run', spin: true, icon: '' }
@@ -183,6 +184,7 @@ async function copy(text: string) {
 .tile.ok { background: var(--ok-soft); color: var(--ok); }
 .tile.err { background: var(--danger-soft); color: var(--danger); }
 .tile.wait { background: var(--bg); color: var(--orange); }
+.tile.cancelled { background: var(--fill-strong); color: var(--text-3); }
 .ring {
   position: absolute; inset: -3px;
   border: 1.6px solid var(--blue-border); border-top-color: var(--blue);
@@ -205,6 +207,7 @@ async function copy(text: string) {
 .st.ok { color: var(--ok); }
 .st.err { color: var(--danger); }
 .st.wait { color: var(--orange); }
+.st.cancelled { color: var(--text-3); }
 .ms { font-weight: 400; color: var(--text-3); }
 .chev { flex-shrink: 0; color: var(--text-3); transition: transform .18s; }
 .chev.open { transform: rotate(90deg); }

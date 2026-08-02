@@ -1,6 +1,6 @@
 import type { ToolAccess } from '@/protocol/events'
 
-export type ToolCardStatus = 'starting' | 'running' | 'success' | 'error' | 'awaiting_approval' | 'cache_hit'
+export type ToolCardStatus = 'starting' | 'running' | 'success' | 'error' | 'awaiting_approval' | 'cache_hit' | 'cancelled'
 
 export interface ToolCard {
   kind: 'tool'

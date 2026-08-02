@@ -8,7 +8,11 @@ use axum::extract::State;
 use axum::extract::ws::Message;
 use axum::extract::ws::WebSocket;
 use axum::extract::ws::WebSocketUpgrade;
+use axum::http::HeaderMap;
+use axum::http::HeaderValue;
+use axum::http::Method;
 use axum::http::StatusCode;
+use axum::http::header;
 use axum::response::IntoResponse;
 use axum::routing::delete;
 use axum::routing::get;
@@ -38,6 +42,7 @@ use coomi_services::ProviderSettings;
 use coomi_services::list_installed_skills;
 use coomi_tools::AgentScheduler;
 use coomi_tools::CoreTools;
+use coomi_tools::ProcessManager;
 use futures_util::SinkExt;
 use futures_util::StreamExt;
 use serde_json::Value;
@@ -92,6 +97,7 @@ struct ConnectionContext {
     input_queue: Arc<InputQueue>,
     active_task: StdMutex<Option<AbortHandle>>,
     running: AtomicBool,
+    processes: StdMutex<Option<Arc<ProcessManager>>>,
 }
 
 impl ConnectionContext {
@@ -107,6 +113,7 @@ impl ConnectionContext {
             input_queue: Arc::new(InputQueue::default()),
             active_task: StdMutex::new(None),
             running: AtomicBool::new(false),
+            processes: StdMutex::new(None),
         }
     }
 
@@ -172,7 +179,22 @@ pub async fn serve(home: PathBuf, cwd: PathBuf, port: u16, static_dir: PathBuf) 
         )
         .route("/ws/session/{session_id}", get(websocket_route))
         .fallback_service(files)
-        .layer(CorsLayer::permissive())
+        // Local bridge: only allow same-origin browser access (the Android WebView and
+        // a browser pointed at 127.0.0.1:{port}). Restricting CORS + WS Origin closes the
+        // cross-site attack surface where an arbitrary web page could read provider keys.
+        .layer(
+            CorsLayer::new()
+                .allow_origin(vec![
+                    format!("http://127.0.0.1:{port}")
+                        .parse::<HeaderValue>()
+                        .expect("valid origin"),
+                    format!("http://localhost:{port}")
+                        .parse::<HeaderValue>()
+                        .expect("valid origin"),
+                ])
+                .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+                .allow_headers([header::CONTENT_TYPE, header::ACCEPT]),
+        )
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
@@ -192,6 +214,7 @@ async fn runtime_health(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "status": if active.is_some() { "ok" } else { "setup_required" },
         "version": BRIDGE_VERSION,
+        "cwd": state.cwd.display().to_string(),
         "engine": {
             "initialized": active.is_some(),
             "llm": active.map(|provider| provider.model.clone()),
@@ -478,7 +501,21 @@ async fn websocket_route(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     AxumPath(session_id): AxumPath<String>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
+    // Reject cross-origin WebSocket upgrades (e.g. from arbitrary web pages). Requests
+    // without an Origin header (curl, CLI tools) are allowed — there is no browser
+    // CSRF context for them.
+    let allowed_origins = [
+        format!("http://127.0.0.1:{}", state.port),
+        format!("http://localhost:{}", state.port),
+    ];
+    if let Some(origin) = headers.get(header::ORIGIN) {
+        let origin = origin.to_str().unwrap_or("");
+        if !allowed_origins.iter().any(|allowed| allowed == origin) {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+    }
     ws.on_upgrade(move |socket| websocket_session(socket, state, session_id))
 }
 
@@ -514,6 +551,17 @@ async fn websocket_session(socket: WebSocket, state: AppState, session_id: Strin
         .take()
     {
         handle.abort();
+    }
+    // Symmetric with `cancel`: kill any shell subprocesses the disconnected turn started.
+    let processes = {
+        let mut guard = context
+            .processes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.take()
+    };
+    if let Some(processes) = processes {
+        processes.terminate_all().await;
     }
     writer.abort();
 }
@@ -585,6 +633,9 @@ async fn handle_command(
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(task.abort_handle());
         }
         "cancel" => {
+            // Abort the agent task first (synchronous), then kill any shell subprocesses
+            // started by tools; killing first would let the still-running agent spawn new
+            // processes that escape this cleanup round.
             if let Some(handle) = context
                 .active_task
                 .lock()
@@ -594,6 +645,16 @@ async fn handle_command(
                 handle.abort();
             }
             context.running.store(false, Ordering::SeqCst);
+            let processes = {
+                let mut guard = context
+                    .processes
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                guard.take()
+            };
+            if let Some(processes) = processes {
+                processes.terminate_all().await;
+            }
             context.send_ack(envelope_id);
             context.send_event(json!({"event_type": "agent_cancelled"}));
             context.send_event(json!({"event_type": "turn_end"}));
@@ -774,29 +835,44 @@ async fn run_turn(
         &state.cwd,
     );
 
+    // Use the session's own working directory so history and context always belong
+    // to the same project; fall back to the engine cwd only when the session's
+    // directory no longer exists (e.g. the project folder was moved).
+    let session_cwd = session.cwd.clone();
+    let cwd = if session_cwd.is_dir() {
+        session_cwd
+    } else {
+        state.cwd.clone()
+    };
+
     let permission = *context.permission.read().await;
     let policy_mode = match permission {
         PermissionMode::Ask => AccessMode::WorkspaceWrite,
         PermissionMode::Auto | PermissionMode::Full => AccessMode::FullAccess,
     };
-    let policy = SecurityPolicy::new(&state.cwd, policy_mode)?;
-    let instructions = coomi_engine::discover_project_instructions(&state.cwd)?;
-    let prompt_context = system_prompt(&state.home, &state.cwd, policy_mode, &instructions);
+    let policy = SecurityPolicy::new(&cwd, policy_mode)?;
+    let instructions = coomi_engine::discover_project_instructions(&cwd)?;
+    let prompt_context = system_prompt(&state.home, &cwd, policy_mode, &instructions);
     let scheduler = AgentScheduler::new(
-        state.cwd.clone(),
+        cwd.clone(),
         state.home.clone(),
         provider_config.clone(),
         policy_mode,
         prompt_context.clone(),
     )
     .without_persistent_memory();
-    let tools = CoreTools::new(state.cwd.clone(), policy)
+    let tools = CoreTools::new(cwd.clone(), policy)
         .with_skills_directory(state.home.join("skills"))
         .with_config_home(state.home.clone())
         .with_session_state(session.plan.clone(), session.loop_state.clone())
         .with_mcp_runtime(Arc::new(McpRuntime::load(&state.home).await))
         .with_hooks(Arc::new(HookRunner::load(&state.home)?))
         .with_agent_scheduler(scheduler, session.messages.clone());
+    // Expose the turn's process manager so `cancel` can kill any shell started by tools.
+    *context
+        .processes
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(tools.process_manager());
     let provider = HttpModelProvider::new(provider_config)?;
     let approval = BrowserApproval {
         context: Arc::clone(&context),
@@ -846,7 +922,13 @@ fn load_or_create_web_session(
         session.id = session_id;
         session
     });
-    session.cwd = cwd.to_path_buf();
+    // Keep the session's original working directory: a session must only ever see
+    // its own project context (history + cwd), never inherit the current engine cwd.
+    // Only brand-new sessions adopt the current cwd; empty cwd only happens for
+    // sessions saved by older versions.
+    if session.cwd.as_os_str().is_empty() {
+        session.cwd = cwd.to_path_buf();
+    }
     session.switch_model(provider_id, model);
     session
 }
@@ -1098,7 +1180,7 @@ fn system_prompt(home: &Path, cwd: &Path, policy: AccessMode, instructions: &str
         .map(|skill| skill.name)
         .collect::<Vec<_>>();
     let mut prompt = format!(
-        "You are Coomi, a pragmatic coding agent running locally on Android. Inspect evidence before editing, keep changes scoped, preserve unrelated work, and verify results. Use request_file_import when the user needs to choose phone files and request_file_export to return local artifacts such as APKs. If web_search reports unavailable, explain the cause once and never replace it with shell, curl, wget, or repeated command-line searches.\n\nWorking directory: {}\nAccess policy: {}",
+        "You are Coomi, a pragmatic coding agent running locally on Android. Inspect evidence before editing, keep changes scoped, preserve unrelated work, and verify results. Use request_file_import when the user needs to choose phone files and request_file_export to return local artifacts such as APKs. For web access, use web_search to find pages and the built-in fetch tool to read their content; if web_search reports unavailable, explain the cause once and never replace it with shell, curl, wget, or repeated command-line searches.\n\nWorking directory: {}\nAccess policy: {}",
         cwd.display(),
         policy.label(),
     );
