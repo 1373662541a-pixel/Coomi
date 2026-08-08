@@ -22,11 +22,11 @@ const MODES = [
 ] as const
 
 const SUGGESTIONS = [
-  { icon: 'phone', text: '查看手机系统信息，包括型号、系统版本和磁盘占用' },
-  { icon: 'globe', text: '看看今天科技圈有哪些热点话题' },
-  { icon: 'folder', text: '整理手机下载目录，把文件按类型归类' },
-  { icon: 'sparkle', text: '查询最近一周 GitHub 上的热门开源项目' },
-]
+  { key: 'web', icon: 'globe', title: '联网', desc: '搜索资讯 · 读取网页 · 下载文件' },
+  { key: 'memory', icon: 'clock', title: '会话记忆', desc: '了解全局会话记忆开关的作用' },
+  { key: 'skills', icon: 'sparkle', title: '技能', desc: '查看可用 Skills 与调用方式' },
+  { key: 'custom', icon: 'cube', title: '自定义', desc: '身份 / 指令 / MCP 拓展入口' },
+] as const
 
 const active = computed(() => (config.planMode ? 'plan' : config.permissionMode === 'ask' ? 'careful' : 'fast'))
 const hint = computed(() => MODES.find(m => m.key === active.value)?.desc ?? '')
@@ -71,13 +71,16 @@ function pick(key: 'fast' | 'plan' | 'careful') {
     <div class="sugs">
       <button
         v-for="(s, i) in SUGGESTIONS"
-        :key="s.text"
+        :key="s.key"
         class="sug cascade"
         :style="{ animationDelay: 40 * i + 'ms' }"
-        @click="session.sendMessage(s.text)"
+        @click="session.sendGuide(s.key)"
       >
         <span class="sicon"><CoomiIcon :name="s.icon" :size="17" /></span>
-        <span class="stext">{{ s.text }}</span>
+        <span class="stext">
+          <span class="stitle">{{ s.title }}</span>
+          <span class="sdesc">{{ s.desc }}</span>
+        </span>
         <CoomiIcon name="chevronRight" :size="14" class="sarrow" />
       </button>
     </div>
@@ -131,7 +134,12 @@ h1 { font-size: 21px; font-weight: 600; letter-spacing: -.3px; color: var(--text
   width: 32px; height: 32px; border-radius: 10px;
   background: var(--blue-soft); color: var(--blue);
 }
-.stext { flex: 1; font-size: 14.5px; line-height: 1.4; color: var(--text); }
+.stext {
+  flex: 1; display: flex; flex-direction: column; gap: 2px;
+  font-size: 14.5px; line-height: 1.4; color: var(--text);
+}
+.stitle { font-weight: 600; }
+.sdesc { font-size: 12.5px; color: var(--text-3); }
 .sarrow { color: var(--text-3); }
 </style>
 

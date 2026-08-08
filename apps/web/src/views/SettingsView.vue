@@ -45,6 +45,14 @@ function isCurrent(providerId: string, model: string): boolean {
 
 /** 进入设置页时拉取定制提示词，保证入口副标题与引擎一致。 */
 onMounted(() => { void config.fetchCustomPrompt() })
+
+/** 报错反馈的 GitHub token（仅存本机 localStorage，用于同步建 issue，不上传服务器）。 */
+const githubToken = ref(localStorage.getItem('coomi.githubToken') ?? '')
+function saveToken() {
+  const t = githubToken.value.trim()
+  if (t) localStorage.setItem('coomi.githubToken', t)
+  else localStorage.removeItem('coomi.githubToken')
+}
 </script>
 <template>
   <div class="page">
@@ -78,7 +86,7 @@ onMounted(() => { void config.fetchCustomPrompt() })
           <span class="ri" :class="{ on: config.globalMemory }"><CoomiIcon name="clock" :size="17" /></span>
           <span class="rt">
             <span class="rmain">全局会话记忆</span>
-            <span class="rsub" :class="{ err: !!gmError }">{{ gmError || '开启后 Coomi 可读取所有历史会话文件' }}</span>
+            <span class="rsub" :class="{ err: !!gmError }">{{ gmError || (config.globalMemory ? '开启后 Coomi 可读取所有历史会话文件' : '全局会话记忆已关闭：Coomi 无法读取任何历史会话，隐私更安全') }}</span>
           </span>
           <span class="sw" :class="{ on: config.globalMemory }" />
         </button>
@@ -121,6 +129,24 @@ onMounted(() => { void config.fetchCustomPrompt() })
           <CoomiIcon v-if="isCurrent(r.providerId, r.model)" name="check" :size="17" class="tick" />
         </button>
       </div>
+      <p class="sec-label">报错反馈</p>
+      <div class="group">
+        <div class="row token-row">
+          <span class="ri"><CoomiIcon name="alert" :size="17" /></span>
+          <span class="rt">
+            <span class="rmain">GitHub Token（可选）</span>
+            <span class="rsub">填写后报错反馈会同步建一个 GitHub issue；留空则只走自建服务器通道</span>
+            <input
+              v-model="githubToken"
+              type="password"
+              class="token-input"
+              placeholder="ghp_…"
+              @blur="saveToken"
+            />
+          </span>
+        </div>
+      </div>
+
       <p class="sec-label">配置</p>
       <div class="group">
         <button class="row" @click="router.push('/sessions')">
@@ -172,6 +198,14 @@ onMounted(() => { void config.fetchCustomPrompt() })
 .rsub { font-size: 12.2px; line-height: 1.5; color: var(--text-3); }
 .rsub.err { color: var(--danger, #d43d2e); }
 .rside { flex-shrink: 0; font-size: 13px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.token-row { align-items: flex-start; padding: 12px 13px; }
+.token-input {
+  width: 100%; margin-top: 7px; padding: 8px 10px;
+  border: 1px solid var(--border-strong); border-radius: var(--r-sm);
+  background: var(--page); color: var(--text);
+  font-family: var(--font-mono); font-size: 12.5px;
+}
+.token-input::placeholder { color: var(--text-3); }
 .tick { flex-shrink: 0; color: var(--blue); }
 .arw { flex-shrink: 0; color: var(--text-3); }
 .empty { padding: 15px 14px; font-size: 13px; line-height: 1.6; color: var(--text-3); }

@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, computed, shallowRef } from 'vue'
+import { ref, computed, shallowRef, watch } from 'vue'
 import { createTransport, type Transport } from '@/bridge'
 import { authedFetch } from '@/bridge/http'
 import { isDemoMode } from '@/bridge/demoMode'
@@ -35,6 +35,20 @@ export const useSessionStore = defineStore('session', () => {
   const isBusy = computed(() => runState.value !== 'idle')
   const pendingApproval = computed(() => timeline.value.find((t): t is ToolCard => t.kind === 'tool' && t.status === 'awaiting_approval'))
   const pendingQuestion = computed(() => timeline.value.find((t): t is QuestionCard => t.kind === 'question' && !t.answered))
+
+  /** 通知原生层任务状态：更新通知栏常驻通知（执行中 / 已完成）。 */
+  function syncTaskStatus(status: 'running' | 'done') {
+    window.CoomiAndroid?.updateTaskStatus?.(status)
+  }
+  watch(runState, (state) => {
+    if (state === 'idle') syncTaskStatus('done')
+    else if (state !== 'awaiting_approval' && state !== 'awaiting_question') syncTaskStatus('running')
+  })
+
+  /** 发送内置引导（EmptyState 引导卡）：引擎把对应正文注入会话。 */
+  function sendGuide(key: string) {
+    transport.value?.send({ command: 'send_guide', key })
+  }
 
   /** 时间线写回 localStorage 有节流：流式期间不要每个 chunk 都序列化。 */
   function persistSoon() {
@@ -421,7 +435,7 @@ export const useSessionStore = defineStore('session', () => {
   }
   function pushNotice(tone: 'info' | 'warn' | 'error' | 'success', text: string) { timeline.value.push({ kind: 'notice', id: nextId(), tone, text }) }
 
-  return { sessionId, timeline, runState, usage, cwd, loop, isBusy, pendingApproval, pendingQuestion, connect, disconnect, sendMessage, cancel, approve, answerQuestion, setPermissionMode, togglePlanMode, selectModel, completeFileTransfer, newSession, openSession, deleteSession, setSessionCwd }
+  return { sessionId, timeline, runState, usage, cwd, loop, isBusy, pendingApproval, pendingQuestion, connect, disconnect, sendMessage, cancel, approve, answerQuestion, setPermissionMode, togglePlanMode, selectModel, completeFileTransfer, newSession, openSession, deleteSession, setSessionCwd, sendGuide }
 })
 
 function fmtTokens(n: number): string { return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n) }

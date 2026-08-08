@@ -13,11 +13,13 @@ export interface EnterPlanModeCommand { command: 'enter_plan_mode' }
 export interface ExitPlanModeCommand { command: 'exit_plan_mode' }
 export interface SelectModelCommand { command: 'select_model'; provider_id: string; model: string }
 export interface FileTransferResultCommand { command: 'file_transfer_result'; request_id: string; paths: string[] }
+export interface SendGuideCommand { command: 'send_guide'; key: string }
 
 export type AgentCommand =
   | SendMessageCommand | CancelCommand | JumpInCommand | ApproveToolCommand
   | AnswerQuestionCommand | SetPermissionModeCommand | EnterPlanModeCommand
   | ExitPlanModeCommand | SelectModelCommand | FileTransferResultCommand
+  | SendGuideCommand
 
 export const PROTOCOL_VERSION = 1
 export type EnvelopeType = 'event' | 'command' | 'ack' | 'error'

@@ -268,6 +268,7 @@ function back() {
             <option :value="128000">128k</option>
             <option :value="256000">256k（默认）</option>
             <option :value="512000">512k</option>
+            <option :value="1048576">1024k</option>
           </select>
         </label>
         <label class="toggle-row">

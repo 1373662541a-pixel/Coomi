@@ -26,16 +26,22 @@ async function parseRes(res: Response): Promise<any> {
 
 type Tab = 'mcp' | 'skills'
 const tab = ref<Tab>('mcp')
+/** 页签内的视图：已安装（本机实际配置，含自建/导入）｜仓库（内置目录）。 */
+type Scope = 'installed' | 'catalog'
+const scope = ref<Scope>('catalog')
 
 interface RequiredParam { key: string; label: string; secret?: boolean }
 interface McpItem {
   id: string; name: string; description: string; transport: string
   required_parameters: RequiredParam[]; installed: boolean; enabled: boolean
+  path?: string
 }
-interface SkillItem { id: string; name: string; description: string; repository: string; installed: boolean; enabled: boolean }
+interface SkillItem { id: string; name: string; description: string; repository: string; installed: boolean; enabled: boolean; path?: string }
 
 const mcp = ref<McpItem[]>([])
 const skills = ref<SkillItem[]>([])
+const installedMcp = ref<McpItem[]>([])
+const installedSkills = ref<SkillItem[]>([])
 const loading = ref(true)
 const error = ref('')
 const busy = ref<string | null>(null)
@@ -155,6 +161,41 @@ async function load() {
   }
 }
 
+/** 加载本机已安装列表（含目录之外自建/导入的）：/api/runtime/installed。 */
+async function loadInstalled() {
+  loading.value = true
+  error.value = ''
+  try {
+    const res = await authedFetch('/api/runtime/installed')
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = await parseRes(res)
+    installedMcp.value = (data.mcp ?? []).map((m: any) => ({
+      id: m.id, name: m.name, description: '', transport: m.transport ?? '',
+      required_parameters: [], installed: true, enabled: m.enabled, path: m.path,
+    }))
+    installedSkills.value = (data.skills ?? []).map((s: any) => ({
+      id: s.id, name: s.name, description: '', repository: '',
+      installed: true, enabled: s.enabled, path: s.path,
+    }))
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    loading.value = false
+  }
+}
+
+/** 切换视图（已安装/仓库）：已安装首次进入时拉取一次。 */
+function switchScope(next: Scope) {
+  if (scope.value === next) return
+  scope.value = next
+  error.value = ''
+  if (next === 'installed') void loadInstalled()
+}
+
+/** 当前视图下要渲染的列表（已安装｜仓库）。 */
+const visibleMcp = computed(() => (scope.value === 'installed' ? installedMcp.value : mcp.value))
+const visibleSkills = computed(() => (scope.value === 'installed' ? installedSkills.value : skills.value))
+
 async function installMcp() {
   const item = installingMcp.value
   if (!item) return
@@ -211,11 +252,20 @@ function goDashboard() {
       <div class="tabs">
         <button class="tab" :class="{ on: tab === 'mcp' }" @click="tab = 'mcp'">
           <CoomiIcon name="plug" :size="15" />MCP
-          <span class="cnt">{{ mcp.length }}</span>
+          <span class="cnt">{{ scope === 'installed' ? installedMcp.length : mcp.length }}</span>
         </button>
         <button class="tab" :class="{ on: tab === 'skills' }" @click="tab = 'skills'">
           <CoomiIcon name="wrench" :size="15" />Skills
-          <span class="cnt">{{ skills.length }}</span>
+          <span class="cnt">{{ scope === 'installed' ? installedSkills.length : skills.length }}</span>
+        </button>
+      </div>
+
+      <div class="seg" role="tablist">
+        <button class="segitem" :class="{ on: scope === 'installed' }" @click="switchScope('installed')">
+          <CoomiIcon name="check" :size="14" />已安装
+        </button>
+        <button class="segitem" :class="{ on: scope === 'catalog' }" @click="switchScope('catalog')">
+          <CoomiIcon name="globe" :size="14" />仓库
         </button>
       </div>
 
@@ -225,9 +275,11 @@ function goDashboard() {
 
       <!-- MCP -->
       <template v-if="tab === 'mcp'">
-        <p v-if="!loading && mcp.length === 0" class="hint">目录为空，暂时没有可安装的 MCP Server。</p>
+        <p v-if="!loading && visibleMcp.length === 0" class="hint">
+          {{ scope === 'installed' ? '本机还没有已安装的 MCP Server。' : '目录为空，暂时没有可安装的 MCP Server。' }}
+        </p>
         <div v-else class="cards">
-          <div v-for="item in mcp" :key="item.id" class="card">
+          <div v-for="item in visibleMcp" :key="item.id" class="card">
             <span class="tile" :class="{ on: item.installed }">
               <CoomiIcon name="plug" :size="18" />
             </span>
@@ -241,6 +293,7 @@ function goDashboard() {
               </div>
               <p class="cdesc">{{ item.description }}</p>
               <span class="cmeta"><CoomiIcon name="link" :size="12" />{{ item.transport }}</span>
+              <span v-if="item.path" class="cmeta path"><CoomiIcon name="folder" :size="12" />{{ item.path }}</span>
             </div>
             <template v-if="item.installed">
               <button
@@ -268,9 +321,11 @@ function goDashboard() {
 
       <!-- Skills -->
       <template v-else>
-        <p v-if="!loading && skills.length === 0" class="hint">目录为空，暂时没有可安装的 Skill。</p>
+        <p v-if="!loading && visibleSkills.length === 0" class="hint">
+          {{ scope === 'installed' ? '本机还没有已安装的 Skill。' : '目录为空，暂时没有可安装的 Skill。' }}
+        </p>
         <div v-else class="cards">
-          <div v-for="item in skills" :key="item.id" class="card">
+          <div v-for="item in visibleSkills" :key="item.id" class="card">
             <span class="tile" :class="{ on: item.installed }">
               <CoomiIcon name="wrench" :size="18" />
             </span>
@@ -284,6 +339,7 @@ function goDashboard() {
               </div>
               <p class="cdesc">{{ item.description }}</p>
               <span v-if="item.repository" class="cmeta"><CoomiIcon name="globe" :size="12" />{{ item.repository }}</span>
+              <span v-if="item.path" class="cmeta path"><CoomiIcon name="folder" :size="12" />{{ item.path }}</span>
             </div>
             <template v-if="item.installed">
               <button
@@ -403,6 +459,18 @@ function goDashboard() {
   -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain;
 }
 .tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+.seg {
+  display: flex; gap: 2px; margin-bottom: 12px; padding: 3px;
+  border-radius: var(--r-pill); background: var(--fill);
+  align-self: flex-start;
+}
+.segitem {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 30px; padding: 0 13px; border: 0; border-radius: var(--r-pill);
+  background: none; font-size: 12.5px; font-weight: 600; color: var(--text-3);
+}
+.segitem.on { background: var(--bg); color: var(--blue); box-shadow: var(--shadow-1); }
+.cmeta.path { display: block; word-break: break-all; }
 .tab {
   flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px;
   min-height: 42px; border-radius: var(--r-md);
