@@ -97,7 +97,7 @@ public class CoomiLauncherActivity extends Activity {
         super.onResume();
         if (mSettingsMode) {
             showWelcomePhase();
-            updatePermissionStatus();
+            refreshPermissionStatusDelayed();
             return;
         }
         if (mPermissionsDone || mContinuePersisted) {
@@ -106,7 +106,7 @@ public class CoomiLauncherActivity extends Activity {
             return;
         }
         showWelcomePhase();
-        updatePermissionStatus();
+        refreshPermissionStatusDelayed();
     }
 
     @Override
@@ -159,15 +159,52 @@ public class CoomiLauncherActivity extends Activity {
     }
 
     private void requestBatteryExemption() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
+        if (isXiaomi()) {
+            // MIUI 上 ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS 只打开列表页且不生效，
+            // 直接进「忽略电池优化」设置页，让用户手动把 Coomi 设为「无限制」。
             try {
-                Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
-                intent.setData(Uri.parse("package:" + getPackageName()));
+                Intent intent = new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
                 startActivityForResult(intent, REQUEST_CODE_BATTERY);
+                android.widget.Toast.makeText(
+                    this,
+                    "请在列表中找到 Coomi，将省电策略设为「无限制」",
+                    android.widget.Toast.LENGTH_LONG
+                ).show();
             } catch (Exception e) {
-                Logger.logError(LOG_TAG, "Battery exemption request failed: " + e.getMessage());
+                Logger.logError(LOG_TAG, "Battery exemption settings failed: " + e.getMessage());
             }
+            return;
         }
+        try {
+            Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+            intent.setData(Uri.parse("package:" + getPackageName()));
+            startActivityForResult(intent, REQUEST_CODE_BATTERY);
+        } catch (Exception e) {
+            Logger.logError(LOG_TAG, "Battery exemption request failed: " + e.getMessage());
+        }
+    }
+
+    /** MIUI / Redmi 检测：小米系设备用独立的电池设置路径。 */
+    private boolean isXiaomi() {
+        String manufacturer = android.os.Build.MANUFACTURER == null ? "" : android.os.Build.MANUFACTURER.toLowerCase();
+        if (manufacturer.contains("xiaomi") || manufacturer.contains("redmi") || manufacturer.contains("poco")) {
+            return true;
+        }
+        try {
+            Class<?> clazz = Class.forName("android.os.SystemProperties");
+            java.lang.reflect.Method method = clazz.getMethod("get", String.class);
+            String miui = (String) method.invoke(null, "ro.miui.ui.version.name");
+            return miui != null && !miui.trim().isEmpty();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** 双查：立即刷新 + 800ms 后延迟再查（部分厂商授权页返回后状态位更新有延迟）。 */
+    private void refreshPermissionStatusDelayed() {
+        updatePermissionStatus();
+        mHandler.postDelayed(this::updatePermissionStatus, 800);
     }
 
     private void updatePermissionStatus() {
@@ -189,7 +226,7 @@ public class CoomiLauncherActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQUEST_CODE_NOTIFICATION || requestCode == REQUEST_CODE_BATTERY) {
-            updatePermissionStatus();
+            refreshPermissionStatusDelayed();
         }
     }
 

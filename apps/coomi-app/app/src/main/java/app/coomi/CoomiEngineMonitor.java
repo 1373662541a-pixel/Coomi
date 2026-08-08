@@ -54,10 +54,16 @@ public class CoomiEngineMonitor extends Service {
 
     /** 任务执行状态（由前端 JS 桥 updateTaskStatus 更新）：null=无任务 / running / done。 */
     private static volatile String sTaskStatus = null;
+    /** 当前运行中的 Monitor 实例（静态持有，供任务状态回调即时刷新通知）。 */
+    private static volatile CoomiEngineMonitor sInstance = null;
 
     /** 前端任务状态回调：更新常驻通知的「任务执行中/已完成」文案。 */
     public static void setTaskStatus(String status) {
         sTaskStatus = status;
+        CoomiEngineMonitor instance = sInstance;
+        if (instance != null) {
+            instance.updateStatus(instance.mCurrentStatus);
+        }
     }
 
     private ServiceConnection mConnection = new ServiceConnection() {
@@ -96,6 +102,7 @@ public class CoomiEngineMonitor extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        sInstance = this;
         Logger.logInfo(LOG_TAG, "Monitor created");
 
         Intent intent = new Intent(this, CoomiService.class);
@@ -122,6 +129,7 @@ public class CoomiEngineMonitor extends Service {
     @Override
     public void onDestroy() {
         super.onDestroy();
+        if (sInstance == this) sInstance = null;
         Logger.logInfo(LOG_TAG, "Monitor destroyed");
         stopMonitoring();
         mHandler.removeCallbacksAndMessages(null);
@@ -247,6 +255,18 @@ public class CoomiEngineMonitor extends Service {
         if (nm != null) nm.notify(NOTIFICATION_ID, buildNotification("Coomi: " + status));
     }
 
+    /** 通知点击目标：按「启动首页」设置跳控制台或对话页。只用 NEW_TASK 复用现有
+     *  singleTask 实例，不用 CLEAR_TASK 清任务栈（否则会销毁正在跑的对话页导致任务中断）。 */
+    private PendingIntent buildContentIntent() {
+        Class<?> target = CoomiHomePreference.isChatHome(this)
+            ? com.termux.app.CoomiActivity.class : CoomiDashboardActivity.class;
+        Intent i = new Intent(this, target);
+        i.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) flags |= PendingIntent.FLAG_IMMUTABLE;
+        return PendingIntent.getActivity(this, 0, i, flags);
+    }
+
     private Notification buildNotification(String contentText) {
         // 任务执行状态拼进正文：如「Coomi: 运行中 · 任务执行中」
         String status = sTaskStatus;
@@ -255,19 +275,11 @@ public class CoomiEngineMonitor extends Service {
         } else if ("done".equals(status)) {
             contentText += " · 任务已完成";
         }
-        // 通知点击回到控制台/对话页；用 singleTask 复用现有实例而不是 CLEAR_TASK
-        // 清掉任务栈（否则正在跑的 WebView 对话页会被销毁，任务中断）。
-        Intent i = new Intent(this, CoomiDashboardActivity.class);
-        i.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) flags |= PendingIntent.FLAG_IMMUTABLE;
-        PendingIntent pi = PendingIntent.getActivity(this, 0, i, flags);
-
         return new NotificationCompat.Builder(this, CoomiConstants.NOTIFICATION_CHANNEL_ID)
             .setContentTitle("Coomi")
             .setContentText(contentText)
             .setSmallIcon(R.drawable.ic_service_notification)
-            .setContentIntent(pi)
+            .setContentIntent(buildContentIntent())
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setShowWhen(false)

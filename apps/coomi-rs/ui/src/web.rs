@@ -1603,23 +1603,17 @@ async fn websocket_session(socket: WebSocket, state: AppState, session_id: Strin
     writer.abort();
 }
 
-/// 内置引导内容：EmptyState 引导卡点击后，把对应正文注入对话（不调模型）。
-const GUIDES: &[(&str, &str)] = &[
+/// 内置引导内容（key, 标题, 正文 Markdown）：EmptyState 引导卡点击后注入对话。
+const GUIDES: &[(&str, &str, &str)] = &[
     (
-        "web",
-        "🌐 联网能力引导\n\nCoomi 在 Android 本地运行，具备完整联网能力：\n\n1. **web_search**：搜索最新资讯、文档、热点话题（联网搜索首选）。\n2. **fetch**：直接读取网页内容、API 响应。\n3. **shell / curl / wget**：下载文件、调用接口、访问本地文件。\n\n可以这样用：\n- “帮我查一下今天科技圈的热点话题”\n- “把这个链接的文件下载到手机”\n- “看看这个网页讲了什么”",
+        "newbie",
+        "Coomi 新手使用指南",
+        "欢迎使用 Coomi！我是运行在**你手机本地 Linux 环境**里的智能体，不是网页聊天框：\n\n- **真实执行**：我可以直接读写手机文件、跑命令、装环境、调用接口——不是只会“建议”。\n- **三种模式**：快速（读写自动放行）、计划（先给方案再动手）、谨慎（每次写入都问你），在空态上方切换。\n- **联网能力**：搜索用 web_search，读网页用 fetch，下载文件 / 调 API 可用 shell / curl / wget。\n- **文件交互**：需要你手机里的文件时说一声，会弹出系统选择器；做好的成果（如 APK）可直接导出。\n- **技能（Skills）**：内置 explore / review / research 等技能，在「技能市场」还能安装更多，按需自动加载。\n\n**开始吧**：直接告诉我想做什么，比如“整理我的下载目录”或“看看这个 GitHub 项目”。",
     ),
     (
-        "memory",
-        "🧠 全局会话记忆引导\n\n**全局会话记忆**控制 Coomi 能否读取历史会话文件：\n\n- **开启**：Coomi 可读取所有历史会话，能回答“上次我们聊了什么”这类问题。\n- **关闭（默认）**：Coomi 无法读取任何历史会话，只能基于当前对话工作，隐私更安全。\n\n在「设置 → 全局会话记忆」中切换。注意：历史会话列表始终可见，开关只影响模型能否读取这些记录的内容。",
-    ),
-    (
-        "skills",
-        "🛠 技能（Skills）引导\n\n技能是可复用的能力包（Skill 目录 + SKILL.md 指令），按需加载：\n\n1. 在「技能市场」浏览并安装技能\n2. 对话中直接说“用 XX 技能做…”即可加载使用\n3. Coomi 已内置 explore / review / research 等技能\n\n安装技能后无需手动配置，对话中按需调用即可。",
-    ),
-    (
-        "custom",
-        "🧩 自定义拓展引导\n\nCoomi 支持多种拓展方式：\n\n1. **自定义身份**：在设置里定义 AI 的身份定位，影响所有回答\n2. **指令（Instructions）**：项目级规则，约束行为\n3. **技能（Skills）**：自定义能力包，按需加载\n4. **MCP 服务器**：接入外部工具服务\n5. **记忆（Memory）**：持久化重要事实\n\n告诉我你想实现什么，Coomi 会指导你一步步配置。",
+        "extension",
+        "自定义拓展进化指南",
+        "想让 Coomi 更懂你、能力更强？按需选择下面的拓展方式：\n\n1. **自定义身份定位**（设置 → 定制身份定位）\n   写下你希望 Coomi 扮演的身份，会注入每条指令最前，持续影响所有回答。\n2. **项目指令（Instructions）**\n   给当前项目写规则（技术栈、代码风格、禁止事项），Coomi 会严格遵守。\n3. **技能（Skills）**（SKILL / MCP 管理 → 仓库）\n   安装现成技能或自己写 SKILL.md 定义新能力，对话中自动按需加载。\n4. **MCP 服务器**（SKILL / MCP 管理 → 仓库）\n   接入 filesystem / git / github / playwright 等外部工具，扩展执行边界。\n5. **持久记忆（Memory）**\n   让 Coomi 记住重要事实（偏好、账号、环境），跨会话生效。\n\n告诉我你想拓展哪个方向，我带你一步步配置。",
     ),
 ];
 
@@ -1889,8 +1883,8 @@ async fn handle_command(
     }
 }
 
-/// 发送引导命令：把内置引导正文注入会话（不调模型），并像正常回复一样推送给前端。
-/// 由 EmptyState 引导卡触发（"send_guide" + key）。
+/// 发送引导命令：把内置引导注入会话（不调模型），像正常回复一样流式推送给前端。
+/// 流程：写入用户标题消息 → 逐块流式推送正文（16 字符/块 + 220ms）→ 写 assistant 历史 → turn_end。
 async fn dispatch_guide(
     state: &AppState,
     session_id: &str,
@@ -1902,25 +1896,39 @@ async fn dispatch_guide(
         .get("key")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let Some((_, body)) = GUIDES.iter().find(|(k, _)| *k == key) else {
+    let Some((_, title, body)) = GUIDES.iter().find(|(k, _, _)| *k == key) else {
         context.send_error(envelope_id, "unknown guide key");
         return;
     };
     context.send_ack(envelope_id);
-    // 写入会话历史，保证刷新后引导内容仍在。
+    // 写入会话历史：用户标题消息 + 完整正文（assistant），保证刷新后引导内容仍在。
     if let Ok(id) = Uuid::parse_str(session_id) {
         let store = SessionStore::new(&state.home);
         if let Ok(mut session) = store.load(id) {
-            session
-                .messages
-                .push(coomi_engine::ChatMessage::assistant((*body).to_owned(), Vec::new()));
+            session.messages.push(coomi_engine::ChatMessage::user((*title).to_owned()));
+            session.messages.push(coomi_engine::ChatMessage::assistant(
+                (*body).to_owned(),
+                Vec::new(),
+            ));
             let _ = store.save(&session);
         }
     }
-    context.task.push_event(json!({
-        "event_type": "text_chunk",
-        "content": body,
-    }));
+    // 逐块流式推送正文：16 字符/块 + 220ms，模拟自然打字节奏（约 70 字/秒）。
+    let mut chunk = String::new();
+    let mut count = 0usize;
+    for ch in body.chars() {
+        chunk.push(ch);
+        count += 1;
+        if count >= 16 {
+            context.task.push_event(json!({"event_type": "text_chunk", "content": chunk}));
+            chunk.clear();
+            count = 0;
+            tokio::time::sleep(std::time::Duration::from_millis(220)).await;
+        }
+    }
+    if !chunk.is_empty() {
+        context.task.push_event(json!({"event_type": "text_chunk", "content": chunk}));
+    }
     context.task.push_event(json!({"event_type": "turn_end"}));
 }
 

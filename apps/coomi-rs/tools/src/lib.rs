@@ -933,10 +933,15 @@ impl CoreTools {
             "export_file" => "request_file_export",
             "plan" => "update_plan",
             "loop" | "create_loop" => "create_loop",
-            "list_mcp_servers" | "mcp_list" | "get_mcp" => "list_mcp",
+            "list_mcp_servers" | "mcp_list" | "get_mcp" | "list_servers" => "list_mcp",
             "list_skills" | "skills" => "list_skills",
             "skill" => "read_skill",
             "memory" | "mem_list" => "memory_list",
+            // Agent 相关别名（spawn_agent 的常见叫法）
+            "delegate" | "delegate_agent" | "spawn_subagent" | "agent" | "subagent"
+            | "start_agent" | "run_agent" => "spawn_agent",
+            "agent_result" | "wait_agent" | "join_agent" => "wait_agent",
+            "close_subagent" | "kill_agent" => "close_agent",
             other => other,
         }
     }

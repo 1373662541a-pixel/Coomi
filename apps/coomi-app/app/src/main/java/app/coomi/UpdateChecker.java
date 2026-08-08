@@ -84,8 +84,8 @@ public final class UpdateChecker {
         }).start();
     }
 
-    /** 异步检查更新（网络在主线程外）。 */
-    public static void check(final Context context, final Callback callback) {
+    /** 异步检查更新（网络在主线程外）。autoInstall=true 时发现新版自动下载安装。 */
+    public static void check(final Context context, final boolean autoInstall, final Callback callback) {
         new Thread(() -> {
             try {
                 URL url = new URL(UPDATE_URL);
@@ -111,7 +111,7 @@ public final class UpdateChecker {
                     String apkUrl = UPDATE_URL.substring(0, UPDATE_URL.lastIndexOf('/')) + "/" + file;
                     int current = currentVersionCode(context);
                     boolean hasUpdate = remoteCode > current;
-                    if (hasUpdate) {
+                    if (hasUpdate && autoInstall) {
                         downloadAndInstall(context, apkUrl, version);
                     }
                     callback.onResult(hasUpdate, version, notes, null);
@@ -229,7 +229,7 @@ public final class UpdateChecker {
 
     /** 供 Dashboard 使用：弹结果对话框。 */
     public static void checkAndPrompt(Context context, Runnable after) {
-        check(context, (hasUpdate, version, notes, error) -> {
+        check(context, true, (hasUpdate, version, notes, error) -> {
             ((android.app.Activity) context).runOnUiThread(() -> {
                 if (error != null) {
                     Toast.makeText(context, error, Toast.LENGTH_LONG).show();

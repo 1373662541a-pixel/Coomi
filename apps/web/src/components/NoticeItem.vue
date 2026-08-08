@@ -38,7 +38,7 @@ async function sendFeedback() {
     if (raw) diagnostics = raw
   } catch { /* 原生桥不可用时忽略 */ }
   const payload = {
-    error: props.notice.text,
+    message: props.notice.text,
     detail: props.notice.detail ?? '',
     diagnostics,
     provider: config.currentProviderId,
@@ -48,7 +48,7 @@ async function sendFeedback() {
   }
   let ok = false
   try {
-    const res = await fetch('https://updates.septemc.com/coomi/feedback/api.php', {
+    const res = await fetch('https://updates.septemc.com/coomi/feedback/api', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -57,7 +57,7 @@ async function sendFeedback() {
   } catch { ok = false }
   // GitHub issue 通道：用户在设置页填过 token 才尝试；失败静默忽略。
   try {
-    const token = localStorage.getItem('coomi.githubToken')
+    const token = localStorage.getItem('coomi.feedbackGithubToken')
     if (token) {
       await fetch('https://api.github.com/repos/TensorHub-ORG/Coomi-Android/issues', {
         method: 'POST',
@@ -127,6 +127,7 @@ async function sendFeedback() {
 /* 报错：红字、无背景底框、无圆角——只保留文字颜色区分。 */
 .notice.error {
   align-self: stretch; width: 100%; max-width: 100%; align-items: flex-start;
+  padding: 4px 2px;
   background: transparent; color: var(--danger);
   text-align: left; word-break: break-word;
 }

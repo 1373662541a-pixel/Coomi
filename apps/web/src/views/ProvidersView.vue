@@ -63,6 +63,8 @@ function formForPreset(id: ProviderPresetId): ProviderForm {
 const editing = ref(false)
 const isNew = ref(true)
 const saving = ref(false)
+/** 自定义上下文档位（单位 k；选中「自定义」时输入，保存时换算成 tokens）。 */
+const customContextWindow = ref(64)
 const showingKey = ref(false)
 const discovering = ref(false)
 const savedNote = ref('')
@@ -113,7 +115,7 @@ async function save(): Promise<boolean> {
     baseUrl: f.baseUrl.trim() || undefined,
     type: f.protocol,
     toolProtocol: f.protocol,
-    contextWindow: f.contextWindow,
+    contextWindow: f.contextWindow === 0 ? Math.max(1, Math.round(customContextWindow.value || 64)) * 1000 : f.contextWindow,
     activate: true,
     supportsWebSearch: f.supportsWebSearch,
     supportsVision: f.supportsVision,
@@ -269,7 +271,16 @@ function back() {
             <option :value="256000">256k（默认）</option>
             <option :value="512000">512k</option>
             <option :value="1048576">1024k</option>
+            <option :value="0">自定义</option>
           </select>
+          <input
+            v-if="form.contextWindow === 0"
+            v-model.number="customContextWindow"
+            type="number"
+            min="1"
+            class="finput"
+            placeholder="例如 64（单位 k，填 0 取消自定义）"
+          />
         </label>
         <label class="toggle-row">
           <input v-model="form.supportsWebSearch" type="checkbox" />

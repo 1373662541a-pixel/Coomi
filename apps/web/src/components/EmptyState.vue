@@ -21,12 +21,12 @@ const MODES = [
   { key: 'careful', label: '谨慎', icon: 'shield', desc: '每一次写入都等你点头' },
 ] as const
 
-const SUGGESTIONS = [
-  { key: 'web', icon: 'globe', title: '联网', desc: '搜索资讯 · 读取网页 · 下载文件' },
-  { key: 'memory', icon: 'clock', title: '会话记忆', desc: '了解全局会话记忆开关的作用' },
-  { key: 'skills', icon: 'sparkle', title: '技能', desc: '查看可用 Skills 与调用方式' },
-  { key: 'custom', icon: 'cube', title: '自定义', desc: '身份 / 指令 / MCP 拓展入口' },
-] as const
+const SUGGESTIONS: { icon: string; text: string; guide?: string }[] = [
+  { icon: 'phone', text: '查看手机系统信息与型号信息' },
+  { icon: 'globe', text: '今日科技圈热点话题' },
+  { icon: 'sparkle', text: 'Coomi 新手使用指南', guide: 'newbie' },
+  { icon: 'cube', text: '自定义拓展进化指南', guide: 'extension' },
+]
 
 const active = computed(() => (config.planMode ? 'plan' : config.permissionMode === 'ask' ? 'careful' : 'fast'))
 const hint = computed(() => MODES.find(m => m.key === active.value)?.desc ?? '')
@@ -71,16 +71,13 @@ function pick(key: 'fast' | 'plan' | 'careful') {
     <div class="sugs">
       <button
         v-for="(s, i) in SUGGESTIONS"
-        :key="s.key"
+        :key="s.text"
         class="sug cascade"
         :style="{ animationDelay: 40 * i + 'ms' }"
-        @click="session.sendGuide(s.key)"
+        @click="s.guide ? session.sendGuide(s.guide) : session.sendMessage(s.text)"
       >
         <span class="sicon"><CoomiIcon :name="s.icon" :size="17" /></span>
-        <span class="stext">
-          <span class="stitle">{{ s.title }}</span>
-          <span class="sdesc">{{ s.desc }}</span>
-        </span>
+        <span class="stext">{{ s.text }}</span>
         <CoomiIcon name="chevronRight" :size="14" class="sarrow" />
       </button>
     </div>
@@ -134,12 +131,7 @@ h1 { font-size: 21px; font-weight: 600; letter-spacing: -.3px; color: var(--text
   width: 32px; height: 32px; border-radius: 10px;
   background: var(--blue-soft); color: var(--blue);
 }
-.stext {
-  flex: 1; display: flex; flex-direction: column; gap: 2px;
-  font-size: 14.5px; line-height: 1.4; color: var(--text);
-}
-.stitle { font-weight: 600; }
-.sdesc { font-size: 12.5px; color: var(--text-3); }
+.stext { flex: 1; font-size: 14.5px; line-height: 1.4; color: var(--text); }
 .sarrow { color: var(--text-3); }
 </style>
 

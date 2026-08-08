@@ -45,9 +45,20 @@ export const useSessionStore = defineStore('session', () => {
     else if (state !== 'awaiting_approval' && state !== 'awaiting_question') syncTaskStatus('running')
   })
 
-  /** 发送内置引导（EmptyState 引导卡）：引擎把对应正文注入会话。 */
+  /** 发送内置引导（EmptyState 引导卡）：先置用户标题消息，再让引擎流式推正文。 */
+  const GUIDE_TITLES: Record<string, string> = {
+    newbie: 'Coomi 新手使用指南',
+    extension: '自定义拓展进化指南',
+  }
   function sendGuide(key: string) {
+    const trimmed = (GUIDE_TITLES[key] ?? 'Coomi 指南').trim()
+    // 首条用户消息作为会话标题，抽屉里就不会全是「新对话」。
+    const isFirst = !timeline.value.some(t => t.kind === 'user')
+    if (isFirst) sessions.touch(sessionId.value, { title: sessions.deriveTitle(trimmed) })
+    timeline.value.push({ kind: 'user', id: nextId(), content: trimmed })
+    runState.value = 'thinking'
     transport.value?.send({ command: 'send_guide', key })
+    persistSoon()
   }
 
   /** 时间线写回 localStorage 有节流：流式期间不要每个 chunk 都序列化。 */

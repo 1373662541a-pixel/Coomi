@@ -394,6 +394,8 @@ public class CoomiActivity extends Activity {
                 info.put("version_name", BuildConfig.VERSION_NAME);
                 info.put("version_code", BuildConfig.VERSION_CODE);
                 info.put("device_model", android.os.Build.MODEL);
+                info.put("manufacturer", android.os.Build.MANUFACTURER);
+                info.put("os", "Android");
                 info.put("android_version", android.os.Build.VERSION.RELEASE);
                 info.put("sdk_int", android.os.Build.VERSION.SDK_INT);
                 return info.toString();

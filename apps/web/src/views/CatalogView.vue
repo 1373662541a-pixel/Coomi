@@ -46,6 +46,11 @@ const loading = ref(true)
 const error = ref('')
 const busy = ref<string | null>(null)
 const notice = ref('')
+/** 当前展开详情的卡片 id（卡片默认折叠，只显示名称）。 */
+const expanded = ref<string | null>(null)
+function toggleExpanded(id: string) {
+  expanded.value = expanded.value === id ? null : id
+}
 
 // ── 安装确认（所有安装必须先确认，不能点击即装）──
 const askMcp = ref<McpItem | null>(null)
@@ -249,6 +254,17 @@ function goDashboard() {
   <div class="page">
     <PageHead title="SKILL / MCP 管理" @back="goDashboard" />
     <main class="body">
+      <!-- 一级：已安装 | 仓库 -->
+      <div class="seg" role="tablist">
+        <button class="segitem" :class="{ on: scope === 'installed' }" @click="switchScope('installed')">
+          <CoomiIcon name="check" :size="14" />已安装
+        </button>
+        <button class="segitem" :class="{ on: scope === 'catalog' }" @click="switchScope('catalog')">
+          <CoomiIcon name="globe" :size="14" />仓库
+        </button>
+      </div>
+
+      <!-- 二级：MCP | Skills -->
       <div class="tabs">
         <button class="tab" :class="{ on: tab === 'mcp' }" @click="tab = 'mcp'">
           <CoomiIcon name="plug" :size="15" />MCP
@@ -257,15 +273,6 @@ function goDashboard() {
         <button class="tab" :class="{ on: tab === 'skills' }" @click="tab = 'skills'">
           <CoomiIcon name="wrench" :size="15" />Skills
           <span class="cnt">{{ scope === 'installed' ? installedSkills.length : skills.length }}</span>
-        </button>
-      </div>
-
-      <div class="seg" role="tablist">
-        <button class="segitem" :class="{ on: scope === 'installed' }" @click="switchScope('installed')">
-          <CoomiIcon name="check" :size="14" />已安装
-        </button>
-        <button class="segitem" :class="{ on: scope === 'catalog' }" @click="switchScope('catalog')">
-          <CoomiIcon name="globe" :size="14" />仓库
         </button>
       </div>
 
@@ -280,41 +287,33 @@ function goDashboard() {
         </p>
         <div v-else class="cards">
           <div v-for="item in visibleMcp" :key="item.id" class="card">
-            <span class="tile" :class="{ on: item.installed }">
-              <CoomiIcon name="plug" :size="18" />
-            </span>
-            <div class="cbody">
-              <div class="cline">
-                <span class="cname">{{ item.name }}</span>
-                <span v-if="item.installed" class="badge" :class="item.enabled ? 'ok' : 'off'">
-                  {{ item.enabled ? '已启用' : '已停用' }}
-                </span>
-                <span v-else class="badge plain">未安装</span>
-              </div>
-              <p class="cdesc">{{ item.description }}</p>
-              <span class="cmeta"><CoomiIcon name="link" :size="12" />{{ item.transport }}</span>
-              <span v-if="item.path" class="cmeta path"><CoomiIcon name="folder" :size="12" />{{ item.path }}</span>
-            </div>
-            <template v-if="item.installed">
-              <button
-                class="act"
-                :disabled="busy !== null"
-                @click="setEnabled('mcp', item, !item.enabled)"
-              >
-                {{ item.enabled ? '停用' : '启用' }}
-              </button>
-              <button class="act danger" :disabled="busy !== null" @click="confirmDelete('mcp', item)">
-                删除
-              </button>
-            </template>
-            <button
-              v-else
-              class="act"
-              :disabled="busy !== null"
-              @click="confirmMcpInstall(item)"
-            >
-              {{ busy === item.id ? '安装中…' : '安装' }}
+            <button class="card-head" @click.stop="toggleExpanded(item.id)">
+              <span class="tile" :class="{ on: item.installed }">
+                <CoomiIcon name="plug" :size="18" />
+              </span>
+              <span class="cname">{{ item.name }}</span>
+              <span v-if="item.installed" class="badge" :class="item.enabled ? 'ok' : 'off'">
+                {{ item.enabled ? '已启用' : '已停用' }}
+              </span>
+              <span v-else class="badge plain">未安装</span>
+              <CoomiIcon name="chevronRight" :size="14" class="chev" :class="{ open: expanded === item.id }" />
             </button>
+            <div v-if="expanded === item.id" class="detail">
+              <p class="cdesc">{{ item.description || '本机配置的 MCP Server' }}</p>
+              <span v-if="item.transport" class="cmeta"><CoomiIcon name="link" :size="12" />{{ item.transport }}</span>
+              <span v-if="item.path" class="cmeta path"><CoomiIcon name="folder" :size="12" />{{ item.path }}</span>
+              <div class="dops">
+                <template v-if="item.installed">
+                  <button class="act" :disabled="busy !== null" @click.stop="setEnabled('mcp', item, !item.enabled)">
+                    {{ item.enabled ? '停用' : '启用' }}
+                  </button>
+                  <button class="act danger" :disabled="busy !== null" @click.stop="confirmDelete('mcp', item)">删除</button>
+                </template>
+                <button v-else class="act" :disabled="busy !== null" @click.stop="confirmMcpInstall(item)">
+                  {{ busy === item.id ? '安装中…' : '安装' }}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </template>
@@ -326,41 +325,33 @@ function goDashboard() {
         </p>
         <div v-else class="cards">
           <div v-for="item in visibleSkills" :key="item.id" class="card">
-            <span class="tile" :class="{ on: item.installed }">
-              <CoomiIcon name="wrench" :size="18" />
-            </span>
-            <div class="cbody">
-              <div class="cline">
-                <span class="cname">{{ item.name }}</span>
-                <span v-if="item.installed" class="badge" :class="item.enabled ? 'ok' : 'off'">
-                  {{ item.enabled ? '已启用' : '已停用' }}
-                </span>
-                <span v-else class="badge plain">未安装</span>
-              </div>
-              <p class="cdesc">{{ item.description }}</p>
+            <button class="card-head" @click.stop="toggleExpanded(item.id)">
+              <span class="tile" :class="{ on: item.installed }">
+                <CoomiIcon name="wrench" :size="18" />
+              </span>
+              <span class="cname">{{ item.name }}</span>
+              <span v-if="item.installed" class="badge" :class="item.enabled ? 'ok' : 'off'">
+                {{ item.enabled ? '已启用' : '已停用' }}
+              </span>
+              <span v-else class="badge plain">未安装</span>
+              <CoomiIcon name="chevronRight" :size="14" class="chev" :class="{ open: expanded === item.id }" />
+            </button>
+            <div v-if="expanded === item.id" class="detail">
+              <p class="cdesc">{{ item.description || '本机安装的 Skill' }}</p>
               <span v-if="item.repository" class="cmeta"><CoomiIcon name="globe" :size="12" />{{ item.repository }}</span>
               <span v-if="item.path" class="cmeta path"><CoomiIcon name="folder" :size="12" />{{ item.path }}</span>
+              <div class="dops">
+                <template v-if="item.installed">
+                  <button class="act" :disabled="busy !== null" @click.stop="setEnabled('skill', item, !item.enabled)">
+                    {{ item.enabled ? '停用' : '启用' }}
+                  </button>
+                  <button class="act danger" :disabled="busy !== null" @click.stop="confirmDelete('skill', item)">删除</button>
+                </template>
+                <button v-else class="act" :disabled="busy !== null" @click.stop="confirmSkillInstall(item)">
+                  {{ busy === item.id ? '安装中…' : '安装' }}
+                </button>
+              </div>
             </div>
-            <template v-if="item.installed">
-              <button
-                class="act"
-                :disabled="busy !== null"
-                @click="setEnabled('skill', item, !item.enabled)"
-              >
-                {{ item.enabled ? '停用' : '启用' }}
-              </button>
-              <button class="act danger" :disabled="busy !== null" @click="confirmDelete('skill', item)">
-                删除
-              </button>
-            </template>
-            <button
-              v-else
-              class="act"
-              :disabled="busy !== null"
-              @click="confirmSkillInstall(item)"
-            >
-              {{ busy === item.id ? '安装中…' : '安装' }}
-            </button>
           </div>
         </div>
       </template>
@@ -470,7 +461,6 @@ function goDashboard() {
   background: none; font-size: 12.5px; font-weight: 600; color: var(--text-3);
 }
 .segitem.on { background: var(--bg); color: var(--blue); box-shadow: var(--shadow-1); }
-.cmeta.path { display: block; word-break: break-all; }
 .tab {
   flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px;
   min-height: 42px; border-radius: var(--r-md);
@@ -492,21 +482,24 @@ function goDashboard() {
 .notice.err { background: var(--danger-soft, #ffeceb); color: var(--danger, #d43d2e); }
 .hint { margin: 18px 0; text-align: center; font-size: 13px; color: var(--text-3); }
 
-.cards { display: flex; flex-direction: column; gap: 10px; }
+.cards { display: flex; flex-direction: column; gap: 8px; }
 .card {
-  display: flex; align-items: center; gap: 12px;
-  padding: 12px; border-radius: var(--r-card);
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+  padding: 10px 12px; border-radius: var(--r-card);
   background: var(--bg); box-shadow: var(--shadow-1);
 }
+/* 卡片头部：整行可点击，折叠时只显示名称。 */
+.card-head {
+  display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0;
+  padding: 0; border: 0; background: none; text-align: left;
+}
 .tile {
-  flex-shrink: 0; width: 40px; height: 40px; border-radius: 12px;
+  flex-shrink: 0; width: 38px; height: 38px; border-radius: 11px;
   display: flex; align-items: center; justify-content: center;
   background: var(--fill-strong); color: var(--text-2);
 }
 .tile.on { background: var(--blue-soft); color: var(--blue); }
-.cbody { flex: 1; min-width: 0; }
-.cline { display: flex; align-items: center; gap: 6px; }
-.cname { font-size: 14.5px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cname { flex: 1; min-width: 0; font-size: 14.5px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .badge {
   flex-shrink: 0; padding: 1.5px 8px; border-radius: var(--r-pill);
   font-size: 10.5px; font-weight: 650;
@@ -514,14 +507,24 @@ function goDashboard() {
 .badge.ok { background: var(--ok-soft, #e6f4ea); color: var(--ok, #2e9e5b); }
 .badge.off { background: var(--fill); color: var(--text-2); }
 .badge.plain { background: var(--fill); color: var(--text-3); }
+.chev { flex-shrink: 0; color: var(--text-3); transition: transform .18s; }
+.chev.open { transform: rotate(90deg); }
+/* 展开详情：flex-basis 100% 全宽换行，与头部隔开。 */
+.detail {
+  flex-basis: 100%; min-width: 0;
+  display: flex; flex-direction: column; gap: 2px;
+  margin-top: 4px; padding-top: 9px; border-top: 1px dashed var(--border);
+}
 .cdesc {
-  margin: 3px 0 0; font-size: 12.5px; line-height: 1.55; color: var(--text-2);
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  margin: 0; font-size: 12.5px; line-height: 1.55; color: var(--text-2);
+  word-break: break-word;
 }
 .cmeta {
-  display: inline-flex; align-items: center; gap: 4px; margin-top: 5px;
+  display: inline-flex; align-items: center; gap: 4px; margin-top: 4px;
   font-size: 11px; color: var(--text-3);
 }
+.cmeta.path { display: block; word-break: break-all; }
+.dops { display: flex; gap: 8px; margin-top: 9px; }
 .act {
   flex-shrink: 0; min-width: 62px; height: 34px; padding: 0 14px; border-radius: var(--r-pill);
   background: var(--blue); color: #fff; font-size: 13px; font-weight: 600;

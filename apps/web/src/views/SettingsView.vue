@@ -47,11 +47,16 @@ function isCurrent(providerId: string, model: string): boolean {
 onMounted(() => { void config.fetchCustomPrompt() })
 
 /** 报错反馈的 GitHub token（仅存本机 localStorage，用于同步建 issue，不上传服务器）。 */
-const githubToken = ref(localStorage.getItem('coomi.githubToken') ?? '')
+const githubToken = ref(localStorage.getItem('coomi.feedbackGithubToken') ?? '')
+const tokenSaved = ref(false)
+let tokenSaveTimer: ReturnType<typeof setTimeout> | null = null
 function saveToken() {
   const t = githubToken.value.trim()
-  if (t) localStorage.setItem('coomi.githubToken', t)
-  else localStorage.removeItem('coomi.githubToken')
+  if (t) localStorage.setItem('coomi.feedbackGithubToken', t)
+  else localStorage.removeItem('coomi.feedbackGithubToken')
+  tokenSaved.value = true
+  if (tokenSaveTimer) clearTimeout(tokenSaveTimer)
+  tokenSaveTimer = setTimeout(() => { tokenSaved.value = false }, 1600)
 }
 </script>
 <template>
@@ -86,7 +91,7 @@ function saveToken() {
           <span class="ri" :class="{ on: config.globalMemory }"><CoomiIcon name="clock" :size="17" /></span>
           <span class="rt">
             <span class="rmain">全局会话记忆</span>
-            <span class="rsub" :class="{ err: !!gmError }">{{ gmError || (config.globalMemory ? '开启后 Coomi 可读取所有历史会话文件' : '全局会话记忆已关闭：Coomi 无法读取任何历史会话，隐私更安全') }}</span>
+            <span class="rsub" :class="{ err: !!gmError }">{{ gmError || (config.globalMemory ? '开启后 Coomi 可读取所有历史会话文件' : '全局会话记忆已关闭：Coomi 无法读取任何历史会话') }}</span>
           </span>
           <span class="sw" :class="{ on: config.globalMemory }" />
         </button>
@@ -129,12 +134,12 @@ function saveToken() {
           <CoomiIcon v-if="isCurrent(r.providerId, r.model)" name="check" :size="17" class="tick" />
         </button>
       </div>
-      <p class="sec-label">报错反馈</p>
+      <p class="sec-label">配置</p>
       <div class="group">
         <div class="row token-row">
           <span class="ri"><CoomiIcon name="alert" :size="17" /></span>
           <span class="rt">
-            <span class="rmain">GitHub Token（可选）</span>
+            <span class="rmain">报错反馈 GitHub Token</span>
             <span class="rsub">填写后报错反馈会同步建一个 GitHub issue；留空则只走自建服务器通道</span>
             <input
               v-model="githubToken"
@@ -143,12 +148,9 @@ function saveToken() {
               placeholder="ghp_…"
               @blur="saveToken"
             />
+            <span v-if="tokenSaved" class="saved">已保存</span>
           </span>
         </div>
-      </div>
-
-      <p class="sec-label">配置</p>
-      <div class="group">
         <button class="row" @click="router.push('/sessions')">
           <span class="ri"><CoomiIcon name="chat" :size="17" /></span>
           <span class="rt"><span class="rmain">会话历史</span></span>
@@ -206,6 +208,7 @@ function saveToken() {
   font-family: var(--font-mono); font-size: 12.5px;
 }
 .token-input::placeholder { color: var(--text-3); }
+.saved { margin-top: 5px; font-size: 11.5px; font-weight: 600; color: var(--ok, #2e9e5b); }
 .tick { flex-shrink: 0; color: var(--blue); }
 .arw { flex-shrink: 0; color: var(--text-3); }
 .empty { padding: 15px 14px; font-size: 13px; line-height: 1.6; color: var(--text-3); }
