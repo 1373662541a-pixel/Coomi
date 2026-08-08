@@ -201,6 +201,38 @@
                     </LinearLayout>
                 </LinearLayout>
 
+                <!-- Root 权限（可选增强权限，标红提示风险） -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:layout_marginTop="@dimen/coomi_space_m">
+
+                    <TextView
+                        style="@style/Coomi.Text.Body"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:textStyle="bold"
+                        android:text="@string/coomi_root_title"/>
+
+                    <TextView
+                        style="@style/Coomi.Text.Caption"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:text="@string/coomi_root_desc"/>
+
+                    <Button
+                        android:id="@+id/btn_root_permission"
+                        style="@style/Coomi.Button.Pill"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:background="@drawable/coomi_bg_pill_danger"
+                        android:textColor="@color/coomi_white"
+                        android:text="@string/coomi_root_grant"/>
+                </LinearLayout>
+
                 <TextView
                     style="@style/Coomi.Text.Caption"
                     android:layout_width="match_parent"

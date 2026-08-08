@@ -109,6 +109,13 @@
     <string name="coomi_dash_check_update">检查更新</string>
     <string name="coomi_dash_check_update_desc">当前版本 Coomi-Android %1$s</string>
     <string name="coomi_dash_home_settings">启动首页</string>
+    <string name="coomi_root_title">Root 权限（可选）</string>
+    <string name="coomi_root_desc">允许 Coomi 执行明确的 Root 操作以增强能力；未授权也不影响正常使用</string>
+    <string name="coomi_root_grant">授权 Root</string>
+    <string name="coomi_root_checking">检查中…</string>
+    <string name="coomi_root_retry">重试</string>
+    <string name="coomi_root_unavailable">不可用</string>
+    <string name="coomi_authorized">已授权</string>
     <string name="coomi_dash_home_settings_desc">设置打开 App 时进入控制台还是对话</string>
     <string name="coomi_home_setting_title">启动首页设置</string>
     <string name="coomi_home_setting_hint">选择打开 App 时首先进入的页面</string>
