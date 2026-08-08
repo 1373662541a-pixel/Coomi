@@ -412,7 +412,8 @@ public class CoomiActivity extends Activity {
                 String result = postFeedback(json);
                 runOnUiThread(() -> mWebView.evaluateJavascript(
                     "window.__coomiFeedbackResult && window.__coomiFeedbackResult("
-                        + org.json.JSONObject.quote(callbackId) + ", " + result + ")",
+                        + org.json.JSONObject.quote(callbackId) + ", "
+                        + org.json.JSONObject.quote(result) + ")",
                     null));
             }).start();
         }
