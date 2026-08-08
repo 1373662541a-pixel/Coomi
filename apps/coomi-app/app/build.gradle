@@ -51,9 +51,9 @@ android {
         applicationId "com.coomi.android"
         minSdkVersion project.properties.minSdkVersion.toInteger()
         targetSdkVersion project.properties.targetSdkVersion.toInteger()
-        // v1.2.5：versionCode 21（报错反馈、红点、启动首页、引导、1024k 上下文等）
-        versionCode 21
-        versionName "1.2.5"
+        // v1.2.6：versionCode 22（终端闪退修复、TUI 自动启动、Root 权限可选、反馈后台等）
+        versionCode 22
+        versionName "1.2.6"
 
         if (appVersionName) versionName = appVersionName
         validateVersionName(versionName)
