@@ -116,7 +116,8 @@ async function save(): Promise<boolean> {
     type: f.protocol,
     toolProtocol: f.protocol,
     contextWindow: f.contextWindow === 0 ? Math.max(1, Math.round(customContextWindow.value || 64)) * 1000 : f.contextWindow,
-    activate: true,
+    // 模型为空时不激活（草稿态），避免引擎激活校验失败；检索填模型后再保存即激活。
+    activate: f.models.trim().length > 0,
     supportsWebSearch: f.supportsWebSearch,
     supportsVision: f.supportsVision,
   })

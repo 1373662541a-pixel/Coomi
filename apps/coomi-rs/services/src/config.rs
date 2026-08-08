@@ -158,8 +158,10 @@ impl ProviderRegistry {
         let raw = ProviderDocument::load(path)?;
         let mut providers = BTreeMap::new();
         for (id, provider) in raw.providers {
+            // 草稿 provider（模型未填）：跳过，不参与运行时加载；文件保留，
+            // 等用户检索出模型补全后再加入。
             if provider.model.trim().is_empty() {
-                anyhow::bail!("provider `{id}` has no model");
+                continue;
             }
             if provider.base_url.trim().is_empty() {
                 anyhow::bail!("provider `{id}` has no base_url");
@@ -344,14 +346,18 @@ impl ProviderDocument {
         );
         for (id, provider) in &self.providers {
             anyhow::ensure!(!id.trim().is_empty(), "provider ID must not be empty");
-            anyhow::ensure!(
-                !provider.model.trim().is_empty(),
-                "provider `{id}` has no model"
-            );
-            anyhow::ensure!(
-                !provider.base_url.trim().is_empty(),
-                "provider `{id}` has no base_url"
-            );
+            // 未激活的 provider 允许空模型/空 Base URL（草稿态：先保存配置，
+            // 检索出模型后再补全并激活）。只有当前激活的 provider 必须完整可用。
+            if id == &self.active {
+                anyhow::ensure!(
+                    !provider.model.trim().is_empty(),
+                    "active provider `{id}` has no model"
+                );
+                anyhow::ensure!(
+                    !provider.base_url.trim().is_empty(),
+                    "active provider `{id}` has no base_url"
+                );
+            }
             ProviderKind::from_config(&provider.provider_type, provider.tool_protocol.as_deref())?;
         }
         Ok(())
