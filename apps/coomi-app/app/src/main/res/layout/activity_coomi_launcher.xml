@@ -213,6 +213,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:textStyle="bold"
+                        android:textColor="@color/coomi_danger"
                         android:text="@string/coomi_root_title"/>
 
                     <TextView
@@ -220,6 +221,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="3dp"
+                        android:textColor="@color/coomi_danger"
                         android:text="@string/coomi_root_desc"/>
 
                     <Button
@@ -228,8 +230,8 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="6dp"
-                        android:background="@drawable/coomi_bg_pill_danger"
-                        android:textColor="@color/coomi_white"
+                        android:background="@drawable/coomi_bg_pill_outline_danger"
+                        android:textColor="@color/coomi_danger"
                         android:text="@string/coomi_root_grant"/>
                 </LinearLayout>
 
