@@ -380,6 +380,28 @@ public class CoomiActivity extends Activity {
         @JavascriptInterface
         public void openDashboard() { runOnUiThread(CoomiActivity.this::openDashboard); }
 
+        /** 前端上报任务状态（running/done），更新通知栏「任务执行中/已完成」。 */
+        @JavascriptInterface
+        public void updateTaskStatus(String status) {
+            CoomiEngineMonitor.setTaskStatus(status);
+        }
+
+        /** 报错反馈：返回设备与 App 诊断信息（不含对话内容、不含 API Key）。 */
+        @JavascriptInterface
+        public String getDiagnostics() {
+            try {
+                org.json.JSONObject info = new org.json.JSONObject();
+                info.put("version_name", BuildConfig.VERSION_NAME);
+                info.put("version_code", BuildConfig.VERSION_CODE);
+                info.put("device_model", android.os.Build.MODEL);
+                info.put("android_version", android.os.Build.VERSION.RELEASE);
+                info.put("sdk_int", android.os.Build.VERSION.SDK_INT);
+                return info.toString();
+            } catch (Exception e) {
+                return "{}";
+            }
+        }
+
         /** 当前主题档位（system/light/dark），前端初始化时同步。 */
         @JavascriptInterface
         public String getThemeMode() {

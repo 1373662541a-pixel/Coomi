@@ -52,6 +52,38 @@ public final class UpdateChecker {
         }
     }
 
+    /** 静默检查：只查询是否有新版本（用于「检查更新」红点提示），不自动下载。 */
+    public static void checkSilent(final Context context, final Callback callback) {
+        new Thread(() -> {
+            try {
+                URL url = new URL(UPDATE_URL);
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setConnectTimeout(8000);
+                conn.setReadTimeout(8000);
+                conn.setRequestProperty("User-Agent", "Coomi-Android/" + currentVersionCode(context));
+                int code = conn.getResponseCode();
+                if (code != 200) {
+                    callback.onResult(false, null, null, "更新源返回 HTTP " + code);
+                    return;
+                }
+                try (InputStream in = conn.getInputStream()) {
+                    java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream();
+                    byte[] chunk = new byte[8192];
+                    int n;
+                    while ((n = in.read(chunk)) >= 0) buffer.write(chunk, 0, n);
+                    JSONObject json = new JSONObject(new String(buffer.toByteArray(), StandardCharsets.UTF_8));
+                    int remoteCode = json.optInt("versionCode", 0);
+                    String version = json.optString("version", "");
+                    String notes = json.optString("notes", "");
+                    int current = currentVersionCode(context);
+                    callback.onResult(remoteCode > current, version, notes, null);
+                }
+            } catch (Exception e) {
+                callback.onResult(false, null, null, "检查失败：" + e.getMessage());
+            }
+        }).start();
+    }
+
     /** 异步检查更新（网络在主线程外）。 */
     public static void check(final Context context, final Callback callback) {
         new Thread(() -> {

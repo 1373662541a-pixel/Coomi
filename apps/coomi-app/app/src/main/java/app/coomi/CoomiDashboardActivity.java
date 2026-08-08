@@ -56,6 +56,8 @@ public class CoomiDashboardActivity extends Activity {
     private View mRuntimeButton;
     private View mCheckUpdateButton;
     private TextView mCheckUpdateDesc;
+    private View mUpdateDot;
+    private View mHomeSettingsButton;
     private View mPermissionSettingsButton;
     private View mStorageSettingsButton;
     private TextView mThemeSystemButton;
@@ -105,7 +107,10 @@ public class CoomiDashboardActivity extends Activity {
         mFilesButton = findViewById(R.id.btn_web_files);
         mCheckUpdateButton = findViewById(R.id.btn_check_update);
         mCheckUpdateDesc = findViewById(R.id.txt_check_update_desc);
+        mUpdateDot = findViewById(R.id.dot_update);
+        mHomeSettingsButton = findViewById(R.id.btn_home_settings);
         mCheckUpdateDesc.setText(getString(R.string.coomi_dash_check_update_desc, BuildConfig.VERSION_NAME));
+        checkUpdateSilently();
         mBackupButton = findViewById(R.id.btn_backup_data);
         mPermissionSettingsButton = findViewById(R.id.btn_permission_settings);
         mStorageSettingsButton = findViewById(R.id.btn_storage_settings);
@@ -131,6 +136,8 @@ public class CoomiDashboardActivity extends Activity {
         mProvidersButton.setOnClickListener(v -> openProviders());
         mRuntimeButton.setOnClickListener(v -> openRuntime());
         mCheckUpdateButton.setOnClickListener(v -> checkUpdate());
+        mHomeSettingsButton.setOnClickListener(v ->
+            startActivity(new Intent(this, CoomiHomeSettingActivity.class)));
         mBackupButton.setOnClickListener(v ->
             startActivity(new Intent(this, CoomiBackupActivity.class)));
         mPermissionSettingsButton.setOnClickListener(v -> openPermissionSettings());
@@ -398,6 +405,16 @@ public class CoomiDashboardActivity extends Activity {
     private void checkUpdate() {
         Toast.makeText(this, R.string.coomi_dash_checking, Toast.LENGTH_SHORT).show();
         UpdateChecker.checkAndPrompt(this, () -> refreshStatus());
+    }
+
+    /** 进入控制台时静默检查一次：有新版本则在「检查更新」旁亮红点提示。 */
+    private void checkUpdateSilently() {
+        UpdateChecker.checkSilent(this, (hasUpdate, version, notes, error) -> {
+            if (hasUpdate) {
+                mUpdateDot.setVisibility(View.VISIBLE);
+                mCheckUpdateDesc.setText("发现新版本 " + version + "，点击更新");
+            }
+        });
     }
 
 }

@@ -52,6 +52,14 @@ public class CoomiEngineMonitor extends Service {
     private boolean mRestartInFlight = false;
     private String mCurrentStatus = "Starting...";
 
+    /** 任务执行状态（由前端 JS 桥 updateTaskStatus 更新）：null=无任务 / running / done。 */
+    private static volatile String sTaskStatus = null;
+
+    /** 前端任务状态回调：更新常驻通知的「任务执行中/已完成」文案。 */
+    public static void setTaskStatus(String status) {
+        sTaskStatus = status;
+    }
+
     private ServiceConnection mConnection = new ServiceConnection() {
         @Override
         public void onServiceConnected(ComponentName name, IBinder service) {
@@ -240,8 +248,17 @@ public class CoomiEngineMonitor extends Service {
     }
 
     private Notification buildNotification(String contentText) {
+        // 任务执行状态拼进正文：如「Coomi: 运行中 · 任务执行中」
+        String status = sTaskStatus;
+        if ("running".equals(status)) {
+            contentText += " · 任务执行中";
+        } else if ("done".equals(status)) {
+            contentText += " · 任务已完成";
+        }
+        // 通知点击回到控制台/对话页；用 singleTask 复用现有实例而不是 CLEAR_TASK
+        // 清掉任务栈（否则正在跑的 WebView 对话页会被销毁，任务中断）。
         Intent i = new Intent(this, CoomiDashboardActivity.class);
-        i.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+        i.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         int flags = PendingIntent.FLAG_UPDATE_CURRENT;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) flags |= PendingIntent.FLAG_IMMUTABLE;
         PendingIntent pi = PendingIntent.getActivity(this, 0, i, flags);

@@ -14,6 +14,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.PowerManager;
+import android.content.pm.ServiceInfo;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -203,7 +204,8 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
     /** Make service run in foreground mode. */
     private void runStartForeground() {
         setupNotificationChannel();
-        startForeground(TermuxConstants.TERMUX_APP_NOTIFICATION_ID, buildNotification());
+        startForeground(TermuxConstants.TERMUX_APP_NOTIFICATION_ID, buildNotification(),
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
     }
 
     /** Make service leave foreground mode. */
