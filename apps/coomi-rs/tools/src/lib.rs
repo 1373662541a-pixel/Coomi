@@ -133,7 +133,7 @@ impl CoreTools {
     }
 
     async fn dispatch(&self, call: &ToolCall, approval: &dyn ApprovalHandler) -> ToolResult {
-        match call.name.as_str() {
+        match Self::canonical_tool_name(call.name.as_str()) {
             "read_file" => self.read_file(&call.arguments).await,
             "write_file" => self.write_file(&call.arguments).await,
             "edit_file" => self.edit_file(&call.arguments).await,
@@ -164,6 +164,7 @@ impl CoreTools {
             "memory_write" => self.memory_write(call, approval).await,
             "memory_delete" => self.memory_delete(call, approval).await,
             "configure_mcp" => self.configure_mcp(call, approval).await,
+            "list_mcp" => self.list_mcp(),
             "install_skill" => self.install_skill(call, approval).await,
             "uninstall_mcp" => self.uninstall_mcp(call, approval).await,
             "uninstall_skill" => self.uninstall_skill(call, approval).await,
@@ -910,6 +911,49 @@ impl CoreTools {
         loop_state.status = args.status;
         let copy = loop_state.clone();
         ToolResult::success("loop updated").with_loop(copy)
+    }
+
+    /// 工具名归一化：把常见别名/笔误映射到规范工具名，提升模型在
+    /// 不同提供商下复用习惯命名时的鲁棒性。未命中时原样返回。
+    fn canonical_tool_name(name: &str) -> &str {
+        match name {
+            "grep" | "search" => "grep_files",
+            "ls" | "dir" | "list" | "ll" => "list_dir",
+            "cat" | "read" | "view" => "read_file",
+            "write" => "write_file",
+            "edit" | "replace" => "edit_file",
+            "patch" => "apply_patch",
+            "run" | "run_shell" | "bash" | "sh" | "terminal" | "command" | "exec" => "shell",
+            "web" | "web_search" => "web_search",
+            "http" | "http_get" | "browse" | "get_url" => "fetch",
+            "image_view" | "open_image" => "view_image",
+            "image" | "display_image" => "show_image",
+            "ask" | "ask_user" => "request_user_input",
+            "import_file" => "request_file_import",
+            "export_file" => "request_file_export",
+            "plan" => "update_plan",
+            "loop" | "create_loop" => "create_loop",
+            "list_mcp_servers" | "mcp_list" | "get_mcp" => "list_mcp",
+            "list_skills" | "skills" => "list_skills",
+            "skill" => "read_skill",
+            "memory" | "mem_list" => "memory_list",
+            other => other,
+        }
+    }
+
+    /// 列出当前已配置且已启用的 MCP 服务器清单（名称 + 传输方式）。
+    fn list_mcp(&self) -> ToolResult {
+        match &self.mcp_runtime {
+            Some(runtime) => {
+                let inventory = runtime.inventory();
+                if inventory.trim().is_empty() {
+                    ToolResult::success("no MCP servers configured")
+                } else {
+                    ToolResult::success(inventory)
+                }
+            }
+            None => ToolResult::success("no MCP servers configured"),
+        }
     }
 
     fn list_skills(&self) -> ToolResult {
@@ -1773,6 +1817,15 @@ impl ToolRuntime for CoreTools {
                         "type": "object",
                         "properties": {"name": {"type": "string"}},
                         "required": ["name"],
+                        "additionalProperties": false
+                    }),
+                },
+                ToolSpec {
+                    name: "list_mcp".into(),
+                    description: "List configured and enabled MCP servers with their transport. Useful before calling their tools.".into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {},
                         "additionalProperties": false
                     }),
                 },

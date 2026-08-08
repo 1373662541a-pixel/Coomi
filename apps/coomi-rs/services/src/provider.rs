@@ -652,24 +652,36 @@ impl ChatStreamState {
         Ok(())
     }
 
-    fn finish(self) -> Result<ModelResponse> {
-        let tool_calls = self
-            .tools
-            .into_values()
-            .enumerate()
-            .map(|(index, call)| {
-                anyhow::ensure!(!call.name.is_empty(), "streamed tool call has no name");
-                Ok(ToolCall {
-                    id: if call.id.is_empty() {
-                        format!("call-{index}")
-                    } else {
-                        call.id
-                    },
-                    name: call.name,
-                    arguments: parse_arguments(&Value::String(call.arguments))?,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+    fn finish(mut self) -> Result<ModelResponse> {
+        let tools = std::mem::take(&mut self.tools);
+        let mut tool_calls = Vec::new();
+        for (index, call) in tools.into_values().enumerate() {
+            // 容错：部分 OpenAI 兼容模型流式返回时漏掉 function.name。
+            // 不中断整个流：把该调用降级为文本追加到 content，让模型在下一轮
+            // 看到自己没有名称的原始参数后自行纠正。
+            if call.name.trim().is_empty() {
+                if !call.arguments.is_empty() {
+                    eprintln!(
+                        "[provider] streamed tool call has no name; demoting raw arguments to text: {}",
+                        call.arguments
+                    );
+                    self.content.push_str(&format!(
+                        "\n[tool call missing name; raw arguments: {}]\n",
+                        call.arguments
+                    ));
+                }
+                continue;
+            }
+            tool_calls.push(ToolCall {
+                id: if call.id.is_empty() {
+                    format!("call-{index}")
+                } else {
+                    call.id
+                },
+                name: call.name,
+                arguments: parse_arguments(&Value::String(call.arguments))?,
+            });
+        }
         Ok(ModelResponse {
             content: self.content,
             tool_calls,
@@ -798,24 +810,36 @@ impl ResponsesStreamState {
         Ok(())
     }
 
-    fn finish(self) -> Result<ModelResponse> {
-        let tool_calls = self
-            .tools
-            .into_values()
-            .enumerate()
-            .map(|(index, call)| {
-                anyhow::ensure!(!call.name.is_empty(), "streamed tool call has no name");
-                Ok(ToolCall {
-                    id: if call.id.is_empty() {
-                        format!("call-{index}")
-                    } else {
-                        call.id
-                    },
-                    name: call.name,
-                    arguments: parse_arguments(&Value::String(call.arguments))?,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+    fn finish(mut self) -> Result<ModelResponse> {
+        let tools = std::mem::take(&mut self.tools);
+        let mut tool_calls = Vec::new();
+        for (index, call) in tools.into_values().enumerate() {
+            // 容错：部分 OpenAI 兼容模型流式返回时漏掉 function.name。
+            // 不中断整个流：把该调用降级为文本追加到 content，让模型在下一轮
+            // 看到自己没有名称的原始参数后自行纠正。
+            if call.name.trim().is_empty() {
+                if !call.arguments.is_empty() {
+                    eprintln!(
+                        "[provider] streamed tool call has no name; demoting raw arguments to text: {}",
+                        call.arguments
+                    );
+                    self.content.push_str(&format!(
+                        "\n[tool call missing name; raw arguments: {}]\n",
+                        call.arguments
+                    ));
+                }
+                continue;
+            }
+            tool_calls.push(ToolCall {
+                id: if call.id.is_empty() {
+                    format!("call-{index}")
+                } else {
+                    call.id
+                },
+                name: call.name,
+                arguments: parse_arguments(&Value::String(call.arguments))?,
+            });
+        }
         Ok(ModelResponse {
             content: self.content,
             tool_calls,

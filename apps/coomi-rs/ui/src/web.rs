@@ -361,6 +361,7 @@ pub async fn serve(
         .route("/api/catalog/skills/install", post(install_skill_catalog))
         .route("/api/catalog/skills/{id}", delete(uninstall_skill_catalog))
         .route("/api/catalog/skills/{id}/enabled", post(set_skill_enabled_catalog))
+        .route("/api/runtime/installed", get(runtime_installed))
         .route("/ws/session/{session_id}", get(websocket_route))
         .fallback_service(files)
         // Local bridge: only allow same-origin browser access (the Android WebView and
@@ -712,6 +713,53 @@ fn installed_skill_ids(home: &std::path::Path) -> Vec<String> {
         .filter(|entry| entry.path().is_dir())
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect()
+}
+
+/// 本机已安装的 Skill 与 MCP 配置（含 catalog 之外用户自建/导入的）。
+/// 「已安装 / 仓库」页签的已安装列表数据源。
+async fn runtime_installed(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let skills = coomi_services::list_installed_skills(&state.home)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|skill| {
+            json!({
+                "id": skill.name,
+                "name": skill.name,
+                "enabled": skill.enabled,
+                "path": state.home.join("skills").join(&skill.name).display().to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let mcp = installed_mcp_enabled(&state.home)
+        .into_iter()
+        .map(|(name, enabled)| {
+            json!({
+                "id": name,
+                "name": name,
+                "enabled": enabled,
+                "transport": mcp_transport(&state.home, &name),
+                "path": state.home.join("config").join("mcp_servers.json").display().to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "skills": skills, "mcp": mcp })))
+}
+
+/// MCP server 的传输方式（stdio/http/sse），未知时返回空串。
+fn mcp_transport(home: &std::path::Path, name: &str) -> String {
+    let Ok(bytes) = std::fs::read(home.join("config").join("mcp_servers.json")) else {
+        return String::new();
+    };
+    let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+        return String::new();
+    };
+    value
+        .get("servers")
+        .and_then(|s| s.get(name))
+        .and_then(|s| s.get("transport"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
 }
 
 /// 内置 MCP / Skill 目录 + 安装状态（SKILL/MCP 管理界面数据源）。
@@ -1555,6 +1603,26 @@ async fn websocket_session(socket: WebSocket, state: AppState, session_id: Strin
     writer.abort();
 }
 
+/// 内置引导内容：EmptyState 引导卡点击后，把对应正文注入对话（不调模型）。
+const GUIDES: &[(&str, &str)] = &[
+    (
+        "web",
+        "🌐 联网能力引导\n\nCoomi 在 Android 本地运行，具备完整联网能力：\n\n1. **web_search**：搜索最新资讯、文档、热点话题（联网搜索首选）。\n2. **fetch**：直接读取网页内容、API 响应。\n3. **shell / curl / wget**：下载文件、调用接口、访问本地文件。\n\n可以这样用：\n- “帮我查一下今天科技圈的热点话题”\n- “把这个链接的文件下载到手机”\n- “看看这个网页讲了什么”",
+    ),
+    (
+        "memory",
+        "🧠 全局会话记忆引导\n\n**全局会话记忆**控制 Coomi 能否读取历史会话文件：\n\n- **开启**：Coomi 可读取所有历史会话，能回答“上次我们聊了什么”这类问题。\n- **关闭（默认）**：Coomi 无法读取任何历史会话，只能基于当前对话工作，隐私更安全。\n\n在「设置 → 全局会话记忆」中切换。注意：历史会话列表始终可见，开关只影响模型能否读取这些记录的内容。",
+    ),
+    (
+        "skills",
+        "🛠 技能（Skills）引导\n\n技能是可复用的能力包（Skill 目录 + SKILL.md 指令），按需加载：\n\n1. 在「技能市场」浏览并安装技能\n2. 对话中直接说“用 XX 技能做…”即可加载使用\n3. Coomi 已内置 explore / review / research 等技能\n\n安装技能后无需手动配置，对话中按需调用即可。",
+    ),
+    (
+        "custom",
+        "🧩 自定义拓展引导\n\nCoomi 支持多种拓展方式：\n\n1. **自定义身份**：在设置里定义 AI 的身份定位，影响所有回答\n2. **指令（Instructions）**：项目级规则，约束行为\n3. **技能（Skills）**：自定义能力包，按需加载\n4. **MCP 服务器**：接入外部工具服务\n5. **记忆（Memory）**：持久化重要事实\n\n告诉我你想实现什么，Coomi 会指导你一步步配置。",
+    ),
+];
+
 async fn handle_command(
     state: &AppState,
     session_id: &str,
@@ -1807,8 +1875,53 @@ async fn handle_command(
                 context.send_ack(envelope_id);
             }
         }
+        "send_guide" => {
+            dispatch_guide(
+                state,
+                session_id,
+                Arc::clone(&context),
+                envelope_id,
+                &payload,
+            )
+            .await;
+        }
         _ => context.send_error(envelope_id, format!("unsupported command: {command}")),
     }
+}
+
+/// 发送引导命令：把内置引导正文注入会话（不调模型），并像正常回复一样推送给前端。
+/// 由 EmptyState 引导卡触发（"send_guide" + key）。
+async fn dispatch_guide(
+    state: &AppState,
+    session_id: &str,
+    context: Arc<ConnectionContext>,
+    envelope_id: Option<&str>,
+    payload: &Value,
+) {
+    let key = payload
+        .get("key")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let Some((_, body)) = GUIDES.iter().find(|(k, _)| *k == key) else {
+        context.send_error(envelope_id, "unknown guide key");
+        return;
+    };
+    context.send_ack(envelope_id);
+    // 写入会话历史，保证刷新后引导内容仍在。
+    if let Ok(id) = Uuid::parse_str(session_id) {
+        let store = SessionStore::new(&state.home);
+        if let Ok(mut session) = store.load(id) {
+            session
+                .messages
+                .push(coomi_engine::ChatMessage::assistant((*body).to_owned(), Vec::new()));
+            let _ = store.save(&session);
+        }
+    }
+    context.task.push_event(json!({
+        "event_type": "text_chunk",
+        "content": body,
+    }));
+    context.task.push_event(json!({"event_type": "turn_end"}));
 }
 
 async fn run_turn(
