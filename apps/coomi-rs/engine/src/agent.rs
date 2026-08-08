@@ -50,6 +50,9 @@ pub struct Agent {
     /// 为 false 时（图片降级会话）每个模型请求前都会剥离历史/当轮
     /// 工具消息携带的图片，避免上游拒绝图片导致整会话反复失败。
     vision_replay: bool,
+    /// 上下文检查点回调：任务执行中的关键节点（用户消息、模型回复、每轮
+    /// 工具结果）落盘会话，意外中断/重启后仍能从磁盘恢复完整上下文。
+    checkpoint: Option<Arc<dyn Fn(&Session) + Send + Sync>>,
 }
 
 impl Agent {
@@ -60,6 +63,21 @@ impl Agent {
             force_compaction: false,
             input_queue: None,
             vision_replay: true,
+            checkpoint: None,
+        }
+    }
+
+    /// 注册上下文检查点：每次关键消息落盘时调用（由调用方负责持久化 session）。
+    pub fn with_checkpoint(mut self, checkpoint: Arc<dyn Fn(&Session) + Send + Sync>) -> Self {
+        self.checkpoint = Some(checkpoint);
+        self
+    }
+
+    /// 执行检查点（若已注册）。中断保护：任务执行中的上下文按节点落盘，
+    /// 断线/被杀后重连同 session 仍能恢复完整记录。
+    fn run_checkpoint(&self, session: &Session) {
+        if let Some(checkpoint) = &self.checkpoint {
+            checkpoint(session);
         }
     }
 
@@ -154,6 +172,7 @@ impl Agent {
         self.compact(session, provider, &tool_specs, observer, false)
             .await?;
         session.touch();
+        self.run_checkpoint(session);
         Ok(())
     }
 
@@ -237,6 +256,7 @@ impl Agent {
             session.messages.push(ChatMessage::internal_user(context));
         }
         session.messages.push(prompt);
+        self.run_checkpoint(session);
         let tool_specs = tools.specs();
         let capabilities = provider.capabilities();
         let mut compacted_for_provider_error = false;
@@ -291,6 +311,7 @@ impl Agent {
                     compacted_for_provider_error = true;
                     self.compact(session, provider, &tool_specs, observer, true)
                         .await?;
+                    self.run_checkpoint(session);
                     continue;
                 }
                 Err(error) => return Err(AgentError::Provider(error)),
@@ -314,6 +335,7 @@ impl Agent {
             observer.on_event(&AgentEvent::ContextUpdated(
                 session.context.status(&capabilities),
             ));
+            self.run_checkpoint(session);
 
             if response.tool_calls.is_empty() {
                 if self.accept_queued_input(session, observer) {
@@ -351,6 +373,7 @@ impl Agent {
                 }
             }
             self.accept_queued_input(session, observer);
+            self.run_checkpoint(session);
         }
 
         session.touch();

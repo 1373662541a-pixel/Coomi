@@ -46,6 +46,7 @@ public class CoomiBackupActivity extends Activity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        CoomiTheme.applyPageTheme(this);
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_coomi_backup);
 

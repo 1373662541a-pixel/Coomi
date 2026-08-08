@@ -2034,7 +2034,17 @@ async fn run_turn(
             .vision_degraded
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .contains(session_id));
+            .contains(session_id))
+        // 上下文检查点：任务执行中（用户消息/模型回复/每轮工具后）落盘会话，
+        // 意外中断、进程被杀、断线重连后都能从磁盘恢复完整上下文。
+        .with_checkpoint({
+            let checkpoint_store = SessionStore::new(&state.home);
+            Arc::new(move |session: &Session| {
+                if let Err(error) = checkpoint_store.save(session) {
+                    eprintln!("[checkpoint] failed to save session: {error}");
+                }
+            })
+        });
     // 无论成败都先保存会话：报错/中断时本轮已产生的消息（用户提问、工具结果、
     // 部分回复）不丢失；否则下次继续时会话停留在旧历史（表现为「读不了上文」）。
     // touch() 把 updated_at 刷成执行结束时间：会话列表按它排序（而非前端点击时间）。
