@@ -11,6 +11,7 @@ const open = ref(false)
 const confirm = ref(false)
 const sending = ref(false)
 const sent = ref<'ok' | 'fail' | null>(null)
+const failReason = ref('')
 
 const icon = computed(() => {
   switch (props.notice.tone) {
@@ -23,6 +24,45 @@ const icon = computed(() => {
 
 function toggle() { if (props.notice.detail) open.value = !open.value }
 
+/** 原生桥上传回调注册表（callbackId -> resolve）。 */
+type FeedbackCb = (result: { ok: boolean; error?: string; detail?: string }) => void
+const feedbackCbs = new Map<string, FeedbackCb>()
+let feedbackSeq = 0
+
+/**
+ * 上报报错：仅上传报错日志 + 设备诊断，不含任何对话内容。
+ * 优先走原生桥（绕过 WebView CORS，最可靠）；无桥时降级为 fetch。
+ */
+function sendViaBridge(payload: object): Promise<{ ok: boolean; error?: string; detail?: string }> {
+  const native = window.CoomiAndroid
+  if (!native?.sendFeedback) return Promise.resolve({ ok: false, error: 'no bridge' })
+  return new Promise((resolve) => {
+    const id = `fb${++feedbackSeq}_${Date.now()}`
+    feedbackCbs.set(id, resolve)
+    // 超时兜底：8s 无回调按失败处理。
+    setTimeout(() => {
+      if (feedbackCbs.delete(id)) resolve({ ok: false, error: 'timeout' })
+    }, 10000)
+    try {
+      ;(native.sendFeedback as (json: string, id: string) => void)(JSON.stringify(payload), id)
+    } catch (e) {
+      feedbackCbs.delete(id)
+      resolve({ ok: false, error: e instanceof Error ? e.message : String(e) })
+    }  })
+}
+// 原生桥完成后回调（在 JS 全局注册一次）。
+;(window as unknown as { __coomiFeedbackResult?: (id: string, resultJson: string) => void }).__coomiFeedbackResult =
+  (id: string, resultJson: string) => {
+    const cb = feedbackCbs.get(id)
+    if (!cb) return
+    feedbackCbs.delete(id)
+    try {
+      cb(JSON.parse(resultJson))
+    } catch {
+      cb({ ok: false, error: 'bad result' })
+    }
+  }
+
 /**
  * 上报报错：仅上传报错日志 + 设备诊断，不含任何对话内容。
  * 双通道：自建端点（国内可达）优先，随后尝试 GitHub issue（失败静默）。
@@ -31,6 +71,7 @@ async function sendFeedback() {
   if (sending.value) return
   sending.value = true
   sent.value = null
+  failReason.value = ''
   const now = new Date().toISOString()
   let diagnostics = '{}'
   try {
@@ -46,15 +87,28 @@ async function sendFeedback() {
     permission_mode: config.permissionMode,
     time: now,
   }
+  // 主通道：优先原生桥（绕过 WebView CORS），无桥时降级为 fetch。
+  const viaBridge = !!window.CoomiAndroid?.sendFeedback
   let ok = false
-  try {
-    const res = await fetch('https://updates.septemc.com/coomi/feedback/api', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    })
-    ok = res.ok
-  } catch { ok = false }
+  let reason = ''
+  if (viaBridge) {
+    const result = await sendViaBridge(payload)
+    ok = result.ok
+    reason = result.error ?? ''
+  } else {
+    try {
+      const res = await fetch('https://updates.septemc.com/coomi/feedback/api', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      ok = res.ok
+      if (!ok) reason = `HTTP ${res.status}`
+    } catch (e) {
+      ok = false
+      reason = e instanceof Error ? e.message : String(e)
+    }
+  }
   // GitHub issue 通道：用户在设置页填过 token 才尝试；失败静默忽略。
   try {
     const token = localStorage.getItem('coomi.feedbackGithubToken')
@@ -75,6 +129,7 @@ async function sendFeedback() {
   } catch { /* 忽略 */ }
   sending.value = false
   sent.value = ok ? 'ok' : 'fail'
+  failReason.value = reason
   // 已发送提示停留片刻后自动收起
   if (ok) setTimeout(() => { sent.value = null; confirm.value = false }, 2600)
 }
@@ -110,6 +165,7 @@ async function sendFeedback() {
     </template>
     <template v-else>
       <span class="fb-result" :class="sent">{{ sent === 'ok' ? '已收到，感谢反馈' : '上传失败，可稍后重试' }}</span>
+      <span v-if="sent === 'fail' && failReason" class="fb-reason">{{ failReason }}</span>
     </template>
   </div>
 </template>
@@ -172,4 +228,5 @@ async function sendFeedback() {
 .fb-result { font-size: 12.5px; font-weight: 600; }
 .fb-result.ok { color: var(--ok); }
 .fb-result.fail { color: var(--danger); }
+.fb-reason { font-size: 11.5px; color: var(--text-3); word-break: break-all; }
 </style>

@@ -15,6 +15,8 @@ interface Window {
     updateTaskStatus?(status: string): void
     /** 获取设备与 App 诊断信息（报错反馈使用，不含对话内容）。 */
     getDiagnostics?(): string
+    /** 原生上报报错反馈（绕过 WebView CORS）：json 为反馈体，callbackId 用于异步回调。 */
+    sendFeedback?(json: string, callbackId: string): void
   }
 }
 

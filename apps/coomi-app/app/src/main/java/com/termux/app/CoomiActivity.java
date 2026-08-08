@@ -404,6 +404,57 @@ public class CoomiActivity extends Activity {
             }
         }
 
+        /** 原生上报报错反馈：后台线程 POST，绕过 WebView 跨域/CORS 限制。
+         *  完成回调 window.__coomiFeedbackResult(callbackId, {ok, error})。 */
+        @JavascriptInterface
+        public void sendFeedback(String json, String callbackId) {
+            new Thread(() -> {
+                String result = postFeedback(json);
+                runOnUiThread(() -> mWebView.evaluateJavascript(
+                    "window.__coomiFeedbackResult && window.__coomiFeedbackResult("
+                        + org.json.JSONObject.quote(callbackId) + ", " + result + ")",
+                    null));
+            }).start();
+        }
+
+        private String postFeedback(String json) {
+            try {
+                java.net.URL url = new java.net.URL("https://updates.septemc.com/coomi/feedback/api");
+                java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("POST");
+                conn.setConnectTimeout(8000);
+                conn.setReadTimeout(8000);
+                conn.setRequestProperty("Content-Type", "application/json");
+                conn.setDoOutput(true);
+                try (OutputStream out = conn.getOutputStream()) {
+                    out.write(json.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                }
+                int code = conn.getResponseCode();
+                InputStream stream = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
+                StringBuilder body = new StringBuilder();
+                if (stream != null) {
+                    try (InputStream in = stream) {
+                        byte[] buf = new byte[4096];
+                        int n;
+                        while ((n = in.read(buf)) >= 0) body.append(new String(buf, 0, n, java.nio.charset.StandardCharsets.UTF_8));
+                    }
+                }
+                conn.disconnect();
+                org.json.JSONObject out = new org.json.JSONObject();
+                out.put("ok", code >= 200 && code < 300);
+                if (!out.getBoolean("ok")) out.put("error", "HTTP " + code);
+                out.put("detail", body.toString());
+                return out.toString();
+            } catch (Exception e) {
+                org.json.JSONObject out = new org.json.JSONObject();
+                try {
+                    out.put("ok", false);
+                    out.put("error", e.getClass().getSimpleName() + ": " + e.getMessage());
+                } catch (Exception ignored) {}
+                return out.toString();
+            }
+        }
+
         /** 当前主题档位（system/light/dark），前端初始化时同步。 */
         @JavascriptInterface
         public String getThemeMode() {
