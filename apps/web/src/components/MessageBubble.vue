@@ -9,11 +9,13 @@
  */
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import type { AssistantMessage, UserMessage } from '@/stores/viewModel'
+import { useSessionStore } from '@/stores/session'
 import { renderMarkdown } from '@/utils/markdown'
 import CoomiIcon from './CoomiIcon.vue'
 import FileInline from './FileInline.vue'
 
 const props = defineProps<{ msg: AssistantMessage | UserMessage }>()
+const session = useSessionStore()
 
 const RATE = 60
 const blocks = ref<string[]>([])
@@ -25,19 +27,37 @@ const isUser = computed(() => props.msg.kind === 'user')
 const streaming = computed(() => props.msg.kind === 'assistant' && props.msg.streaming)
 const src = computed(() => (props.msg.kind === 'assistant' ? props.msg.content : ''))
 
-/** 从助手文本中识别本地文件路径（供 FileInline 渲染为可点击文件卡片）。 */
+/**
+ * 从助手文本中识别本地文件路径（供 FileInline 渲染为可点击文件卡片）。
+ * 兼容绝对路径、相对路径、./ 与 ../ 前缀；相对路径用会话 cwd 拼成绝对路径
+ * （引擎 fs 接口只接受绝对路径，此前 ./build/x.apk 会被截断成 /build/x.apk 导致「文件不存在」）。
+ */
 const filePaths = computed(() => {
   if (props.msg.kind !== 'assistant' || props.msg.streaming) return []
   const seen = new Set<string>()
   const out: string[] = []
-  const re = /\/[\w.+\-]+(?:\/[\w.+\-]+)+\.[A-Za-z0-9]{1,8}(?=\s|$|[,，。;；)】」])/g
+  const cwd = session.cwd || ''
+  // 匹配路径 token：可带 ./ ../ 前缀或多个目录段，以 文件名.扩展名 结尾。
+  const re = /(?:\.{1,2}\/)*(?:[\w.+\-]+\/)+[\w.+\-]+\.[A-Za-z0-9]{1,8}(?=\s|$|[,，。;；)】」"'<>])/g
   for (const m of src.value.matchAll(re)) {
-    const p = m[0].trim()
+    let p = m[0].trim()
     if (p.length < 8) continue
     if (p.includes('://')) continue
-    if (seen.has(p)) continue
-    seen.add(p)
-    out.push(p)
+    if (p.startsWith('~/')) continue // 引擎 home 目录未知，跳过避免误导
+    // 相对路径拼 cwd；无 cwd 时相对路径无法解析，跳过。
+    const full = p.startsWith('/') ? p : (cwd ? cwd + '/' + p : '')
+    if (!full.startsWith('/')) continue
+    // 规范化：去掉 /./，解析 /../ 与多余斜杠。
+    const parts: string[] = []
+    for (const seg of full.split('/')) {
+      if (seg === '' || seg === '.') continue
+      if (seg === '..') parts.pop()
+      else parts.push(seg)
+    }
+    const norm = '/' + parts.join('/')
+    if (seen.has(norm)) continue
+    seen.add(norm)
+    out.push(norm)
     if (out.length >= 8) break
   }
   return out
