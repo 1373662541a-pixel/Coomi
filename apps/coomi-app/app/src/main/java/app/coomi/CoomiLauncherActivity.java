@@ -261,42 +261,6 @@ public class CoomiLauncherActivity extends Activity {
         mContinueButton.setEnabled(CoomiDemo.isEnabled() || (notifOk && battOk));
     }
 
-    private void checkRootPermission() {
-        if (mRootCheckInFlight || mRootAccessController == null) return;
-        mRootCheckInFlight = true;
-        mRootButton.setEnabled(false);
-        mRootButton.setText(R.string.coomi_root_checking);
-        mRootAccessController.check(result -> {
-            if (isFinishing() || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1 && isDestroyed())) {
-                return;
-            }
-            mRootCheckInFlight = false;
-            switch (result.status) {
-                case GRANTED:
-                    mRootButton.setText(R.string.coomi_authorized);
-                    mRootButton.setEnabled(false);
-                    break;
-                case DENIED:
-                    mRootButton.setText(R.string.coomi_root_retry);
-                    mRootButton.setEnabled(true);
-                    break;
-                case TIMEOUT:
-                    mRootButton.setText(R.string.coomi_root_retry);
-                    mRootButton.setEnabled(true);
-                    break;
-                case UNAVAILABLE:
-                    mRootButton.setText(R.string.coomi_root_unavailable);
-                    mRootButton.setEnabled(true);
-                    break;
-                case ERROR:
-                default:
-                    mRootButton.setText(R.string.coomi_root_retry);
-                    mRootButton.setEnabled(true);
-                    break;
-            }
-        });
-    }
-
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
