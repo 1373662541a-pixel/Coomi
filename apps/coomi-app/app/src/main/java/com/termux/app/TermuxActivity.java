@@ -11,6 +11,7 @@ import android.content.IntentFilter;
 import android.content.ServiceConnection;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Build;
 import android.os.IBinder;
 import android.view.ContextMenu;
 import android.view.ContextMenu.ContextMenuInfo;
@@ -926,7 +927,15 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         intentFilter.addAction(TERMUX_ACTIVITY.ACTION_RELOAD_STYLE);
         intentFilter.addAction(TERMUX_ACTIVITY.ACTION_REQUEST_PERMISSIONS);
 
-        registerReceiver(mTermuxActivityBroadcastReceiver, intentFilter);
+        // Android 14+（targetSdk 34+）要求动态注册的 receiver 显式声明
+        // RECEIVER_EXPORTED / RECEIVER_NOT_EXPORTED，否则抛 SecurityException 闪退。
+        // 这些是 App 内部自定义广播，仅本进程接收。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(mTermuxActivityBroadcastReceiver, intentFilter,
+                Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(mTermuxActivityBroadcastReceiver, intentFilter);
+        }
     }
 
     private void unregisterTermuxActivityBroadcastReceiver() {

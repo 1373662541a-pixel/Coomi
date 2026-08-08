@@ -195,7 +195,9 @@ public final class UpdateChecker {
             }
         };
         context.registerReceiver(receiver,
-            new android.content.IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE));
+            new android.content.IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE),
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                ? Context.RECEIVER_NOT_EXPORTED : 0);
     }
 
     /** 校验下载的 APK 签名证书与当前安装一致（防 MITM/被篡改的更新包）。

@@ -344,11 +344,13 @@ public class TermuxCrashUtils implements CrashHandler.CrashHandlerClient {
 
         // Use currentPackageContext (the actual Activity context) for PendingIntent creation
         // to avoid SecurityException when namespace differs from applicationId
-        PendingIntent contentIntent = PendingIntent.getActivity(currentPackageContext, nextNotificationId, result.contentIntent, PendingIntent.FLAG_UPDATE_CURRENT);
+        PendingIntent contentIntent = PendingIntent.getActivity(currentPackageContext, nextNotificationId, result.contentIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
         PendingIntent deleteIntent = null;
         if (result.deleteIntent != null)
-            deleteIntent = PendingIntent.getBroadcast(currentPackageContext, nextNotificationId, result.deleteIntent, PendingIntent.FLAG_UPDATE_CURRENT);
+            deleteIntent = PendingIntent.getBroadcast(currentPackageContext, nextNotificationId, result.deleteIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
         // Setup the notification channel if not already set up
         setupCrashReportsNotificationChannel(termuxPackageContext);
