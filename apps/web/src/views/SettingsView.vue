@@ -45,19 +45,6 @@ function isCurrent(providerId: string, model: string): boolean {
 
 /** 进入设置页时拉取定制提示词，保证入口副标题与引擎一致。 */
 onMounted(() => { void config.fetchCustomPrompt() })
-
-/** 报错反馈的 GitHub token（仅存本机 localStorage，用于同步建 issue，不上传服务器）。 */
-const githubToken = ref(localStorage.getItem('coomi.feedbackGithubToken') ?? '')
-const tokenSaved = ref(false)
-let tokenSaveTimer: ReturnType<typeof setTimeout> | null = null
-function saveToken() {
-  const t = githubToken.value.trim()
-  if (t) localStorage.setItem('coomi.feedbackGithubToken', t)
-  else localStorage.removeItem('coomi.feedbackGithubToken')
-  tokenSaved.value = true
-  if (tokenSaveTimer) clearTimeout(tokenSaveTimer)
-  tokenSaveTimer = setTimeout(() => { tokenSaved.value = false }, 1600)
-}
 </script>
 <template>
   <div class="page">
@@ -136,21 +123,6 @@ function saveToken() {
       </div>
       <p class="sec-label">配置</p>
       <div class="group">
-        <div class="row token-row">
-          <span class="ri"><CoomiIcon name="alert" :size="17" /></span>
-          <span class="rt">
-            <span class="rmain">报错反馈 GitHub Token</span>
-            <span class="rsub">填写后报错反馈会同步建一个 GitHub issue；留空则只走自建服务器通道</span>
-            <input
-              v-model="githubToken"
-              type="password"
-              class="token-input"
-              placeholder="ghp_…"
-              @blur="saveToken"
-            />
-            <span v-if="tokenSaved" class="saved">已保存</span>
-          </span>
-        </div>
         <button class="row" @click="router.push('/sessions')">
           <span class="ri"><CoomiIcon name="chat" :size="17" /></span>
           <span class="rt"><span class="rmain">会话历史</span></span>
@@ -200,15 +172,6 @@ function saveToken() {
 .rsub { font-size: 12.2px; line-height: 1.5; color: var(--text-3); }
 .rsub.err { color: var(--danger, #d43d2e); }
 .rside { flex-shrink: 0; font-size: 13px; color: var(--text-3); font-variant-numeric: tabular-nums; }
-.token-row { align-items: flex-start; padding: 12px 13px; }
-.token-input {
-  width: 100%; margin-top: 7px; padding: 8px 10px;
-  border: 1px solid var(--border-strong); border-radius: var(--r-sm);
-  background: var(--page); color: var(--text);
-  font-family: var(--font-mono); font-size: 12.5px;
-}
-.token-input::placeholder { color: var(--text-3); }
-.saved { margin-top: 5px; font-size: 11.5px; font-weight: 600; color: var(--ok, #2e9e5b); }
 .tick { flex-shrink: 0; color: var(--blue); }
 .arw { flex-shrink: 0; color: var(--text-3); }
 .empty { padding: 15px 14px; font-size: 13px; line-height: 1.6; color: var(--text-3); }

@@ -109,24 +109,7 @@ async function sendFeedback() {
       reason = e instanceof Error ? e.message : String(e)
     }
   }
-  // GitHub issue 通道：用户在设置页填过 token 才尝试；失败静默忽略。
-  try {
-    const token = localStorage.getItem('coomi.feedbackGithubToken')
-    if (token) {
-      await fetch('https://api.github.com/repos/TensorHub-ORG/Coomi-Android/issues', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Accept': 'application/vnd.github+json',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          title: `[报错反馈] ${(props.notice.text || 'Coomi 错误').slice(0, 60)}`,
-          body: `> 仅包含报错日志与设备诊断，不含对话内容。\n\n**错误**\n${props.notice.text}\n\n**详情**\n${props.notice.detail || '(无)'}\n\n**诊断**\n\`\`\`json\n${diagnostics}\n\`\`\`\n\n**时间** ${now}`,
-        }),
-      })
-    }
-  } catch { /* 忽略 */ }
+  // 仅使用自建服务器通道（用户决定不用 GitHub issue）。
   sending.value = false
   sent.value = ok ? 'ok' : 'fail'
   failReason.value = reason

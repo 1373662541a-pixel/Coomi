@@ -1265,10 +1265,11 @@ async fn upsert_provider(
         ));
     }
     settings.context_window = match input.get("contextWindow").and_then(Value::as_u64) {
-        Some(value @ (128_000 | 256_000 | 512_000)) => Some(value),
+        // 允许 32k ~ 1024k（含自定义档位），超出范围拒绝。
+        Some(value) if (32_000..=1_048_576).contains(&value) => Some(value),
         Some(_) => {
             return Err(ApiError::bad_request(
-                "context window must be 128000, 256000, or 512000",
+                "context window must be between 32000 and 1048576",
             ));
         }
         None => settings.context_window.or(Some(256_000)),
