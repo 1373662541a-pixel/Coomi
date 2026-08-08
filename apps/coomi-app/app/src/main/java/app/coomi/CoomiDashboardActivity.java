@@ -336,10 +336,33 @@ public class CoomiDashboardActivity extends Activity {
 
     private void openTui() {
         if (demoUnavailable()) return;
-        // Open Termux terminal for Coomi TUI
-        Intent intent = new Intent(this, TermuxActivity.class);
-        startActivity(intent);
-        Toast.makeText(this, R.string.coomi_dash_toast_tui_hint, Toast.LENGTH_LONG).show();
+        // 1) 先打开终端：确保 TermuxService / 终端会话先就绪
+        Intent terminal = new Intent(this, TermuxActivity.class);
+        terminal.putExtra("com.coomi.android.app.TERMUX_DIR", TermuxConstants.TERMUX_HOME_DIR_PATH);
+        startActivity(terminal);
+        // 2) 稍作延迟等终端会话起来后，再在新会话里执行 `coomi`（无子命令 = 交互式 TUI）。
+        //    立即执行的话命令会跑在尚未就绪的 shell 上，导致打开的只是普通终端。
+        new Handler(Looper.getMainLooper()).postDelayed(this::launchCoomiTui, 1200);
+    }
+
+    private void launchCoomiTui() {
+        try {
+            Intent intent = new Intent();
+            intent.setClassName(this, TermuxConstants.TERMUX_APP.RUN_COMMAND_SERVICE_NAME);
+            intent.setAction(TermuxConstants.TERMUX_APP.RUN_COMMAND_SERVICE.ACTION_RUN_COMMAND);
+            intent.putExtra(TermuxConstants.TERMUX_APP.RUN_COMMAND_SERVICE.EXTRA_COMMAND_PATH,
+                TermuxConstants.TERMUX_PREFIX_DIR_PATH + "/bin/coomi");
+            intent.putExtra(TermuxConstants.TERMUX_APP.RUN_COMMAND_SERVICE.EXTRA_ARGUMENTS,
+                new String[0]);
+            intent.putExtra(TermuxConstants.TERMUX_APP.RUN_COMMAND_SERVICE.EXTRA_WORKDIR,
+                TermuxConstants.TERMUX_HOME_DIR_PATH);
+            // 0 = 切换到新会话并打开终端界面，前台执行命令
+            intent.putExtra(TermuxConstants.TERMUX_APP.RUN_COMMAND_SERVICE.EXTRA_SESSION_ACTION,
+                String.valueOf(TermuxConstants.TERMUX_APP.TERMUX_SERVICE.VALUE_EXTRA_SESSION_ACTION_SWITCH_TO_NEW_SESSION_AND_OPEN_ACTIVITY));
+            startService(intent);
+        } catch (Exception e) {
+            Logger.logError(LOG_TAG, "Failed to launch Coomi TUI: " + e.getMessage());
+        }
     }
 
     private void openTerminal() {
