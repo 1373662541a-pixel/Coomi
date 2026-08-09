@@ -50,11 +50,14 @@ public class CoomiLauncherActivity extends Activity {
     private Button mNotificationButton;
     private Button mBatteryButton;
     private Button mRootButton;
+    private Button mShizukuButton;
     private Button mContinueButton;
 
     private Handler mHandler = new Handler(Looper.getMainLooper());
     private RootAccessController mRootAccessController;
+    private ShizukuAccessController mShizukuAccessController;
     private boolean mRootCheckInFlight = false;
+    private boolean mShizukuCheckInFlight = false;
     private boolean mPermissionsDone = false;
     private boolean mContinuePersisted = false;
     private boolean mSettingsMode = false;
@@ -71,8 +74,11 @@ public class CoomiLauncherActivity extends Activity {
         mNotificationButton = findViewById(R.id.btn_notification_permission);
         mBatteryButton = findViewById(R.id.btn_battery_permission);
         mRootButton = findViewById(R.id.btn_root_permission);
+        mShizukuButton = findViewById(R.id.btn_shizuku_permission);
         mContinueButton = findViewById(R.id.btn_continue);
         mRootAccessController = new RootAccessController();
+        mShizukuAccessController = new ShizukuAccessController();
+        mShizukuAccessController.setStateListener(this::updateShizukuButton);
 
         mContinuePersisted = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
             .getBoolean(PREF_CONTINUE, false);
@@ -82,6 +88,7 @@ public class CoomiLauncherActivity extends Activity {
         mNotificationButton.setOnClickListener(v -> openNotificationSettings());
         mBatteryButton.setOnClickListener(v -> requestBatteryExemption());
         mRootButton.setOnClickListener(v -> checkRootPermission());
+        mShizukuButton.setOnClickListener(v -> requestShizukuPermission());
         mContinueButton.setOnClickListener(v -> {
             mPermissionsDone = true;
             getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
@@ -120,6 +127,7 @@ public class CoomiLauncherActivity extends Activity {
         super.onDestroy();
         mHandler.removeCallbacksAndMessages(null);
         if (mRootAccessController != null) mRootAccessController.cancel();
+        if (mShizukuAccessController != null) mShizukuAccessController.close();
     }
 
     // ── Phase display ──
@@ -246,6 +254,54 @@ public class CoomiLauncherActivity extends Activity {
         });
     }
 
+    private void requestShizukuPermission() {
+        if (mShizukuCheckInFlight || mShizukuAccessController == null) return;
+        mShizukuCheckInFlight = true;
+        mShizukuButton.setEnabled(false);
+        mShizukuButton.setText(R.string.coomi_shizuku_checking);
+        mShizukuAccessController.request(result -> {
+            if (isFinishing()
+                || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1 && isDestroyed())) {
+                return;
+            }
+            mShizukuCheckInFlight = false;
+            updateShizukuButton(result);
+        });
+    }
+
+    private void updateShizukuButton(ShizukuAccessController.Result result) {
+        if (mShizukuButton == null || result == null) return;
+        if (mShizukuCheckInFlight && result.status != ShizukuAccessController.Status.GRANTED) {
+            mShizukuButton.setEnabled(false);
+            mShizukuButton.setText(R.string.coomi_shizuku_checking);
+            return;
+        }
+        switch (result.status) {
+            case GRANTED:
+                mShizukuButton.setText(R.string.coomi_authorized);
+                mShizukuButton.setEnabled(false);
+                break;
+            case REQUESTABLE:
+                mShizukuButton.setText(R.string.coomi_shizuku_grant);
+                mShizukuButton.setEnabled(true);
+                break;
+            case DENIED:
+                mShizukuButton.setText(R.string.coomi_shizuku_retry);
+                mShizukuButton.setEnabled(true);
+                break;
+            case NOT_RUNNING:
+                mShizukuButton.setText(R.string.coomi_shizuku_not_running);
+                mShizukuButton.setEnabled(true);
+                break;
+            case UNAVAILABLE:
+            case ERROR:
+            default:
+                mShizukuButton.setText(R.string.coomi_shizuku_unavailable);
+                mShizukuButton.setEnabled(true);
+                break;
+        }
+    }
+
     private void updatePermissionStatus() {
         boolean notifOk = areNotificationsEnabled();
         boolean battOk = isBatteryExempt();
@@ -256,6 +312,10 @@ public class CoomiLauncherActivity extends Activity {
 
         mBatteryButton.setEnabled(!battOk);
         mBatteryButton.setText(battOk ? R.string.coomi_granted : R.string.coomi_allow);
+
+        if (mShizukuAccessController != null) {
+            updateShizukuButton(mShizukuAccessController.getStatus());
+        }
 
         // 演示包不为权限拦人：这两个开关只影响引擎常驻，而演示包没有引擎。
         mContinueButton.setEnabled(CoomiDemo.isEnabled() || (notifOk && battOk));
