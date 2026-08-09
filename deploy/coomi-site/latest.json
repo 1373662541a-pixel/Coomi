@@ -1,12 +1,12 @@
 {
-  "version": "1.2.6",
-  "versionCode": 22,
+  "version": "1.2.7",
+  "versionCode": 24,
   "platform": "android",
   "arch": "arm64-v8a",
   "minAndroid": "7.0",
-  "file": "Coomi-Android-arm64-v1.2.6.apk",
-  "size": 41282772,
-  "sha256": "41a543510f6b54d5473790278c2af3c3cb860eb9d1f1f20cca1bed6070ea93c9",
-  "publishedAt": "2026-08-08T22:10:00Z",
-  "notes": "v1.2.6 更新内容：\n• 修复终端闪退：适配 Android 14+ 动态广播注册与 PendingIntent 标志要求（targetSdk 36）\n• 终端版 Coomi 一键启动：点击后自动在终端打开 coomi 交互式 TUI（无需手动输入命令）\n• 新增 Root 权限可选授权（授权引导页红色入口，仅探测授权、不执行任意命令，未授权不影响使用）\n• 报错反馈后台：管理端登录后可查看全部反馈日志（含设备信息与 IP）\n• 修复新增 Provider 时模型留空无法保存/检索（草稿态保存，检索后补全再激活）\n• 上下文窗口支持 32k~1024k（含自定义档位）\n• 修复对话中文件链接因相对路径导致「文件不存在」\n• 任务执行中上下文实时落盘（checkpoint），意外中断/切换会话不再丢失\n• 备份与导入页适配暗色主题\n• 通知栏任务状态（执行中/已完成），点击通知不中断任务"
+  "file": "Coomi-Android-arm64-v1.2.7.apk",
+  "size": 41311497,
+  "sha256": "385207e481cae1eef2ca35e3a29488baf4c452e84a4918388d5bf35e1162ebcb",
+  "publishedAt": "2026-08-09T05:46:30Z",
+  "notes": "v1.2.7 更新内容：\n• 修复 Termux bootstrap 执行权限与残缺环境误判，解决 usr/bin/bash: Permission denied\n• APK 覆盖更新后自动刷新原生引擎链接，修复引擎重启失败\n• 恢复 Root 可选授权探测，不影响普通模式安装和运行\n• 新增 Shizuku 可选授权、状态管理与内置 Shizuku Skill\n• 构建阶段锁定 targetSdk 28，防止 Termux 私有目录执行权限回归"
 }

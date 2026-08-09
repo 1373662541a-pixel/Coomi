@@ -64,7 +64,7 @@ Coomi 是一个在 Android 设备上运行的本地优先智能体工作环境�
 
 ## 快速开始
 
-1. 从 [GitHub Releases](https://github.com/TensorHub-ORG/Coomi-Android/releases) 或[官网](https://coomi.septemc.com/)下载最新 APK（`Coomi-Android-arm64-v1.2.6-fix.apk`），安装到 Android 7.0+ 的 ARM64 设备。
+1. 从 [GitHub Releases](https://github.com/TensorHub-ORG/Coomi-Android/releases) 或[官网](https://coomi.septemc.com/)下载最新 APK（`Coomi-Android-arm64-v1.2.7.apk`），安装到 Android 7.0+ 的 ARM64 设备。
 2. 打开 App，完成引导：配置模型服务商（Provider）与 API Key，或先跳过、稍后在「对话设置 → Provider 配置」中填写。
 3. 进入对话界面，向 Agent 下达任务——它可以执行命令、读写文件、识别图片、管理 SKILL/MCP。
 
