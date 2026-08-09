@@ -201,10 +201,9 @@
                     </LinearLayout>
 
                     <View style="@style/Coomi.Divider"/>
-
-                    <!-- Root 权限（可选增强权限，标红提示风险） -->
                 </LinearLayout>
 
+                <!-- Root is optional and intentionally outside the required-permissions card. -->
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"

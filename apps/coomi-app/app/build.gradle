@@ -19,6 +19,13 @@ android {
 
     compileSdkVersion project.properties.compileSdkVersion.toInteger()
     ndkVersion = System.getenv("JITPACK_NDK_VERSION") ?: project.properties.ndkVersion
+    def coomiTargetSdk = project.properties.targetSdkVersion.toInteger()
+    if (coomiTargetSdk > 28) {
+        throw new GradleException(
+            "Coomi's Termux bootstrap executes from app-private storage and requires targetSdkVersion <= 28. " +
+            "Target API 29+ blocks usr/bin/bash with EACCES (Permission denied)."
+        )
+    }
     def appVersionName = System.getenv("TERMUX_APP_VERSION_NAME") ?: ""
     def apkVersionTag = System.getenv("TERMUX_APK_VERSION_TAG") ?: ""
 
@@ -50,10 +57,10 @@ android {
         // rebuilt for com.coomi.android is supplied; bash and most core tools work via $PREFIX.
         applicationId "com.coomi.android"
         minSdkVersion project.properties.minSdkVersion.toInteger()
-        targetSdkVersion project.properties.targetSdkVersion.toInteger()
-        // v1.2.6：versionCode 22（终端闪退修复、TUI 自动启动、Root 权限可选、反馈后台等）
-        versionCode 22
-        versionName "1.2.6"
+        targetSdkVersion coomiTargetSdk
+        // v1.2.6-fix: restore the executable Termux bootstrap security domain.
+        versionCode 23
+        versionName "1.2.6-fix"
 
         if (appVersionName) versionName = appVersionName
         validateVersionName(versionName)

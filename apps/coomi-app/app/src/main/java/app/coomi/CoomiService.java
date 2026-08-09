@@ -4,6 +4,9 @@ import android.app.Service;
 import android.content.Intent;
 import android.os.Binder;
 import android.os.IBinder;
+import android.system.ErrnoException;
+import android.system.Os;
+import android.system.OsConstants;
 
 import com.termux.shared.logger.Logger;
 import com.termux.shared.termux.TermuxConstants;
@@ -122,7 +125,10 @@ public class CoomiService extends Service {
      * （CANNOT LINK EXECUTABLE）。以核心 shell 与基础库同时存在为准。
      */
     public static boolean isBootstrapInstalled() {
-        return new File(prefix() + "/bin/bash").isFile()
+        File bash = new File(prefix() + "/bin/bash");
+        // canExecute(): 覆盖安装/中断会留下「存在但不可执行」的 bash（sh 直接
+        // 报 Permission denied），此时必须重装而非跳过。
+        return bash.isFile() && bash.canExecute()
             && new File(prefix() + "/lib/libandroid-support.so").isFile();
     }
 
@@ -133,6 +139,63 @@ public class CoomiService extends Service {
 
     private File nativeBinary() {
         return new File(getApplicationInfo().nativeLibraryDir, CoomiConstants.NATIVE_BINARY_NAME);
+    }
+
+    /**
+     * APK 覆盖安装会更换 /data/app 下的 nativeLibraryDir，旧的 usr/bin/coomi
+     * 因而变成悬空软链接。已有部署标记时在启动前将它刷新到当前 APK。
+     */
+    private boolean ensureNativeBinaryLinkCurrent() {
+        File marker = new File(CoomiConstants.INSTALL_MARKER_PATH);
+        File binary = nativeBinary();
+        File link = new File(prefix() + "/bin/coomi");
+        if (!marker.isFile() || !binary.isFile()) return false;
+
+        String expected = binary.getAbsolutePath();
+        String actual = "";
+        try {
+            actual = Os.readlink(link.getAbsolutePath());
+        } catch (ErrnoException e) {
+            if (e.errno != OsConstants.ENOENT && e.errno != OsConstants.EINVAL) {
+                Logger.logError(LOG_TAG, "Failed to inspect native engine link: " + e.getMessage());
+                return false;
+            }
+        }
+
+        if (expected.equals(actual) && link.isFile()) return true;
+
+        try {
+            try {
+                Os.remove(link.getAbsolutePath());
+            } catch (ErrnoException e) {
+                if (e.errno != OsConstants.ENOENT) throw e;
+            }
+            Os.symlink(expected, link.getAbsolutePath());
+            if (!expected.equals(Os.readlink(link.getAbsolutePath())) || !link.isFile()) {
+                Logger.logError(LOG_TAG, "Native engine link verification failed");
+                return false;
+            }
+            Logger.logInfo(LOG_TAG, "Refreshed native engine link after APK update: " + expected);
+            updateInstallMarkerNativePath(marker, expected);
+            return true;
+        } catch (Exception e) {
+            Logger.logError(LOG_TAG, "Failed to refresh native engine link: " + e.getMessage());
+            return false;
+        }
+    }
+
+    private void updateInstallMarkerNativePath(File marker, String nativePath) {
+        try {
+            String markerText = readText(marker).trim();
+            int newline = markerText.indexOf('\n');
+            String version = newline >= 0 ? markerText.substring(0, newline).trim() : markerText;
+            try (FileWriter writer = new FileWriter(marker)) {
+                if (!version.isEmpty()) writer.write(version + "\n");
+                writer.write(nativePath + "\n");
+            }
+        } catch (Exception e) {
+            Logger.logError(LOG_TAG, "Failed to update deployment marker: " + e.getMessage());
+        }
     }
 
     public String getRuntimeVersion() {
@@ -321,7 +384,7 @@ public class CoomiService extends Service {
                     stopEngineSync();
                 }
             }
-            if (!isDeployComplete()) {
+            if (!ensureNativeBinaryLinkCurrent() || !isDeployComplete()) {
                 mIsEngineStarting = false;
                 return new CommandResult(false, "", "coomi-rs is not deployed", -1);
             }

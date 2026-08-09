@@ -103,7 +103,7 @@ public class CoomiLauncherActivity extends Activity {
         super.onResume();
         if (mSettingsMode) {
             showWelcomePhase();
-            refreshPermissionStatusDelayed();
+            updatePermissionStatus();
             return;
         }
         if (mPermissionsDone || mContinuePersisted) {
@@ -112,7 +112,7 @@ public class CoomiLauncherActivity extends Activity {
             return;
         }
         showWelcomePhase();
-        refreshPermissionStatusDelayed();
+        updatePermissionStatus();
     }
 
     @Override
@@ -166,55 +166,18 @@ public class CoomiLauncherActivity extends Activity {
     }
 
     private void requestBatteryExemption() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
-        if (isXiaomi()) {
-            // MIUI 上 ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS 只打开列表页且不生效，
-            // 直接进「忽略电池优化」设置页，让用户手动把 Coomi 设为「无限制」。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             try {
-                Intent intent = new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
+                Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                intent.setData(Uri.parse("package:" + getPackageName()));
                 startActivityForResult(intent, REQUEST_CODE_BATTERY);
-                android.widget.Toast.makeText(
-                    this,
-                    "请在列表中找到 Coomi，将省电策略设为「无限制」",
-                    android.widget.Toast.LENGTH_LONG
-                ).show();
             } catch (Exception e) {
-                Logger.logError(LOG_TAG, "Battery exemption settings failed: " + e.getMessage());
+                Logger.logError(LOG_TAG, "Battery exemption request failed: " + e.getMessage());
             }
-            return;
-        }
-        try {
-            Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
-            intent.setData(Uri.parse("package:" + getPackageName()));
-            startActivityForResult(intent, REQUEST_CODE_BATTERY);
-        } catch (Exception e) {
-            Logger.logError(LOG_TAG, "Battery exemption request failed: " + e.getMessage());
         }
     }
 
-    /** MIUI / Redmi 检测：小米系设备用独立的电池设置路径。 */
-    private boolean isXiaomi() {
-        String manufacturer = android.os.Build.MANUFACTURER == null ? "" : android.os.Build.MANUFACTURER.toLowerCase();
-        if (manufacturer.contains("xiaomi") || manufacturer.contains("redmi") || manufacturer.contains("poco")) {
-            return true;
-        }
-        try {
-            Class<?> clazz = Class.forName("android.os.SystemProperties");
-            java.lang.reflect.Method method = clazz.getMethod("get", String.class);
-            String miui = (String) method.invoke(null, "ro.miui.ui.version.name");
-            return miui != null && !miui.trim().isEmpty();
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    /** 双查：立即刷新 + 800ms 后延迟再查（部分厂商授权页返回后状态位更新有延迟）。 */
-    private void refreshPermissionStatusDelayed() {
-        updatePermissionStatus();
-        mHandler.postDelayed(this::updatePermissionStatus, 800);
-    }
-
-    /** Root 权限检查（可选）：调用 RootAccessController 执行 su -c id 探测授权状态。 */
+    /** Root is an optional capability check and never gates bootstrap installation. */
     private void checkRootPermission() {
         if (mRootCheckInFlight || mRootAccessController == null) return;
         mRootCheckInFlight = true;
@@ -231,15 +194,15 @@ public class CoomiLauncherActivity extends Activity {
                     mRootButton.setText(R.string.coomi_authorized);
                     mRootButton.setEnabled(false);
                     break;
+                case UNAVAILABLE:
+                    mRootButton.setText(R.string.coomi_root_unavailable);
+                    mRootButton.setEnabled(true);
+                    break;
                 case DENIED:
                 case TIMEOUT:
                 case ERROR:
                 default:
                     mRootButton.setText(R.string.coomi_root_retry);
-                    mRootButton.setEnabled(true);
-                    break;
-                case UNAVAILABLE:
-                    mRootButton.setText(R.string.coomi_root_unavailable);
                     mRootButton.setEnabled(true);
                     break;
             }
@@ -265,7 +228,7 @@ public class CoomiLauncherActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQUEST_CODE_NOTIFICATION || requestCode == REQUEST_CODE_BATTERY) {
-            refreshPermissionStatusDelayed();
+            updatePermissionStatus();
         }
     }
 
@@ -314,12 +277,11 @@ public class CoomiLauncherActivity extends Activity {
             return;
         }
 
-        // 主界面路由：按「启动首页」设置决定进控制台还是直接进对话。
-        Logger.logInfo(LOG_TAG, "All ready, routing to "
-            + (CoomiHomePreference.isChatHome(this) ? "chat" : "dashboard"));
+        // 控制台是 app 的主界面：打开 app 先进控制台（引擎状态 + 各功能入口），
+        // 从控制台再进入对话，符合安卓用户「回到主界面」的交互习惯。
+        Logger.logInfo(LOG_TAG, "All ready, routing to dashboard");
         mStatusText.setText(R.string.coomi_starting);
-        Intent intent = new Intent(this, CoomiHomePreference.isChatHome(this)
-            ? com.termux.app.CoomiActivity.class : CoomiDashboardActivity.class);
+        Intent intent = new Intent(this, CoomiDashboardActivity.class);
         startActivity(intent);
         finish();
     }

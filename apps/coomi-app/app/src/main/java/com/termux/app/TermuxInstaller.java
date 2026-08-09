@@ -402,7 +402,10 @@ public final class TermuxInstaller {
      * 以核心 shell 与基础库同时存在作为完整标记。
      */
     private static boolean isBootstrapComplete() {
-        return new File(TERMUX_PREFIX_DIR_PATH + "/bin/bash").exists()
+        File bash = new File(TERMUX_PREFIX_DIR_PATH + "/bin/bash");
+        // canExecute(): 中断/覆盖安装可能留下「存在但不可执行」的 bash
+        // （解压后未完成 chmod 0700），此时必须视为残缺并重装。
+        return bash.exists() && bash.canExecute()
             && new File(TERMUX_PREFIX_DIR_PATH + "/lib/libandroid-support.so").exists();
     }
 
