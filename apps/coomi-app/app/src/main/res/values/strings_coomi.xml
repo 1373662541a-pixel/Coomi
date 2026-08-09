@@ -8,7 +8,7 @@
     <string name="coomi_launcher_subtitle">手机上的自主编程 Agent</string>
     <string name="coomi_launcher_section_permission">开始之前</string>
     <string name="coomi_launcher_privacy">所有命令都在本机 Linux 环境内执行，权限仅用于保持引擎运行。</string>
-    <string name="coomi_launcher_permission_hint">通知和电池权限开启后即可继续，Root 为可选增强权限</string>
+    <string name="coomi_launcher_permission_hint">通知和电池权限开启后即可继续，Root 与 Shizuku 均为可选增强权限</string>
     <string name="coomi_dash_section_settings">设置</string>
     <string name="coomi_dash_permission_settings">运行权限</string>
     <string name="coomi_dash_permission_settings_desc">通知、电池与增强权限</string>
@@ -171,4 +171,11 @@
     <string name="coomi_demo_loading">正在加载演示界面…</string>
     <string name="coomi_demo_failed">演示资源缺失（web.zip）</string>
 
+    <string name="coomi_shizuku_title">Shizuku 权限（可选）</string>
+    <string name="coomi_shizuku_desc">允许 Coomi 通过 Shizuku 执行受控系统操作；未授权也不影响正常使用</string>
+    <string name="coomi_shizuku_grant">授权 Shizuku</string>
+    <string name="coomi_shizuku_checking">检查中…</string>
+    <string name="coomi_shizuku_retry">重试</string>
+    <string name="coomi_shizuku_not_running">未运行</string>
+    <string name="coomi_shizuku_unavailable">不可用</string>
 </resources>

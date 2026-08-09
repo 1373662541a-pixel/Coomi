@@ -218,14 +218,25 @@ impl CatalogInstaller {
             .rsplit('/')
             .next()
             .unwrap_or("repository");
-        let root_prefix = format!("{repo_basename}-{}/", entry.git_ref);
+        // GitHub normalizes slashes in branch names in codeload archive roots
+        // (for example codex/feat/x becomes repo-codex-feat-x).
+        let root_prefixes = [
+            format!("{repo_basename}-{}/", entry.git_ref),
+            format!(
+                "{repo_basename}-{}/",
+                entry.git_ref.replace('/', "-")
+            ),
+        ];
         let subdir_prefix = format!("{}/", entry.subdir);
         for index in 0..archive.len() {
             let mut file = archive
                 .by_index(index)
                 .with_context(|| format!("invalid zip entry #{index}"))?;
             let name = file.name().to_string();
-            let Some(rest) = name.strip_prefix(&root_prefix) else {
+            let Some(rest) = root_prefixes
+                .iter()
+                .find_map(|prefix| name.strip_prefix(prefix))
+            else {
                 continue;
             };
             if rest != entry.subdir && !rest.starts_with(&subdir_prefix) {
