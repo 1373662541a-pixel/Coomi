@@ -9,6 +9,7 @@ import { useConfigStore, PERMISSION_MODES, THEME_MODES } from '@/stores/config'
 import { useSessionStore } from '@/stores/session'
 import { useSessionsStore } from '@/stores/sessions'
 import { useConnectionStore } from '@/stores/connection'
+import { authedFetch } from '@/bridge/http'
 import type { PermissionMode } from '@/protocol/commands'
 import PageHead from '@/components/PageHead.vue'
 import CoomiIcon from '@/components/CoomiIcon.vue'
@@ -30,6 +31,25 @@ async function toggleGlobalMemory() {
   }
 }
 
+/** 匿名使用统计开关：仅上报 SKILL 安装/使用次数，不含任何内容。 */
+const telemetryEnabled = ref(true)
+const telemetryError = ref('')
+async function toggleTelemetry() {
+  telemetryError.value = ''
+  try {
+    const res = await authedFetch('/api/settings/telemetry', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !telemetryEnabled.value }),
+    })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = await res.json()
+    telemetryEnabled.value = data.enabled ?? !telemetryEnabled.value
+  } catch (e) {
+    telemetryError.value = `设置失败：${e instanceof Error ? e.message : String(e)}`
+  }
+}
+
 const MODE_ICON: Record<PermissionMode, string> = { ask: 'shield', auto: 'bolt', full: 'plusCircle' }
 
 /** provider × model 拍平成一维列表，省掉一层嵌套标题。 */
@@ -43,8 +63,17 @@ function isCurrent(providerId: string, model: string): boolean {
   return config.currentProviderId === providerId && config.currentModel === model
 }
 
-/** 进入设置页时拉取定制提示词，保证入口副标题与引擎一致。 */
-onMounted(() => { void config.fetchCustomPrompt() })
+/** 进入设置页时拉取定制提示词与统计开关状态（旧引擎无统计接口时保持默认）。 */
+onMounted(async () => {
+  void config.fetchCustomPrompt()
+  try {
+    const res = await authedFetch('/api/settings/telemetry')
+    if (res.ok) {
+      const data = await res.json()
+      telemetryEnabled.value = data.enabled ?? true
+    }
+  } catch { /* 旧引擎进程：接口不存在，保持默认开启 */ }
+})
 </script>
 <template>
   <div class="page">
@@ -107,6 +136,22 @@ onMounted(() => { void config.fetchCustomPrompt() })
             <span class="rsub">{{ m.desc }}</span>
           </span>
           <CoomiIcon v-if="config.themeMode === m.mode" name="check" :size="17" class="tick" />
+        </button>
+      </div>
+
+      <p class="sec-label">隐私</p>
+      <div class="group">
+        <button class="row" @click="toggleTelemetry">
+          <span class="ri" :class="{ on: telemetryEnabled }"><CoomiIcon name="shield" :size="17" /></span>
+          <span class="rt">
+            <span class="rmain">匿名使用统计</span>
+            <span class="rsub" :class="{ err: !!telemetryError }">
+              {{ telemetryError || (telemetryEnabled
+                ? '仅上报 SKILL 安装与使用次数，不含任何对话内容，可随时关闭'
+                : '已关闭：不再上报任何统计数据') }}
+            </span>
+          </span>
+          <span class="sw" :class="{ on: telemetryEnabled }" />
         </button>
       </div>
 
