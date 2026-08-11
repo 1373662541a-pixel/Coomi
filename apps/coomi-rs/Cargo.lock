@@ -345,6 +345,7 @@ name = "coomi-catalogs"
 version = "2.0.0"
 dependencies = [
  "anyhow",
+ "coomi-telemetry",
  "reqwest",
  "serde",
  "serde_json",
@@ -387,12 +388,25 @@ dependencies = [
  "async-trait",
  "chrono",
  "coomi-engine",
+ "coomi-telemetry",
  "futures-util",
  "md5",
  "reqwest",
  "serde",
  "serde_json",
  "serde_yaml",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "coomi-telemetry"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
 ]
@@ -408,6 +422,7 @@ dependencies = [
  "coomi-engine",
  "coomi-security",
  "coomi-services",
+ "coomi-telemetry",
  "ignore",
  "regex",
  "reqwest",
@@ -431,6 +446,7 @@ dependencies = [
  "coomi-engine",
  "coomi-security",
  "coomi-services",
+ "coomi-telemetry",
  "coomi-tools",
  "crossterm",
  "dirs",
