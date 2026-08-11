@@ -978,7 +978,9 @@ async fn install_skill_remote(
         .unwrap_or("main")
         .trim()
         .to_string();
-    if git_ref.is_empty() || git_ref.contains("..") || git_ref.contains('/') {
+    // ref 只出现在 codeload URL 与 zip 根目录匹配中（GitHub 服务端解析分支名，
+    // 含斜杠的分支如 feature/foo 是合法的）；拒绝空值与 .. 防穿越。
+    if git_ref.is_empty() || git_ref.contains("..") {
         return Err(ApiError::bad_request("invalid ref"));
     }
     let subdir = body
@@ -1018,6 +1020,8 @@ async fn install_skill_remote(
 }
 
 /// 卸载 Skill：删除 skills/{id} 目录与 config/skills.json 条目（彻底删除）。
+/// 内置目录条目走 CatalogInstaller::uninstall_skill；社区市场安装的条目（id 不在
+/// 内置目录）回退到通用卸载（按名字删除目录 + 配置，与 Agent 工具的卸载一致）。
 async fn uninstall_skill_catalog(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
@@ -1026,7 +1030,11 @@ async fn uninstall_skill_catalog(
     let task_id = id.clone();
     let path = tokio::task::spawn_blocking(move || {
         let installer = coomi_catalogs::CatalogInstaller::new(&home);
-        installer.uninstall_skill(&task_id)
+        match installer.uninstall_skill(&task_id) {
+            Ok(path) => Ok(path),
+            Err(_) => coomi_services::remove_installed_skill(&home, &task_id)
+                .map(|()| home.join("skills").join(&task_id)),
+        }
     })
     .await
     .map_err(|e| ApiError::internal(format!("Skill uninstall task failed: {e}")))?
