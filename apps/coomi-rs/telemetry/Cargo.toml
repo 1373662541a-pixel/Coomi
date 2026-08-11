@@ -1,5 +1,5 @@
 [package]
-name = "coomi-services"
+name = "coomi-telemetry"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,16 +9,9 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
-async-trait.workspace = true
-coomi-engine = { path = "../engine" }
-coomi-telemetry = { path = "../telemetry" }
-chrono.workspace = true
-futures-util.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml.workspace = true
-md5.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]

@@ -21,6 +21,7 @@ coomi-catalogs = { path = "../catalogs" }
 coomi-engine = { path = "../engine" }
 coomi-security = { path = "../security" }
 coomi-services = { path = "../services" }
+coomi-telemetry = { path = "../telemetry" }
 coomi-tools = { path = "../tools" }
 crossterm.workspace = true
 dirs.workspace = true

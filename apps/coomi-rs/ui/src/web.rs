@@ -18,6 +18,7 @@ use axum::response::IntoResponse;
 use axum::routing::delete;
 use axum::routing::get;
 use axum::routing::post;
+use coomi_catalogs::SkillEntry;
 use coomi_engine::Agent;
 use coomi_engine::AgentEvent;
 use coomi_engine::AgentObserver;
@@ -41,6 +42,7 @@ use coomi_services::ProviderDocument;
 use coomi_services::ProviderRegistry;
 use coomi_services::ProviderSettings;
 use coomi_services::list_installed_skills;
+use coomi_telemetry::Telemetry;
 use coomi_tools::AgentScheduler;
 use coomi_tools::CoreTools;
 use coomi_tools::ProcessManager;
@@ -59,6 +61,7 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -93,6 +96,14 @@ struct AppState {
     /// 含图片会话的连续请求失败计数：达到阈值（不依赖错误文本关键词）
     /// 也触发图片降级，兜住上游只回笼统错误（如 Internal server error）的情况。
     vision_failures: Arc<StdMutex<HashMap<String, u32>>>,
+    /// 社区注册表缓存：远端数据（registry/stats）10 分钟内只拉一次，失败降级内置目录。
+    registry_cache: Arc<StdMutex<Option<RegistryCache>>>,
+}
+
+/// 社区注册表缓存条目。
+struct RegistryCache {
+    fetched_at: Instant,
+    payload: Value,
 }
 
 impl AppState {
@@ -324,7 +335,10 @@ pub async fn serve(
         tasks: Arc::new(StdMutex::new(HashMap::new())),
         vision_degraded: Arc::new(StdMutex::new(HashSet::new())),
         vision_failures: Arc::new(StdMutex::new(HashMap::new())),
+        registry_cache: Arc::new(StdMutex::new(None)),
     };
+    // 引擎启动时补发上次会话遗留的未上报事件（如进程被系统杀掉前没来得及 flush）。
+    Telemetry::new(&state.home).flush_background();
     let index = static_dir.join("index.html");
     let files = ServeDir::new(static_dir).not_found_service(ServeFile::new(index));
     let app = Router::new()
@@ -359,8 +373,11 @@ pub async fn serve(
         .route("/api/catalog/mcp/{id}", delete(uninstall_mcp_catalog))
         .route("/api/catalog/mcp/{id}/enabled", post(set_mcp_enabled_catalog))
         .route("/api/catalog/skills/install", post(install_skill_catalog))
+        .route("/api/catalog/skills/install-remote", post(install_skill_remote))
         .route("/api/catalog/skills/{id}", delete(uninstall_skill_catalog))
         .route("/api/catalog/skills/{id}/enabled", post(set_skill_enabled_catalog))
+        .route("/api/registry", get(registry_index))
+        .route("/api/settings/telemetry", get(telemetry_get).put(telemetry_set))
         .route("/api/runtime/installed", get(runtime_installed))
         .route("/ws/session/{session_id}", get(websocket_route))
         .fallback_service(files)
@@ -377,7 +394,7 @@ pub async fn serve(
                         .parse::<HeaderValue>()
                         .expect("valid origin"),
                 ])
-                .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
                 .allow_headers([header::CONTENT_TYPE, header::ACCEPT, header::AUTHORIZATION]),
         )
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth_layer))
@@ -764,13 +781,18 @@ fn mcp_transport(home: &std::path::Path, name: &str) -> String {
 
 /// 内置 MCP / Skill 目录 + 安装状态（SKILL/MCP 管理界面数据源）。
 async fn catalog_index(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    Ok(Json(builtin_catalog_payload(&state.home)?))
+}
+
+/// 内置目录 payload：SKILL/MCP 管理页与社区市场页共用。
+fn builtin_catalog_payload(home: &Path) -> Result<Value, ApiError> {
     let mcp_catalog = coomi_catalogs::builtin_mcp().map_err(|e| ApiError::internal(e.to_string()))?;
     let skill_catalog =
         coomi_catalogs::builtin_skills().map_err(|e| ApiError::internal(e.to_string()))?;
-    let installed_mcp = installed_mcp_enabled(&state.home);
-    let installed_skills = installed_skill_ids(&state.home);
+    let installed_mcp = installed_mcp_enabled(home);
+    let installed_skills = installed_skill_ids(home);
     // 已启用的 skill id 集合（读 config/skills.json 的 enabled 字段）。
-    let enabled_skills: HashSet<String> = coomi_services::list_installed_skills(&state.home)
+    let enabled_skills: HashSet<String> = coomi_services::list_installed_skills(home)
         .unwrap_or_default()
         .into_iter()
         .filter(|skill| skill.enabled)
@@ -808,7 +830,7 @@ async fn catalog_index(State(state): State<AppState>) -> Result<Json<Value>, Api
             })
         })
         .collect::<Vec<_>>();
-    Ok(Json(json!({ "mcp": mcp, "skills": skills })))
+    Ok(json!({ "mcp": mcp, "skills": skills }))
 }
 
 /// 安装 MCP server：{ "id": ..., "values": { "key": "value", ... } }
@@ -916,6 +938,85 @@ async fn install_skill_catalog(
     Ok(Json(json!({ "ok": true, "id": id, "path": path.display().to_string() })))
 }
 
+/// 安装社区注册表条目（市场）：{ "id", "name", "description", "repository", "ref", "subdir" }。
+/// 条目来自远端 registry.json，经 CatalogInstaller::install_remote_skill 安装——
+/// 与内置目录共用同一套 codeload zip 下载解压流程，埋点（install_ok/fail）同样生效。
+async fn install_skill_remote(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let id = body
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| ApiError::bad_request("missing id"))?
+        .trim()
+        .to_string();
+    // id 会被用作安装目录名：只允许小写字母数字连字符，杜绝路径穿越。
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+        || id.chars().next().is_some_and(|ch| !ch.is_ascii_alphanumeric())
+    {
+        return Err(ApiError::bad_request(format!("invalid id `{id}`")));
+    }
+    let repository = body
+        .get("repository")
+        .and_then(Value::as_str)
+        .filter(|value| {
+            value.contains('/')
+                && !value.starts_with('/')
+                && !value.ends_with('/')
+                && !value.contains("..")
+        })
+        .ok_or_else(|| ApiError::bad_request("missing or invalid repository (owner/repo)"))?
+        .to_string();
+    let git_ref = body
+        .get("ref")
+        .and_then(Value::as_str)
+        .unwrap_or("main")
+        .trim()
+        .to_string();
+    if git_ref.is_empty() || git_ref.contains("..") || git_ref.contains('/') {
+        return Err(ApiError::bad_request("invalid ref"));
+    }
+    let subdir = body
+        .get("subdir")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .trim_start_matches('/')
+        .to_string();
+    let name = body
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or(&id)
+        .to_string();
+    let description = body
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let entry = SkillEntry {
+        id: id.clone(),
+        name,
+        description,
+        repository,
+        git_ref,
+        subdir,
+    };
+    let home = state.home.clone();
+    let path = tokio::task::spawn_blocking(move || {
+        let installer = coomi_catalogs::CatalogInstaller::new(&home);
+        installer.install_remote_skill(&entry, false)
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("Skill install task failed: {e}")))?
+    .map_err(|e| ApiError::internal(format!("failed to install Skill {id}: {e:#}")))?;
+    Ok(Json(json!({ "ok": true, "id": id, "path": path.display().to_string() })))
+}
+
 /// 卸载 Skill：删除 skills/{id} 目录与 config/skills.json 条目（彻底删除）。
 async fn uninstall_skill_catalog(
     State(state): State<AppState>,
@@ -931,6 +1032,123 @@ async fn uninstall_skill_catalog(
     .map_err(|e| ApiError::internal(format!("Skill uninstall task failed: {e}")))?
     .map_err(|e| ApiError::internal(format!("failed to uninstall Skill {id}: {e:#}")))?;
     Ok(Json(json!({ "ok": true, "id": id, "path": path.display().to_string() })))
+}
+
+// ─────────────────────────── 社区注册表 ───────────────────────────
+
+/// 注册表远端数据源（引擎代理拉取，避免浏览器 CORS；国内网络用 jsDelivr 镜像兜底）。
+/// 环境变量可覆盖：COOMI_REGISTRY_URL / COOMI_STATS_APP_URL。
+const REGISTRY_URLS: [&str; 2] = [
+    "https://raw.githubusercontent.com/TensorHub-ORG/coomi-registry/main/registry.json",
+    "https://cdn.jsdelivr.net/gh/TensorHub-ORG/coomi-registry@main/registry.json",
+];
+const STATS_GITHUB_URLS: [&str; 2] = [
+    "https://raw.githubusercontent.com/TensorHub-ORG/coomi-registry/main/stats-github.json",
+    "https://cdn.jsdelivr.net/gh/TensorHub-ORG/coomi-registry@main/stats-github.json",
+];
+const STATS_APP_URL: &str = "https://coomi-stats.tensorhub.workers.dev/stats-app.json";
+const REGISTRY_CACHE_SECS: u64 = 600;
+
+/// 社区市场数据：内置目录 + 远端注册表 + 热度统计 + 本地安装状态。
+/// 远端不可用时降级为内置目录 + 空市场，不影响本地功能。结果缓存 10 分钟。
+async fn registry_index(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    {
+        let cache = state
+            .registry_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fresh = cache
+            .as_ref()
+            .filter(|entry| entry.fetched_at.elapsed() < Duration::from_secs(REGISTRY_CACHE_SECS));
+        if let Some(entry) = fresh {
+            return Ok(Json(entry.payload.clone()));
+        }
+    }
+
+    let (registry, stats_github, stats_app) = fetch_registry_payload().await;
+    let installed = installed_skill_ids(&state.home);
+    let payload = json!({
+        "builtin": builtin_catalog_payload(&state.home).unwrap_or_else(|_| json!({"mcp": [], "skills": []})),
+        "remote": registry.unwrap_or_else(|| json!({
+            "skills": [], "mcps": [], "workflows": [], "updated_at": null
+        })),
+        "stats": { "github": stats_github, "app": stats_app },
+        "installed": installed,
+    });
+
+    let mut cache = state
+        .registry_cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *cache = Some(RegistryCache {
+        fetched_at: Instant::now(),
+        payload: payload.clone(),
+    });
+    Ok(Json(payload))
+}
+
+/// 并行拉取 registry.json 与两份统计；每份独立降级，互不影响。
+async fn fetch_registry_payload() -> (Option<Value>, Option<Value>, Option<Value>) {
+    let registry_url = std::env::var("COOMI_REGISTRY_URL").ok();
+    let stats_app_url = std::env::var("COOMI_STATS_APP_URL").ok();
+    let registry = if let Some(url) = &registry_url {
+        fetch_first(std::slice::from_ref(url)).await
+    } else {
+        fetch_first(&REGISTRY_URLS.map(String::from)).await
+    };
+    let stats_github = if registry_url.is_some() {
+        None
+    } else {
+        fetch_first(&STATS_GITHUB_URLS.map(String::from)).await
+    };
+    let stats_app =
+        fetch_first(&[stats_app_url.unwrap_or_else(|| STATS_APP_URL.to_string())]).await;
+    (registry, stats_github, stats_app)
+}
+
+/// 依次尝试多个 URL，返回第一个成功解析的 JSON（短超时 + 自定义 UA）。
+async fn fetch_first(urls: &[String]) -> Option<Value> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(6))
+        .user_agent("coomi")
+        .build()
+        .ok()?;
+    for url in urls {
+        let Ok(response) = client.get(url).send().await else {
+            continue;
+        };
+        if !response.status().is_success() {
+            continue;
+        }
+        if let Ok(value) = response.json::<Value>().await {
+            return Some(value);
+        }
+    }
+    None
+}
+
+// ─────────────────────────── 匿名统计设置 ───────────────────────────
+
+/// 匿名使用统计开关状态。
+async fn telemetry_get(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let telemetry = Telemetry::new(&state.home);
+    Ok(Json(json!({ "enabled": telemetry.enabled() })))
+}
+
+/// 设置匿名使用统计开关：{ "enabled": true|false }。
+/// 关闭后立即停止缓冲与上报；再次开启后重新开始统计。
+async fn telemetry_set(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let enabled = body
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| ApiError::bad_request("missing enabled: true|false"))?;
+    Telemetry::new(&state.home)
+        .set_enabled(enabled)
+        .map_err(|e| ApiError::internal(format!("failed to save telemetry setting: {e:#}")))?;
+    Ok(Json(json!({ "ok": true, "enabled": enabled })))
 }
 
 /// 停用/启用 MCP server：{ "enabled": true|false }。

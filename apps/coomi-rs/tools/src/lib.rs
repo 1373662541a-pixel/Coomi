@@ -25,6 +25,7 @@ use coomi_services::MemoryManager;
 use coomi_services::MemoryScope;
 use coomi_services::MemoryType;
 use coomi_services::apply_auto_config;
+use coomi_telemetry::Telemetry;
 use ignore::WalkBuilder;
 use regex::Regex;
 use serde::Deserialize;
@@ -1014,9 +1015,40 @@ impl CoreTools {
             }
         };
         match tokio::fs::read_to_string(&canonical).await {
-            Ok(content) => ToolResult::success(self.truncate(content)),
+            Ok(content) => {
+                // 匿名使用统计：skill 首次被读取（使用）时上报一次 first_use。
+                // 统计 id 从 skills.json 元数据推导（catalog -> id，github -> owner/repo），
+                // 与安装事件同维度，Agent 驱动的使用与用户手动使用都能覆盖。
+                if let Some(home) = directory.parent() {
+                    let telemetry = Telemetry::new(home);
+                    let stat_id = telemetry
+                        .mark_first_use(name)
+                        .then(|| self.installed_stat_id(home, name))
+                        .flatten();
+                    if let Some(stat_id) = stat_id {
+                        let _ = telemetry.record("first_use", &stat_id);
+                    }
+                }
+                ToolResult::success(self.truncate(content))
+            }
             Err(error) => ToolResult::error(format!("failed to read Skill `{name}`: {error}")),
         }
+    }
+
+    /// 已安装 skill 的统计 id：读 config/skills.json 元数据推导；
+    /// 未知来源（本地目录等）退回目录名。
+    fn installed_stat_id(&self, home: &std::path::Path, name: &str) -> Option<String> {
+        let bytes = std::fs::read(home.join("config").join("skills.json")).ok()?;
+        let document: Value = serde_json::from_slice(&bytes).ok()?;
+        let record = document.get("skills")?.get(name)?;
+        let stat_id = record
+            .get("source_type")
+            .and_then(Value::as_str)
+            .zip(record.get("source").and_then(Value::as_str))
+            .and_then(|(source_type, source)| {
+                coomi_telemetry::stat_id_for(source_type, source)
+            });
+        stat_id.or_else(|| coomi_telemetry::normalize_skill_id(name))
     }
 
     fn skill_is_enabled(&self, name: &str) -> bool {
