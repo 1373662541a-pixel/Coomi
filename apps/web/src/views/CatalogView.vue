@@ -24,10 +24,10 @@ async function parseRes(res: Response): Promise<any> {
   return data
 }
 
-type Tab = 'mcp' | 'skills'
+type Tab = 'mcp' | 'skills' | 'workflow'
 const tab = ref<Tab>('mcp')
-/** 页签内的视图：已安装（本机实际配置，含自建/导入）｜仓库（内置目录）。 */
-type Scope = 'installed' | 'catalog'
+/** 页签内的视图：已安装（本机实际配置，含自建/导入）｜仓库（内置目录）｜市场（社区注册表）。 */
+type Scope = 'installed' | 'catalog' | 'market'
 const scope = ref<Scope>('catalog')
 
 interface RequiredParam { key: string; label: string; secret?: boolean }
@@ -37,11 +37,23 @@ interface McpItem {
   path?: string
 }
 interface SkillItem { id: string; name: string; description: string; repository: string; installed: boolean; enabled: boolean; path?: string }
+/** 社区市场条目（registry.json）：在 SkillItem 基础上扩展元数据与热度来源。 */
+interface MarketItem extends SkillItem {
+  ref?: string; subdir?: string
+  author?: string; tags?: string[]; license?: string; verified?: boolean
+}
 
 const mcp = ref<McpItem[]>([])
 const skills = ref<SkillItem[]>([])
 const installedMcp = ref<McpItem[]>([])
 const installedSkills = ref<SkillItem[]>([])
+// ── 社区市场（/api/registry）──
+const marketSkills = ref<MarketItem[]>([])
+const marketMcps = ref<MarketItem[]>([])
+const marketWorkflows = ref<MarketItem[]>([])
+const marketStats = ref<{ github?: any; app?: any }>({})
+const marketUpdatedAt = ref('')
+const marketLoading = ref(false)
 const loading = ref(true)
 const error = ref('')
 const busy = ref<string | null>(null)
@@ -189,17 +201,94 @@ async function loadInstalled() {
   }
 }
 
-/** 切换视图（已安装/仓库）：已安装首次进入时拉取一次。 */
+/** 加载社区市场（/api/registry）：引擎代理拉取注册表 + 热度统计，带 10 分钟缓存。 */
+async function loadMarket() {
+  marketLoading.value = true
+  error.value = ''
+  try {
+    const res = await authedFetch('/api/registry')
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = await parseRes(res)
+    const remote = data.remote ?? {}
+    const installedIds: string[] = data.installed ?? []
+    const decorate = (e: any): MarketItem => ({
+      id: e.id, name: e.name, description: e.description ?? '',
+      repository: e.repository ?? '', ref: e.ref ?? 'main', subdir: e.subdir ?? '',
+      author: e.author, tags: e.tags, license: e.license, verified: e.verified,
+      installed: installedIds.includes(e.id), enabled: false,
+    })
+    marketSkills.value = (remote.skills ?? []).map(decorate)
+    marketMcps.value = (remote.mcps ?? []).map(decorate)
+    marketWorkflows.value = (remote.workflows ?? []).map(decorate)
+    marketStats.value = data.stats ?? {}
+    marketUpdatedAt.value = remote.updated_at ?? ''
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+    marketSkills.value = []
+    marketMcps.value = []
+    marketWorkflows.value = []
+  } finally {
+    marketLoading.value = false
+  }
+}
+
+/** 切换视图（已安装/仓库/市场）：已安装与市场首次进入时拉取一次。 */
 function switchScope(next: Scope) {
   if (scope.value === next) return
   scope.value = next
   error.value = ''
   if (next === 'installed') void loadInstalled()
+  if (next === 'market') void loadMarket()
 }
 
-/** 当前视图下要渲染的列表（已安装｜仓库）。 */
-const visibleMcp = computed(() => (scope.value === 'installed' ? installedMcp.value : mcp.value))
-const visibleSkills = computed(() => (scope.value === 'installed' ? installedSkills.value : skills.value))
+/** 当前视图下要渲染的列表（已安装｜仓库｜市场）。市场条目不进旧模板渲染，
+ * 这里仅保证类型完整（transport 等字段填默认值）。 */
+const visibleMcp = computed<McpItem[]>(() => {
+  if (scope.value === 'installed') return installedMcp.value
+  if (scope.value === 'market') {
+    return marketMcps.value.map(m => ({
+      id: m.id, name: m.name, description: m.description, transport: '',
+      required_parameters: [], installed: m.installed, enabled: false,
+    }))
+  }
+  return mcp.value
+})
+const visibleSkills = computed<SkillItem[]>(() => {
+  if (scope.value === 'installed') return installedSkills.value
+  if (scope.value === 'market') return marketSkills.value
+  return skills.value
+})
+
+/** 各类型页签的计数（市场页签在 tab 计数角标上各自独立）。 */
+const mcpCount = computed(() => {
+  if (scope.value === 'installed') return installedMcp.value.length
+  if (scope.value === 'market') return marketMcps.value.length
+  return mcp.value.length
+})
+const skillsCount = computed(() => {
+  if (scope.value === 'installed') return installedSkills.value.length
+  if (scope.value === 'market') return marketSkills.value.length
+  return skills.value.length
+})
+
+/** 热度数字格式化：1000+ 显示为 1.0k。 */
+function fmt(n: number | undefined | null): string {
+  if (n == null) return '—'
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
+  return String(n)
+}
+
+/** 市场条目热度：GitHub 公开指标（stars/下载量） + App 安装统计。 */
+function heatOf(item: MarketItem) {
+  const gh = marketStats.value.github?.skills?.[item.id]
+  const app = marketStats.value.app?.events?.install_ok?.[item.id]
+  return {
+    stars: gh?.stars as number | undefined,
+    downloads30d: gh?.downloads_30d as number | undefined,
+    install7d: app?.['7d'] as number | undefined,
+    installTotal: app?.total as number | undefined,
+  }
+}
 
 async function installMcp() {
   const item = installingMcp.value
@@ -227,14 +316,34 @@ async function installSkill(item: SkillItem) {
   busy.value = item.id
   notice.value = ''
   try {
-    const res = await authedFetch('/api/catalog/skills/install', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: item.id }),
-    })
-    await parseRes(res)
-    notice.value = `已安装 Skill「${item.name}」，重启引擎或新开会话后生效`
-    await load()
+    if (scope.value === 'market') {
+      // 社区市场条目：按 repository/ref/subdir 直达安装（内置目录不认的 id）。
+      const market = item as MarketItem
+      const res = await authedFetch('/api/catalog/skills/install-remote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: market.id,
+          name: market.name,
+          description: market.description,
+          repository: market.repository,
+          ref: market.ref ?? 'main',
+          subdir: market.subdir ?? '',
+        }),
+      })
+      await parseRes(res)
+      notice.value = `已安装 Skill「${market.name}」，重启引擎或新开会话后生效`
+      await loadMarket()
+    } else {
+      const res = await authedFetch('/api/catalog/skills/install', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: item.id }),
+      })
+      await parseRes(res)
+      notice.value = `已安装 Skill「${item.name}」，重启引擎或新开会话后生效`
+      await load()
+    }
   } catch (e) {
     notice.value = `安装失败：${e instanceof Error ? e.message : String(e)}`
   } finally {
@@ -252,9 +361,9 @@ function goDashboard() {
 
 <template>
   <div class="page">
-    <PageHead title="SKILL / MCP 管理" @back="goDashboard" />
+    <PageHead title="拓展管理" @back="goDashboard" />
     <main class="body">
-      <!-- 一级：已安装 | 仓库 -->
+      <!-- 一级：已安装 | 仓库 | 市场 -->
       <div class="seg" role="tablist">
         <button class="segitem" :class="{ on: scope === 'installed' }" @click="switchScope('installed')">
           <CoomiIcon name="check" :size="14" />已安装
@@ -262,26 +371,44 @@ function goDashboard() {
         <button class="segitem" :class="{ on: scope === 'catalog' }" @click="switchScope('catalog')">
           <CoomiIcon name="globe" :size="14" />仓库
         </button>
+        <button class="segitem" :class="{ on: scope === 'market' }" @click="switchScope('market')">
+          <CoomiIcon name="sparkle" :size="14" />广场
+        </button>
       </div>
 
-      <!-- 二级：MCP | Skills -->
+      <!-- 二级：MCP | Skills（市场视图下另有 Workflow） -->
       <div class="tabs">
         <button class="tab" :class="{ on: tab === 'mcp' }" @click="tab = 'mcp'">
           <CoomiIcon name="plug" :size="15" />MCP
-          <span class="cnt">{{ scope === 'installed' ? installedMcp.length : mcp.length }}</span>
+          <span class="cnt">{{ mcpCount }}</span>
         </button>
         <button class="tab" :class="{ on: tab === 'skills' }" @click="tab = 'skills'">
           <CoomiIcon name="wrench" :size="15" />Skills
-          <span class="cnt">{{ scope === 'installed' ? installedSkills.length : skills.length }}</span>
+          <span class="cnt">{{ skillsCount }}</span>
+        </button>
+        <button v-if="scope === 'market'" class="tab" :class="{ on: tab === 'workflow' }" @click="tab = 'workflow'">
+          <CoomiIcon name="target" :size="15" />Workflow
+          <span class="cnt">{{ marketWorkflows.length }}</span>
         </button>
       </div>
+
+      <a
+        v-if="scope === 'market'"
+        class="submit-extension"
+        href="https://github.com/TensorHub-ORG/coomi-registry/issues/new?template=submission.yml"
+        target="_blank"
+        rel="noopener noreferrer"
+      >
+        <span>去提交一个拓展</span>
+        <CoomiIcon name="chevronRight" :size="16" />
+      </a>
 
       <p v-if="notice" class="notice" :class="{ err: notice.startsWith('安装失败') }">{{ notice }}</p>
       <p v-if="error" class="notice err">加载失败：{{ error }}</p>
       <p v-if="loading" class="hint">加载中…</p>
 
-      <!-- MCP -->
-      <template v-if="tab === 'mcp'">
+      <!-- MCP（市场视图在下方独立渲染） -->
+      <template v-if="tab === 'mcp' && scope !== 'market'">
         <p v-if="!loading && visibleMcp.length === 0" class="hint">
           {{ scope === 'installed' ? '本机还没有已安装的 MCP Server。' : '目录为空，暂时没有可安装的 MCP Server。' }}
         </p>
@@ -318,8 +445,8 @@ function goDashboard() {
         </div>
       </template>
 
-      <!-- Skills -->
-      <template v-else>
+      <!-- Skills（市场视图在下方独立渲染） -->
+      <template v-else-if="scope !== 'market'">
         <p v-if="!loading && visibleSkills.length === 0" class="hint">
           {{ scope === 'installed' ? '本机还没有已安装的 Skill。' : '目录为空，暂时没有可安装的 Skill。' }}
         </p>
@@ -354,6 +481,104 @@ function goDashboard() {
             </div>
           </div>
         </div>
+      </template>
+
+      <!-- 市场（社区注册表）：SKILL 可一键安装；MCP/Workflow 暂为收录展示 -->
+      <template v-else>
+        <p v-if="marketLoading" class="hint">加载中…</p>
+        <template v-else>
+          <p v-if="tab === 'skills' && marketSkills.length === 0" class="hint">
+            广场里还没有 SKILL。
+          </p>
+          <p v-else-if="tab === 'mcp' && marketMcps.length === 0" class="hint">
+            广场里还没有 MCP。
+          </p>
+          <p v-else-if="tab === 'workflow' && marketWorkflows.length === 0" class="hint">
+            广场里还没有 Workflow。提交后在此展示，安装支持将在后续版本提供。
+          </p>
+          <p v-else-if="tab === 'skills' && marketSkills.length > 0" class="hint sub">
+            社区注册表 · 更新于 {{ marketUpdatedAt || '—' }} · 内容托管在贡献者自己的仓库
+          </p>
+
+          <div v-if="tab === 'skills' && marketSkills.length > 0" class="cards">
+            <div v-for="item in marketSkills" :key="item.id" class="card">
+              <button class="card-head" @click.stop="toggleExpanded(item.id)">
+                <span class="tile" :class="{ on: item.installed }">
+                  <CoomiIcon name="wrench" :size="18" />
+                </span>
+                <span class="cname">{{ item.name }}</span>
+                <span v-if="item.verified" class="badge vrf"><CoomiIcon name="shield" :size="10" />已验证</span>
+                <span v-if="item.installed" class="badge ok">已安装</span>
+                <CoomiIcon name="chevronRight" :size="14" class="chev" :class="{ open: expanded === item.id }" />
+              </button>
+              <div v-if="expanded === item.id" class="detail">
+                <p class="cdesc">{{ item.description || '（无描述）' }}</p>
+                <span class="cmeta"><CoomiIcon name="user" :size="12" />{{ item.author || '—' }}</span>
+                <a class="cmeta repo" :href="'https://github.com/' + item.repository" target="_blank">
+                  <CoomiIcon name="external" :size="12" />{{ item.repository }}
+                </a>
+                <span class="cmeta"><CoomiIcon name="shield" :size="12" />{{ item.license || '—' }}</span>
+                <span v-if="item.tags?.length" class="cmeta"><CoomiIcon name="search" :size="12" />{{ item.tags.join(' · ') }}</span>
+                <div class="heat">
+                  <span v-if="heatOf(item).stars != null"><CoomiIcon name="sparkle" :size="11" />{{ fmt(heatOf(item).stars) }} stars</span>
+                  <span v-if="heatOf(item).install7d != null"><CoomiIcon name="bolt" :size="11" />周安装 {{ heatOf(item).install7d }}</span>
+                  <span v-if="heatOf(item).installTotal != null"><CoomiIcon name="check" :size="11" />累计安装 {{ heatOf(item).installTotal }}</span>
+                  <span v-if="heatOf(item).downloads30d"><CoomiIcon name="arrowDown" :size="11" />30天下载 {{ fmt(heatOf(item).downloads30d) }}</span>
+                </div>
+                <div class="dops">
+                  <template v-if="item.installed">
+                    <button class="act danger" :disabled="busy !== null" @click.stop="confirmDelete('skill', item)">删除</button>
+                  </template>
+                  <button v-else class="act" :disabled="busy !== null" @click.stop="confirmSkillInstall(item)">
+                    {{ busy === item.id ? '安装中…' : '安装' }}
+                  </button>
+                  <a class="act link" :href="'https://github.com/' + item.repository" target="_blank">查看仓库</a>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- MCP / Workflow：收录展示，先看仓库（安装支持 v2） -->
+          <div v-if="tab === 'mcp' && marketMcps.length > 0" class="cards">
+            <div v-for="item in marketMcps" :key="item.id" class="card">
+              <button class="card-head" @click.stop="toggleExpanded(item.id)">
+                <span class="tile"><CoomiIcon name="plug" :size="18" /></span>
+                <span class="cname">{{ item.name }}</span>
+                <span v-if="item.verified" class="badge vrf"><CoomiIcon name="shield" :size="10" />已验证</span>
+                <CoomiIcon name="chevronRight" :size="14" class="chev" :class="{ open: expanded === item.id }" />
+              </button>
+              <div v-if="expanded === item.id" class="detail">
+                <p class="cdesc">{{ item.description || '（无描述）' }}</p>
+                <a class="cmeta repo" :href="'https://github.com/' + item.repository" target="_blank">
+                  <CoomiIcon name="external" :size="12" />{{ item.repository }}
+                </a>
+                <div class="dops">
+                  <a class="act link" :href="'https://github.com/' + item.repository" target="_blank">查看仓库</a>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="tab === 'workflow' && marketWorkflows.length > 0" class="cards">
+            <div v-for="item in marketWorkflows" :key="item.id" class="card">
+              <button class="card-head" @click.stop="toggleExpanded(item.id)">
+                <span class="tile"><CoomiIcon name="target" :size="18" /></span>
+                <span class="cname">{{ item.name }}</span>
+                <span v-if="item.verified" class="badge vrf"><CoomiIcon name="shield" :size="10" />已验证</span>
+                <CoomiIcon name="chevronRight" :size="14" class="chev" :class="{ open: expanded === item.id }" />
+              </button>
+              <div v-if="expanded === item.id" class="detail">
+                <p class="cdesc">{{ item.description || '（无描述）' }}</p>
+                <a class="cmeta repo" :href="'https://github.com/' + item.repository" target="_blank">
+                  <CoomiIcon name="external" :size="12" />{{ item.repository }}
+                </a>
+                <div class="dops">
+                  <a class="act link" :href="'https://github.com/' + item.repository" target="_blank">查看仓库</a>
+                </div>
+              </div>
+            </div>
+          </div>
+        </template>
       </template>
 
       <!-- 彻底删除确认（管理页卸载 = 停用可恢复，删除 = 彻底删除） -->
@@ -450,6 +675,14 @@ function goDashboard() {
   -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain;
 }
 .tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+.submit-extension {
+  display: flex; align-items: center; justify-content: space-between;
+  min-height: 44px; margin: -2px 0 14px; padding: 0 13px;
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--bg); color: var(--blue); font-size: 13px; font-weight: 650;
+  text-decoration: none;
+}
+.submit-extension:active { background: var(--blue-soft); }
 .seg {
   display: flex; gap: 2px; margin-bottom: 12px; padding: 3px;
   border-radius: var(--r-pill); background: var(--fill);
@@ -507,8 +740,22 @@ function goDashboard() {
 .badge.ok { background: var(--ok-soft, #e6f4ea); color: var(--ok, #2e9e5b); }
 .badge.off { background: var(--fill); color: var(--text-2); }
 .badge.plain { background: var(--fill); color: var(--text-3); }
+.badge.vrf { display: inline-flex; align-items: center; gap: 3px; background: var(--blue-soft); color: var(--blue); }
 .chev { flex-shrink: 0; color: var(--text-3); transition: transform .18s; }
 .chev.open { transform: rotate(90deg); }
+.hint.sub { font-size: 11.5px; }
+.hint-link { color: var(--blue); font-weight: 600; }
+.cmeta.repo { color: var(--blue); }
+/* 热度徽章行 */
+.heat {
+  display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px;
+  font-size: 11px; color: var(--text-3);
+}
+.heat span { display: inline-flex; align-items: center; gap: 4px; }
+.act.link {
+  display: inline-flex; align-items: center; justify-content: center; text-decoration: none;
+  background: var(--fill-strong); color: var(--text);
+}
 /* 展开详情：flex-basis 100% 全宽换行，与头部隔开。 */
 .detail {
   flex-basis: 100%; min-width: 0;

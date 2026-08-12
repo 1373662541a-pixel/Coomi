@@ -2,9 +2,21 @@ export type ToolAccess = 'read_only' | 'write' | 'destructive'
 
 export interface UsageInfo {
   input_tokens: number; output_tokens: number; total_tokens: number
+  cached_input_tokens?: number
+  cache_hit_rate?: number | null
+  cache_data_available?: boolean
+  turn_cache_hit_rate?: number | null
+  turn_cache_data_available?: boolean
   context_ratio?: number
   context_used_tokens?: number
   context_window_tokens?: number
+}
+export interface ReasoningEffortStats {
+  turns: number
+  cache_hit_rate: number | null
+  average_duration_ms: number | null
+  average_total_tokens: number | null
+  cache_available: boolean
 }
 
 export interface TextChunkEvent { event_type: 'text_chunk'; content: string }
@@ -13,10 +25,17 @@ export interface ToolStartEvent { event_type: 'tool_start'; call_id: string; too
 export interface ToolRunningEvent { event_type: 'tool_running'; call_id: string; tool_name: string }
 export interface ToolDoneEvent { event_type: 'tool_done'; call_id: string; tool_name: string; elapsed: number; result_preview: string; is_error: boolean; images?: string[] }
 export interface ToolCacheHitEvent { event_type: 'tool_cache_hit'; call_id: string; tool_name: string }
-export interface UsageUpdateEvent { event_type: 'usage_update'; usage: UsageInfo }
-export interface ConnectionRetryEvent { event_type: 'connection_retry'; attempt: number; max_attempts: number; delay: number; message: string }
+export interface UsageUpdateEvent {
+  event_type: 'usage_update'
+  usage: UsageInfo
+  reasoning_efforts?: Partial<Record<'auto' | 'low' | 'medium' | 'high' | 'xhigh', ReasoningEffortStats>>
+  context_categories?: Partial<Record<'system_tools' | 'messages' | 'skills' | 'mcp_tools' | 'system_prompt' | 'other', number>>
+}
+export interface ConnectionRetryEvent { event_type: 'connection_retry'; attempt: number; max_attempts: number; delay?: number; delay_ms?: number; message: string }
+export interface StreamResetEvent { event_type: 'stream_reset' }
 export interface CompressionEvent { event_type: 'compression'; before: number; after: number }
 export interface AgentErrorEvent { event_type: 'agent_error'; message: string; is_fatal: boolean }
+export interface RetryConfirmationEvent { event_type: 'retry_confirmation'; message: string }
 export interface AgentCancelledEvent { event_type: 'agent_cancelled' }
 export interface BgTaskDetachedEvent { event_type: 'bg_task_detached'; task_id: string; tool_name: string }
 export interface BgTaskCompletedEvent { event_type: 'bg_task_completed'; task_id: string; tool_name: string; is_error: boolean }
@@ -39,10 +58,10 @@ export interface SessionLoadedEvent {
 
 export type AgentEvent =
   | TextChunkEvent | ReasoningChunkEvent | ToolStartEvent | ToolRunningEvent
-  | ToolDoneEvent | ToolCacheHitEvent | UsageUpdateEvent | ConnectionRetryEvent
+  | ToolDoneEvent | ToolCacheHitEvent | UsageUpdateEvent | ConnectionRetryEvent | StreamResetEvent
   | CompressionEvent | AgentErrorEvent | AgentCancelledEvent | BgTaskDetachedEvent
   | BgTaskCompletedEvent | LoopStepStartEvent | LoopStepDoneEvent | LoopProgressEvent
-  | LoopIssueCreatedEvent | ToolApprovalRequestEvent | UserQuestionRequestEvent
+  | LoopIssueCreatedEvent | RetryConfirmationEvent | ToolApprovalRequestEvent | UserQuestionRequestEvent
   | FileTransferRequestEvent
   | TurnEndEvent
   | SessionStateEvent

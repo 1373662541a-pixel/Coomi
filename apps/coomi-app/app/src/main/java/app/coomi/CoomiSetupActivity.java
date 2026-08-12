@@ -87,6 +87,7 @@ public class CoomiSetupActivity extends AppCompatActivity {
                 // All done — go to dashboard
                 // 演示包没有真实部署状态可查，走完一次就记下来，下次直接进仪表盘。
                 if (CoomiDemo.isEnabled()) CoomiDemo.markOnboarded(this);
+                CoomiLauncherActivity.markSetupCompleted(this);
                 Intent intent = new Intent(this, CoomiDashboardActivity.class);
                 startActivity(intent);
                 finish();

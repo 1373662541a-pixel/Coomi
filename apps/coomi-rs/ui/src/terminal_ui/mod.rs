@@ -1432,6 +1432,10 @@ fn handle_runtime_event(app: &mut TuiState, runtime_event: RuntimeEvent) {
                         format!("Continuing tool loop, round {round}")
                     };
                 }
+                AgentEvent::ConnectionRetry { message, .. } => app.status = message,
+                AgentEvent::StreamReset => {
+                    app.status = "Discarding interrupted partial response".into()
+                }
                 AgentEvent::Text(text) => {
                     if !text.is_empty() {
                         app.timeline.push(TimelineEntry::Assistant(text));
@@ -1457,6 +1461,7 @@ fn handle_runtime_event(app: &mut TuiState, runtime_event: RuntimeEvent) {
                     }
                 }
                 AgentEvent::ContextUpdated(status) => app.context_status = status,
+                AgentEvent::ModelUsage { .. } => {}
                 AgentEvent::CompactionStarted { automatic } => {
                     app.status = if automatic {
                         "Compacting context".into()
@@ -1516,7 +1521,7 @@ fn handle_runtime_event(app: &mut TuiState, runtime_event: RuntimeEvent) {
                         };
                     }
                 }
-                AgentEvent::TurnCompleted(_) => app.status = "Finalizing".into(),
+                AgentEvent::TurnCompleted { .. } => app.status = "Finalizing".into(),
             }
         }
         RuntimeEvent::TurnFinished {
@@ -2522,7 +2527,10 @@ fn mark_selected_session_for_delete(app: &mut TuiState) {
         return;
     };
     let query = overlay.query.text().to_ascii_lowercase();
-    if let Some(summary) = ranked_sessions(&app.sessions, &query).into_iter().nth(overlay.selected) {
+    if let Some(summary) = ranked_sessions(&app.sessions, &query)
+        .into_iter()
+        .nth(overlay.selected)
+    {
         app.confirm_delete = Some(DeleteTarget::Session(summary.id));
     }
 }
@@ -3463,15 +3471,19 @@ mod tests {
     /// tests/check_session_search.mjs 跑同一份语料。改打分逻辑必须同步两端 + 语料。
     #[test]
     fn session_search_score_matches_shared_corpus() {
-        let corpus: serde_json::Value = serde_json::from_str(include_str!(
-            "../../tests/session_search_cases.json"
-        ))
-        .expect("parse shared corpus");
+        let corpus: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/session_search_cases.json"))
+                .expect("parse shared corpus");
         let cases = corpus["cases"].as_array().expect("cases array");
         let mut checked = 0;
         for case in cases {
             let query = case["query"].as_str().expect("query");
-            for (i, session) in case["sessions"].as_array().expect("sessions").iter().enumerate() {
+            for (i, session) in case["sessions"]
+                .as_array()
+                .expect("sessions")
+                .iter()
+                .enumerate()
+            {
                 let summary = SessionSummary {
                     id: uuid::Uuid::nil(),
                     provider_id: "demo".to_string(),
@@ -3645,7 +3657,10 @@ mod tests {
         let (_home, mut state) = test_state();
         state.open_overlay(OverlayKind::Settings);
         assert_eq!(settings_mcp_items(&state).len(), 5);
-        assert_eq!(settings_skill_items(&state).len(), 9);
+        assert_eq!(
+            settings_skill_items(&state).len(),
+            state.skill_entries.len()
+        );
 
         let settings = state.settings.as_mut().expect("settings");
         settings.tab = SettingsTab::Mcp;

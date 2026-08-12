@@ -26,12 +26,15 @@ import java.io.OutputStream;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.Locale;
+import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
 
 import com.termux.R;
+import com.termux.shared.termux.TermuxConstants;
 
 /**
  * 备份与导入二级页面。
@@ -43,12 +46,15 @@ public class CoomiBackupActivity extends Activity {
     private static final int REQ_IMPORT = 4001;
 
     private TextView mStatusText;
+    private String mAppliedThemeMode;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         CoomiTheme.applyPageTheme(this);
         super.onCreate(savedInstanceState);
+        mAppliedThemeMode = CoomiTheme.getMode(this);
         setContentView(R.layout.activity_coomi_backup);
+        CoomiTheme.applyPageSystemBars(this);
 
         mStatusText = findViewById(R.id.txt_backup_status);
 
@@ -91,10 +97,8 @@ public class CoomiBackupActivity extends Activity {
 
                 File zip = File.createTempFile("coomi-backup-", ".zip", getCacheDir());
                 try (ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(zip))) {
-                    addSessions(zos, sessionsDir);
-                    addSkills(zos, skillsDir);
-                    addFileEntry(zos, "config/mcp_servers.json", new File(configDir, "mcp_servers.json"));
-                    addFileEntry(zos, "config/providers.json", new File(configDir, "providers.json"));
+                    addDirRecursive(zos, home, "coomi-home");
+                    addMcpImplementationFiles(zos, new File(configDir, "mcp_servers.json"));
                     addTextEntry(zos, "env-inventory.txt", buildEnvInventory(configDir, skillsDir));
                     addTextEntry(zos, "env-inventory.json", buildEnvInventoryJson(configDir, skillsDir));
                 }
@@ -157,6 +161,64 @@ public class CoomiBackupActivity extends Activity {
                 zos.closeEntry();
             }
         }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        String current = CoomiTheme.getMode(this);
+        if (mAppliedThemeMode != null && !mAppliedThemeMode.equals(current)) {
+            recreate();
+            return;
+        }
+        CoomiTheme.applyPageSystemBars(this);
+    }
+
+    /** Includes local MCP scripts/projects referenced by command or args when they live in Termux HOME. */
+    private void addMcpImplementationFiles(ZipOutputStream zos, File config) throws Exception {
+        JSONObject root = readJsonObject(config);
+        JSONObject servers = root == null ? null : root.optJSONObject("servers");
+        if (servers == null) return;
+        Set<String> candidates = new LinkedHashSet<>();
+        for (Iterator<String> names = servers.keys(); names.hasNext(); ) {
+            JSONObject server = servers.optJSONObject(names.next());
+            if (server == null) continue;
+            candidates.add(server.optString("command", ""));
+            JSONArray args = server.optJSONArray("args");
+            if (args != null) {
+                for (int index = 0; index < args.length(); index++) candidates.add(args.optString(index, ""));
+            }
+        }
+        JSONArray manifest = new JSONArray();
+        int index = 0;
+        File termuxHome = new File(TermuxConstants.TERMUX_HOME_DIR_PATH).getCanonicalFile();
+        for (String raw : candidates) {
+            if (raw == null || raw.trim().isEmpty()) continue;
+            String expanded = raw.startsWith("~/") ? new File(termuxHome, raw.substring(2)).getPath() : raw;
+            File source = new File(expanded);
+            if (!source.exists()) continue;
+            source = source.getCanonicalFile();
+            if (!isInside(termuxHome, source)) continue;
+            String archive = "mcp-files/files/" + index++;
+            addPathRecursive(zos, source, archive);
+            JSONObject item = new JSONObject();
+            item.put("archive", archive);
+            item.put("original", source.getAbsolutePath());
+            item.put("directory", source.isDirectory());
+            manifest.put(item);
+        }
+        addTextEntry(zos, "mcp-files/manifest.json", manifest.toString(2));
+    }
+
+    private void addPathRecursive(ZipOutputStream zos, File source, String prefix) throws Exception {
+        if (source.isDirectory()) addDirRecursive(zos, source, prefix);
+        else addFileEntry(zos, prefix, source);
+    }
+
+    private static boolean isInside(File base, File child) throws Exception {
+        String basePath = base.getCanonicalPath();
+        String childPath = child.getCanonicalPath();
+        return childPath.equals(basePath) || childPath.startsWith(basePath + File.separator);
     }
 
     private void addFileEntry(ZipOutputStream zos, String name, File f) throws Exception {
@@ -224,6 +286,12 @@ public class CoomiBackupActivity extends Activity {
         File skillsDir = new File(home, "skills");
         File configDir = new File(home, "config");
 
+        // Current backup format: restore the complete .coomi tree first.
+        File completeHome = new File(tmp, "coomi-home");
+        if (completeHome.isDirectory()) {
+            try { copyRecursive(completeHome, home); } catch (Exception ignored) { }
+        }
+
         // 1) 会话历史
         File[] sessFiles = new File(tmp, "sessions").listFiles((d, n) -> n.endsWith(".json"));
         if (sessFiles != null && sessFiles.length > 0) {
@@ -272,7 +340,31 @@ public class CoomiBackupActivity extends Activity {
             } catch (Exception ignored) {
             }
         }
+        restoreMcpImplementationFiles(tmp);
+        File[] restoredSessions = sessionsDir.listFiles((d, n) -> n.endsWith(".json"));
+        if (restoredSessions != null) sessions = restoredSessions.length;
+        File[] restoredSkills = skillsDir.listFiles(File::isDirectory);
+        if (restoredSkills != null) skills = restoredSkills.length;
+        File restoredMcp = new File(configDir, "mcp_servers.json");
+        if (restoredMcp.isFile()) mcps = countServers(restoredMcp);
         return new int[]{sessions, mcps, skills};
+    }
+
+    private void restoreMcpImplementationFiles(File tmp) {
+        File manifestFile = new File(tmp, "mcp-files/manifest.json");
+        if (!manifestFile.isFile()) return;
+        try {
+            JSONArray manifest = new JSONArray(readFile(manifestFile));
+            File termuxHome = new File(TermuxConstants.TERMUX_HOME_DIR_PATH).getCanonicalFile();
+            for (int index = 0; index < manifest.length(); index++) {
+                JSONObject item = manifest.optJSONObject(index);
+                if (item == null) continue;
+                File source = safeResolve(tmp, item.optString("archive", ""));
+                File destination = new File(item.optString("original", "")).getCanonicalFile();
+                if (source == null || !source.exists() || !isInside(termuxHome, destination)) continue;
+                copyRecursive(source, destination);
+            }
+        } catch (Exception ignored) { }
     }
 
     /** 防 zip-slip：仅允许解压到 tmp 目录内部。 */

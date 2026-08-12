@@ -5,10 +5,11 @@
  */
 import { computed, ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { useConfigStore, PERMISSION_MODES, THEME_MODES } from '@/stores/config'
+import { useConfigStore, PERMISSION_MODES, REASONING_EFFORTS, THEME_MODES } from '@/stores/config'
 import { useSessionStore } from '@/stores/session'
 import { useSessionsStore } from '@/stores/sessions'
 import { useConnectionStore } from '@/stores/connection'
+import { authedFetch } from '@/bridge/http'
 import type { PermissionMode } from '@/protocol/commands'
 import PageHead from '@/components/PageHead.vue'
 import CoomiIcon from '@/components/CoomiIcon.vue'
@@ -30,6 +31,25 @@ async function toggleGlobalMemory() {
   }
 }
 
+/** 匿名使用统计开关：仅上报 SKILL 安装/使用次数，不含任何内容。 */
+const telemetryEnabled = ref(true)
+const telemetryError = ref('')
+async function toggleTelemetry() {
+  telemetryError.value = ''
+  try {
+    const res = await authedFetch('/api/settings/telemetry', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !telemetryEnabled.value }),
+    })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = await res.json()
+    telemetryEnabled.value = data.enabled ?? !telemetryEnabled.value
+  } catch (e) {
+    telemetryError.value = `设置失败：${e instanceof Error ? e.message : String(e)}`
+  }
+}
+
 const MODE_ICON: Record<PermissionMode, string> = { ask: 'shield', auto: 'bolt', full: 'plusCircle' }
 
 /** provider × model 拍平成一维列表，省掉一层嵌套标题。 */
@@ -43,8 +63,17 @@ function isCurrent(providerId: string, model: string): boolean {
   return config.currentProviderId === providerId && config.currentModel === model
 }
 
-/** 进入设置页时拉取定制提示词，保证入口副标题与引擎一致。 */
-onMounted(() => { void config.fetchCustomPrompt() })
+/** 进入设置页时拉取定制提示词与统计开关状态（旧引擎无统计接口时保持默认）。 */
+onMounted(async () => {
+  void config.fetchCustomPrompt()
+  try {
+    const res = await authedFetch('/api/settings/telemetry')
+    if (res.ok) {
+      const data = await res.json()
+      telemetryEnabled.value = data.enabled ?? true
+    }
+  } catch { /* 旧引擎进程：接口不存在，保持默认开启 */ }
+})
 </script>
 <template>
   <div class="page">
@@ -84,6 +113,21 @@ onMounted(() => { void config.fetchCustomPrompt() })
         </button>
       </div>
 
+      <p class="sec-label">推理强度</p>
+      <div class="group compact-options">
+        <button v-for="item in REASONING_EFFORTS" :key="item.value" class="option" :class="{ selected: config.reasoningEffort === item.value }" @click="session.setReasoningEffort(item.value)">
+          {{ item.label }}
+        </button>
+      </div>
+
+      <p class="sec-label">工具调用上限</p>
+      <div class="group compact-options rounds">
+        <button v-for="rounds in [192, 256, 512]" :key="rounds" class="option" :class="{ selected: config.maxToolRounds === rounds }" @click="session.setMaxToolRounds(rounds)">
+          {{ rounds }}
+        </button>
+      </div>
+      <p class="option-note">默认 192，256 为进阶选项，512 为硬上限。</p>
+
       <p class="sec-label">身份定位</p>
       <div class="group">
         <button class="row" @click="router.push('/persona')">
@@ -107,6 +151,22 @@ onMounted(() => { void config.fetchCustomPrompt() })
             <span class="rsub">{{ m.desc }}</span>
           </span>
           <CoomiIcon v-if="config.themeMode === m.mode" name="check" :size="17" class="tick" />
+        </button>
+      </div>
+
+      <p class="sec-label">隐私</p>
+      <div class="group">
+        <button class="row" @click="toggleTelemetry">
+          <span class="ri" :class="{ on: telemetryEnabled }"><CoomiIcon name="shield" :size="17" /></span>
+          <span class="rt">
+            <span class="rmain">匿名使用统计</span>
+            <span class="rsub" :class="{ err: !!telemetryError }">
+              {{ telemetryError || (telemetryEnabled
+                ? '仅上报 SKILL 安装与使用次数，不含任何对话内容，可随时关闭'
+                : '已关闭：不再上报任何统计数据') }}
+            </span>
+          </span>
+          <span class="sw" :class="{ on: telemetryEnabled }" />
         </button>
       </div>
 
@@ -150,6 +210,11 @@ onMounted(() => { void config.fetchCustomPrompt() })
   max-height: min(42vh, 360px); overflow-y: auto;
   overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
 }
+.compact-options { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); padding: 5px; gap: 4px; }
+.compact-options.rounds { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.option { min-width: 0; height: 38px; padding: 0 4px; border-radius: 6px; background: transparent; color: var(--text-2); font-size: 13px; }
+.option.selected { background: var(--blue-soft); color: var(--blue); font-weight: 650; }
+.option-note { margin: 6px 4px 0; font-size: 11.5px; color: var(--text-3); }
 .row {
   display: flex; align-items: center; gap: 11px;
   width: 100%; min-height: 56px; padding: 11px 13px;

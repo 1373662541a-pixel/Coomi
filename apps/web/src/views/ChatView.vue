@@ -75,6 +75,7 @@ let ro: ResizeObserver | null = null
 
 onMounted(() => {
   session.connect()
+  window.addEventListener('coomi:flush-persistence', session.flushPersistence)
   // 记录引擎当前工作目录，会话列表据此把不同项目的会话隔离开。
   void apiGet<{ cwd?: string }>('/api/runtime/health')
     .then(h => { if (h?.cwd) sessions.setCurrentCwd(h.cwd) })
@@ -102,6 +103,8 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('coomi:flush-persistence', session.flushPersistence)
+  session.flushPersistence()
   if (runningPoll) { clearInterval(runningPoll); runningPoll = null }
   ro?.disconnect(); ro = null
 })
@@ -173,6 +176,13 @@ function onAnswer(callId: string, text: string) { session.answerQuestion(callId,
       </Transition>
 
       <LoopProgressBar v-if="session.loop.active" :loop="session.loop" />
+      <div v-if="session.retryConfirmation" class="retry-confirm">
+        <div><CoomiIcon name="alert" :size="16" /><span>{{ session.retryConfirmation }}</span></div>
+        <div class="retry-actions">
+          <button class="retry-secondary" @click="session.dismissRetry()">结束任务</button>
+          <button class="retry-primary" @click="session.retryInterruptedTurn()">继续重试</button>
+        </div>
+      </div>
       <StatusBar />
       <Composer />
     </div>
@@ -249,4 +259,10 @@ function onAnswer(callId: string, text: string) { session.answerQuestion(callId,
   background: var(--fill); font-size: 12.5px; color: var(--text-2);
 }
 .q-label { color: var(--blue); font-weight: 600; }
+.retry-confirm { margin: 0 12px 6px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); box-shadow: var(--shadow-1); }
+.retry-confirm > div:first-child { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text-2); }
+.retry-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 9px; }
+.retry-actions button { min-height: 34px; padding: 0 13px; border-radius: 6px; font-size: 13px; font-weight: 600; }
+.retry-secondary { background: var(--fill); color: var(--text-2); }
+.retry-primary { background: var(--blue); color: #fff; }
 </style>

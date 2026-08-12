@@ -18,6 +18,7 @@ use axum::response::IntoResponse;
 use axum::routing::delete;
 use axum::routing::get;
 use axum::routing::post;
+use coomi_catalogs::SkillEntry;
 use coomi_engine::Agent;
 use coomi_engine::AgentEvent;
 use coomi_engine::AgentObserver;
@@ -41,11 +42,14 @@ use coomi_services::ProviderDocument;
 use coomi_services::ProviderRegistry;
 use coomi_services::ProviderSettings;
 use coomi_services::list_installed_skills;
+use coomi_telemetry::Telemetry;
 use coomi_tools::AgentScheduler;
 use coomi_tools::CoreTools;
 use coomi_tools::ProcessManager;
 use futures_util::SinkExt;
 use futures_util::StreamExt;
+use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -57,8 +61,10 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -93,6 +99,14 @@ struct AppState {
     /// 含图片会话的连续请求失败计数：达到阈值（不依赖错误文本关键词）
     /// 也触发图片降级，兜住上游只回笼统错误（如 Internal server error）的情况。
     vision_failures: Arc<StdMutex<HashMap<String, u32>>>,
+    /// 社区注册表缓存：远端数据（registry/stats）10 分钟内只拉一次，失败降级内置目录。
+    registry_cache: Arc<StdMutex<Option<RegistryCache>>>,
+}
+
+/// 社区注册表缓存条目。
+struct RegistryCache {
+    fetched_at: Instant,
+    payload: Value,
 }
 
 impl AppState {
@@ -188,7 +202,9 @@ impl SessionTask {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .as_ref()
         {
-            let _ = tx.send(Message::Text(coomi_envelope("event", None, payload).to_string().into()));
+            let _ = tx.send(Message::Text(
+                coomi_envelope("event", None, payload).to_string().into(),
+            ));
         }
     }
 }
@@ -211,8 +227,8 @@ fn coomi_envelope(kind: &str, id: Option<&str>, payload: Value) -> Value {
 /// Android 侧 CoomiService 启动时对比 APK 内二进制，不一致则强制重启引擎进程。
 fn engine_fingerprint() -> Result<String> {
     let exe = std::env::current_exe().context("cannot locate engine executable")?;
-    let bytes =
-        std::fs::read(&exe).with_context(|| format!("cannot read engine binary {}", exe.display()))?;
+    let bytes = std::fs::read(&exe)
+        .with_context(|| format!("cannot read engine binary {}", exe.display()))?;
     Ok(format!("{:x} {}", md5::compute(&bytes), BRIDGE_VERSION))
 }
 
@@ -228,6 +244,8 @@ struct ConnectionContext {
     permission: Arc<RwLock<PermissionMode>>,
     plan_mode: AtomicBool,
     selected_model: RwLock<Option<String>>,
+    reasoning_effort: RwLock<String>,
+    max_tool_rounds: RwLock<usize>,
     /// 会话任务（连接生命周期内始终复用同一实例）：send_message 创建的任务
     /// 结束 remove_task 后，新任务必须仍能通过 conn_tx 推送事件——
     /// 若每次从 state.tasks 新建，conn_tx 会丢（表现为第二次消息无输出）。
@@ -239,12 +257,16 @@ impl ConnectionContext {
         tx: mpsc::UnboundedSender<Message>,
         permission: Arc<RwLock<PermissionMode>>,
         task: Arc<SessionTask>,
+        reasoning_effort: String,
+        max_tool_rounds: usize,
     ) -> Self {
         Self {
             tx,
             permission,
             plan_mode: AtomicBool::new(false),
             selected_model: RwLock::new(None),
+            reasoning_effort: RwLock::new(reasoning_effort),
+            max_tool_rounds: RwLock::new(max_tool_rounds),
             task,
         }
     }
@@ -266,9 +288,9 @@ impl ConnectionContext {
     }
 
     fn send_envelope(&self, kind: &str, id: Option<&str>, payload: Value) {
-        let _ = self
-            .tx
-            .send(Message::Text(coomi_envelope(kind, id, payload).to_string().into()));
+        let _ = self.tx.send(Message::Text(
+            coomi_envelope(kind, id, payload).to_string().into(),
+        ));
     }
 }
 
@@ -301,17 +323,17 @@ pub async fn serve(
             lock_path.display()
         )
     })?;
-    println!(
-        "Coomi engine lock acquired: {}",
-        lock_path.display()
-    );
+    println!("Coomi engine lock acquired: {}", lock_path.display());
 
     // 记录引擎二进制指纹（MD5 + 版本）：Android 侧 CoomiService 据此判断
     // APK 更新后是否需要重启引擎进程（旧进程加载的还是旧代码，新旧 API 不匹配）。
     let version_path = home.join("engine.version");
     let fingerprint = engine_fingerprint()?;
     fs::write(&version_path, &fingerprint).with_context(|| {
-        format!("failed to write engine fingerprint {}", version_path.display())
+        format!(
+            "failed to write engine fingerprint {}",
+            version_path.display()
+        )
     })?;
 
     let permission = Arc::new(RwLock::new(load_permission_mode(&home)));
@@ -324,13 +346,19 @@ pub async fn serve(
         tasks: Arc::new(StdMutex::new(HashMap::new())),
         vision_degraded: Arc::new(StdMutex::new(HashSet::new())),
         vision_failures: Arc::new(StdMutex::new(HashMap::new())),
+        registry_cache: Arc::new(StdMutex::new(None)),
     };
+    // 引擎启动时补发上次会话遗留的未上报事件（如进程被系统杀掉前没来得及 flush）。
+    Telemetry::new(&state.home).flush_background();
     let index = static_dir.join("index.html");
     let files = ServeDir::new(static_dir).not_found_service(ServeFile::new(index));
     let app = Router::new()
         .route("/api/runtime/health", get(runtime_health))
         .route("/api/runtime/port", get(runtime_port))
-        .route("/api/runtime/global-memory", get(get_global_memory).post(set_global_memory))
+        .route(
+            "/api/runtime/global-memory",
+            get(get_global_memory).post(set_global_memory),
+        )
         .route(
             "/api/runtime/custom-prompt",
             get(get_custom_prompt).post(set_custom_prompt),
@@ -345,7 +373,10 @@ pub async fn serve(
             post(discover_provider_models),
         )
         .route("/api/sessions", get(list_sessions))
-        .route("/api/sessions/{id}", get(get_session).delete(delete_session))
+        .route(
+            "/api/sessions/{id}",
+            get(get_session).delete(delete_session),
+        )
         .route("/api/sessions/{id}/cwd", post(set_session_cwd))
         .route("/api/fs/list", get(fs_list))
         .route("/api/fs/raw", get(fs_raw))
@@ -357,10 +388,25 @@ pub async fn serve(
         .route("/api/catalog", get(catalog_index))
         .route("/api/catalog/mcp/install", post(install_mcp_catalog))
         .route("/api/catalog/mcp/{id}", delete(uninstall_mcp_catalog))
-        .route("/api/catalog/mcp/{id}/enabled", post(set_mcp_enabled_catalog))
+        .route(
+            "/api/catalog/mcp/{id}/enabled",
+            post(set_mcp_enabled_catalog),
+        )
         .route("/api/catalog/skills/install", post(install_skill_catalog))
+        .route(
+            "/api/catalog/skills/install-remote",
+            post(install_skill_remote),
+        )
         .route("/api/catalog/skills/{id}", delete(uninstall_skill_catalog))
-        .route("/api/catalog/skills/{id}/enabled", post(set_skill_enabled_catalog))
+        .route(
+            "/api/catalog/skills/{id}/enabled",
+            post(set_skill_enabled_catalog),
+        )
+        .route("/api/registry", get(registry_index))
+        .route(
+            "/api/settings/telemetry",
+            get(telemetry_get).put(telemetry_set),
+        )
         .route("/api/runtime/installed", get(runtime_installed))
         .route("/ws/session/{session_id}", get(websocket_route))
         .fallback_service(files)
@@ -377,10 +423,19 @@ pub async fn serve(
                         .parse::<HeaderValue>()
                         .expect("valid origin"),
                 ])
-                .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+                .allow_methods([
+                    Method::GET,
+                    Method::POST,
+                    Method::PUT,
+                    Method::DELETE,
+                    Method::OPTIONS,
+                ])
                 .allow_headers([header::CONTENT_TYPE, header::ACCEPT, header::AUTHORIZATION]),
         )
-        .layer(axum::middleware::from_fn_with_state(state.clone(), auth_layer))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth_layer,
+        ))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
@@ -448,8 +503,8 @@ async fn auth_layer(
             .find_map(|pair| pair.strip_prefix("token="))
             .unwrap_or_default()
             .to_string();
-        let has_token = !state.token.is_empty()
-            && (header_token == state.token || query_token == state.token);
+        let has_token =
+            !state.token.is_empty() && (header_token == state.token || query_token == state.token);
         if has_token {
             // 带令牌：返回完整状态（含 cwd / 模型等明细）。
             return next.run(request).await;
@@ -474,15 +529,16 @@ async fn auth_layer(
         .unwrap_or_default()
         .to_string();
     // token 为空时视为未启用令牌认证（例如命令行手动启动引擎调试），不做拦截。
-    let authorized = state.token.is_empty()
-        || header_token == state.token
-        || query_token == state.token;
+    let authorized =
+        state.token.is_empty() || header_token == state.token || query_token == state.token;
     if authorized {
         next.run(request).await
     } else {
         axum::response::Response::builder()
             .status(StatusCode::UNAUTHORIZED)
-            .body(axum::body::Body::from("unauthorized: missing or invalid access token"))
+            .body(axum::body::Body::from(
+                "unauthorized: missing or invalid access token",
+            ))
             .expect("valid response")
     }
 }
@@ -526,6 +582,24 @@ fn global_memory_enabled(home: &Path) -> bool {
         .get("global_memory")
         .and_then(Value::as_bool)
         .unwrap_or(false)
+}
+
+fn configured_reasoning_effort(home: &Path) -> String {
+    read_settings(home)
+        .get("reasoning_effort")
+        .and_then(Value::as_str)
+        .filter(|value| matches!(*value, "auto" | "low" | "medium" | "high" | "xhigh"))
+        .unwrap_or("auto")
+        .to_owned()
+}
+
+fn configured_max_tool_rounds(home: &Path) -> usize {
+    read_settings(home)
+        .get("max_tool_rounds")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(192)
+        .clamp(1, 512)
 }
 
 /// 定制身份提示词的最大长度（字符）。防止超大文本挤占每次对话的上下文。
@@ -591,7 +665,8 @@ fn blocked_private_dirs(home: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-async fn runtime_health(State(state): State<AppState>) -> Json<Value> {    let document = read_provider_document(&state.home).ok();
+async fn runtime_health(State(state): State<AppState>) -> Json<Value> {
+    let document = read_provider_document(&state.home).ok();
     let active = document
         .as_ref()
         .and_then(|doc| doc.providers.get(&doc.active));
@@ -658,9 +733,9 @@ async fn get_session(
     let store = SessionStore::new(&state.home);
     let session_id =
         Uuid::parse_str(&id).map_err(|_| ApiError::bad_request("invalid session id"))?;
-    let session = store.load(session_id).map_err(|error| {
-        ApiError::internal(format!("failed to load session {id}: {error:#}"))
-    })?;
+    let session = store
+        .load(session_id)
+        .map_err(|error| ApiError::internal(format!("failed to load session {id}: {error:#}")))?;
     Ok(Json(json!(session)))
 }
 
@@ -695,7 +770,10 @@ fn installed_mcp_enabled(home: &std::path::Path) -> BTreeMap<String, bool> {
                 .map(|(name, server)| {
                     (
                         name.clone(),
-                        server.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+                        server
+                            .get("enabled")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(true),
                     )
                 })
                 .collect()
@@ -764,13 +842,19 @@ fn mcp_transport(home: &std::path::Path, name: &str) -> String {
 
 /// 内置 MCP / Skill 目录 + 安装状态（SKILL/MCP 管理界面数据源）。
 async fn catalog_index(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let mcp_catalog = coomi_catalogs::builtin_mcp().map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(builtin_catalog_payload(&state.home)?))
+}
+
+/// 内置目录 payload：SKILL/MCP 管理页与社区市场页共用。
+fn builtin_catalog_payload(home: &Path) -> Result<Value, ApiError> {
+    let mcp_catalog =
+        coomi_catalogs::builtin_mcp().map_err(|e| ApiError::internal(e.to_string()))?;
     let skill_catalog =
         coomi_catalogs::builtin_skills().map_err(|e| ApiError::internal(e.to_string()))?;
-    let installed_mcp = installed_mcp_enabled(&state.home);
-    let installed_skills = installed_skill_ids(&state.home);
+    let installed_mcp = installed_mcp_enabled(home);
+    let installed_skills = installed_skill_ids(home);
     // 已启用的 skill id 集合（读 config/skills.json 的 enabled 字段）。
-    let enabled_skills: HashSet<String> = coomi_services::list_installed_skills(&state.home)
+    let enabled_skills: HashSet<String> = coomi_services::list_installed_skills(home)
         .unwrap_or_default()
         .into_iter()
         .filter(|skill| skill.enabled)
@@ -808,7 +892,7 @@ async fn catalog_index(State(state): State<AppState>) -> Result<Json<Value>, Api
             })
         })
         .collect::<Vec<_>>();
-    Ok(Json(json!({ "mcp": mcp, "skills": skills })))
+    Ok(json!({ "mcp": mcp, "skills": skills }))
 }
 
 /// 安装 MCP server：{ "id": ..., "values": { "key": "value", ... } }
@@ -827,12 +911,7 @@ async fn install_mcp_catalog(
         .map(|object| {
             object
                 .iter()
-                .map(|(key, value)| {
-                    (
-                        key.clone(),
-                        value.as_str().unwrap_or_default().to_string(),
-                    )
-                })
+                .map(|(key, value)| (key.clone(), value.as_str().unwrap_or_default().to_string()))
                 .collect::<BTreeMap<String, String>>()
         })
         .unwrap_or_default();
@@ -866,7 +945,9 @@ async fn install_mcp_catalog(
     .await
     .map_err(|e| ApiError::internal(format!("MCP install task failed: {e}")))?
     .map_err(|e| ApiError::internal(format!("failed to install MCP {id}: {e:#}")))?;
-    Ok(Json(json!({ "ok": true, "id": id, "path": path.display().to_string() })))
+    Ok(Json(
+        json!({ "ok": true, "id": id, "path": path.display().to_string() }),
+    ))
 }
 
 /// 卸载 MCP server：从 config/mcp_servers.json 移除对应条目。
@@ -878,8 +959,9 @@ async fn uninstall_mcp_catalog(
     if !path.exists() {
         return Ok(Json(json!({ "ok": true, "deleted": false })));
     }
-    let bytes = std::fs::read(&path)
-        .map_err(|e| ApiError::internal(format!("failed to read MCP config {}: {e}", path.display())))?;
+    let bytes = std::fs::read(&path).map_err(|e| {
+        ApiError::internal(format!("failed to read MCP config {}: {e}", path.display()))
+    })?;
     let mut document = serde_json::from_slice::<Value>(&bytes)
         .map_err(|e| ApiError::internal(format!("invalid MCP config {}: {e}", path.display())))?;
     let removed = document
@@ -887,9 +969,21 @@ async fn uninstall_mcp_catalog(
         .and_then(Value::as_object_mut)
         .map(|servers| servers.remove(&id).is_some())
         .unwrap_or(false);
-    std::fs::write(&path, serde_json::to_vec_pretty(&document)
-        .map_err(|e| ApiError::internal(format!("failed to serialize MCP config {}: {e}", path.display())))?)
-        .map_err(|e| ApiError::internal(format!("failed to write MCP config {}: {e}", path.display())))?;
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&document).map_err(|e| {
+            ApiError::internal(format!(
+                "failed to serialize MCP config {}: {e}",
+                path.display()
+            ))
+        })?,
+    )
+    .map_err(|e| {
+        ApiError::internal(format!(
+            "failed to write MCP config {}: {e}",
+            path.display()
+        ))
+    })?;
     Ok(Json(json!({ "ok": true, "id": id, "deleted": removed })))
 }
 
@@ -913,10 +1007,100 @@ async fn install_skill_catalog(
     .await
     .map_err(|e| ApiError::internal(format!("Skill install task failed: {e}")))?
     .map_err(|e| ApiError::internal(format!("failed to install Skill {id}: {e:#}")))?;
-    Ok(Json(json!({ "ok": true, "id": id, "path": path.display().to_string() })))
+    Ok(Json(
+        json!({ "ok": true, "id": id, "path": path.display().to_string() }),
+    ))
+}
+
+/// 安装社区注册表条目（市场）：{ "id", "name", "description", "repository", "ref", "subdir" }。
+/// 条目来自远端 registry.json，经 CatalogInstaller::install_remote_skill 安装——
+/// 与内置目录共用同一套 codeload zip 下载解压流程，埋点（install_ok/fail）同样生效。
+async fn install_skill_remote(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let id = body
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| ApiError::bad_request("missing id"))?
+        .trim()
+        .to_string();
+    // id 会被用作安装目录名：只允许小写字母数字连字符，杜绝路径穿越。
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+        || id
+            .chars()
+            .next()
+            .is_some_and(|ch| !ch.is_ascii_alphanumeric())
+    {
+        return Err(ApiError::bad_request(format!("invalid id `{id}`")));
+    }
+    let repository = body
+        .get("repository")
+        .and_then(Value::as_str)
+        .filter(|value| {
+            value.contains('/')
+                && !value.starts_with('/')
+                && !value.ends_with('/')
+                && !value.contains("..")
+        })
+        .ok_or_else(|| ApiError::bad_request("missing or invalid repository (owner/repo)"))?
+        .to_string();
+    let git_ref = body
+        .get("ref")
+        .and_then(Value::as_str)
+        .unwrap_or("main")
+        .trim()
+        .to_string();
+    // ref 只出现在 codeload URL 与 zip 根目录匹配中（GitHub 服务端解析分支名，
+    // 含斜杠的分支如 feature/foo 是合法的）；拒绝空值与 .. 防穿越。
+    if git_ref.is_empty() || git_ref.contains("..") {
+        return Err(ApiError::bad_request("invalid ref"));
+    }
+    let subdir = body
+        .get("subdir")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .trim_start_matches('/')
+        .to_string();
+    let name = body
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or(&id)
+        .to_string();
+    let description = body
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let entry = SkillEntry {
+        id: id.clone(),
+        name,
+        description,
+        repository,
+        git_ref,
+        subdir,
+    };
+    let home = state.home.clone();
+    let path = tokio::task::spawn_blocking(move || {
+        let installer = coomi_catalogs::CatalogInstaller::new(&home);
+        installer.install_remote_skill(&entry, false)
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("Skill install task failed: {e}")))?
+    .map_err(|e| ApiError::internal(format!("failed to install Skill {id}: {e:#}")))?;
+    Ok(Json(
+        json!({ "ok": true, "id": id, "path": path.display().to_string() }),
+    ))
 }
 
 /// 卸载 Skill：删除 skills/{id} 目录与 config/skills.json 条目（彻底删除）。
+/// 内置目录条目走 CatalogInstaller::uninstall_skill；社区市场安装的条目（id 不在
+/// 内置目录）回退到通用卸载（按名字删除目录 + 配置，与 Agent 工具的卸载一致）。
 async fn uninstall_skill_catalog(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
@@ -925,12 +1109,164 @@ async fn uninstall_skill_catalog(
     let task_id = id.clone();
     let path = tokio::task::spawn_blocking(move || {
         let installer = coomi_catalogs::CatalogInstaller::new(&home);
-        installer.uninstall_skill(&task_id)
+        match installer.uninstall_skill(&task_id) {
+            Ok(path) => Ok(path),
+            Err(_) => coomi_services::remove_installed_skill(&home, &task_id)
+                .map(|()| home.join("skills").join(&task_id)),
+        }
     })
     .await
     .map_err(|e| ApiError::internal(format!("Skill uninstall task failed: {e}")))?
     .map_err(|e| ApiError::internal(format!("failed to uninstall Skill {id}: {e:#}")))?;
-    Ok(Json(json!({ "ok": true, "id": id, "path": path.display().to_string() })))
+    Ok(Json(
+        json!({ "ok": true, "id": id, "path": path.display().to_string() }),
+    ))
+}
+
+// ─────────────────────────── 社区注册表 ───────────────────────────
+
+/// 注册表远端数据源（引擎代理拉取，避免浏览器 CORS；国内网络用 jsDelivr 镜像兜底）。
+/// 环境变量可覆盖：COOMI_REGISTRY_URL / COOMI_STATS_APP_URL。
+const REGISTRY_URLS: [&str; 2] = [
+    "https://raw.githubusercontent.com/TensorHub-ORG/coomi-registry/main/registry.json",
+    "https://cdn.jsdelivr.net/gh/TensorHub-ORG/coomi-registry@main/registry.json",
+];
+const STATS_GITHUB_URLS: [&str; 2] = [
+    "https://raw.githubusercontent.com/TensorHub-ORG/coomi-registry/main/stats-github.json",
+    "https://cdn.jsdelivr.net/gh/TensorHub-ORG/coomi-registry@main/stats-github.json",
+];
+const STATS_APP_URL: &str = "https://coomi-stats.tensorhub.workers.dev/stats-app.json";
+const REGISTRY_CACHE_SECS: u64 = 600;
+
+/// 社区市场数据：内置目录 + 远端注册表 + 热度统计 + 本地安装状态。
+/// 远端不可用时降级为内置目录 + 空市场，不影响本地功能。
+/// 缓存只覆盖远端部分（registry + stats）：本地安装状态每次实时计算，
+/// 否则市场安装后 10 分钟内 installed 标记不会刷新。
+async fn registry_index(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let remote = {
+        // 先取缓存（克隆后立即释放锁，避免锁跨 await 导致 future 非 Send）。
+        let fresh = {
+            let cache = state
+                .registry_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            cache
+                .as_ref()
+                .filter(|entry| {
+                    entry.fetched_at.elapsed() < Duration::from_secs(REGISTRY_CACHE_SECS)
+                })
+                .map(|entry| entry.payload.clone())
+        };
+        match fresh {
+            Some(payload) => payload,
+            None => {
+                let (registry, stats_github, stats_app) = fetch_registry_payload().await;
+                let payload = json!({
+                    "registry": registry,
+                    "stats": { "github": stats_github, "app": stats_app },
+                });
+                let mut cache = state
+                    .registry_cache
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                *cache = Some(RegistryCache {
+                    fetched_at: Instant::now(),
+                    payload: payload.clone(),
+                });
+                payload
+            }
+        }
+    };
+
+    let installed = installed_skill_ids(&state.home);
+    let payload = json!({
+        "builtin": builtin_catalog_payload(&state.home).unwrap_or_else(|_| json!({"mcp": [], "skills": []})),
+        "remote": remote.get("registry").cloned().unwrap_or_else(|| json!({
+            "skills": [], "mcps": [], "workflows": [], "updated_at": null
+        })),
+        "stats": remote.get("stats").cloned().unwrap_or_else(|| json!({"github": null, "app": null})),
+        "installed": installed,
+    });
+    Ok(Json(payload))
+}
+
+/// 并行拉取 registry.json 与两份统计；每份独立降级，互不影响。
+async fn fetch_registry_payload() -> (Option<Value>, Option<Value>, Option<Value>) {
+    let registry_url = std::env::var("COOMI_REGISTRY_URL").ok();
+    let stats_app_url = std::env::var("COOMI_STATS_APP_URL").ok();
+    let registry = if let Some(url) = &registry_url {
+        fetch_first(std::slice::from_ref(url)).await
+    } else {
+        fetch_first(&REGISTRY_URLS.map(String::from)).await
+    };
+    // 统计文件是 registry.json 的同目录兄弟文件（stats-github.json / stats-app.json）：
+    // 自定义 COOMI_REGISTRY_URL 时按同目录推导，未自定义时走内置镜像列表。
+    let stats_github = match &registry_url {
+        Some(url) => {
+            fetch_first(std::slice::from_ref(&sibling_url(url, "stats-github.json"))).await
+        }
+        None => fetch_first(&STATS_GITHUB_URLS.map(String::from)).await,
+    };
+    let stats_app = match &stats_app_url {
+        Some(url) => fetch_first(std::slice::from_ref(url)).await,
+        None => fetch_first(&[STATS_APP_URL.to_string()]).await,
+    };
+    (registry, stats_github, stats_app)
+}
+
+/// 把 `…/registry.json` 替换成同目录下的 `…/{name}`（用于统计文件推导）。
+fn sibling_url(url: &str, name: &str) -> String {
+    let mut value = url.to_string();
+    if let Some(pos) = value.rfind('/') {
+        value.truncate(pos + 1);
+    }
+    value.push_str(name);
+    value
+}
+
+/// 依次尝试多个 URL，返回第一个成功解析的 JSON（短超时 + 自定义 UA）。
+async fn fetch_first(urls: &[String]) -> Option<Value> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(6))
+        .user_agent("coomi")
+        .build()
+        .ok()?;
+    for url in urls {
+        let Ok(response) = client.get(url).send().await else {
+            continue;
+        };
+        if !response.status().is_success() {
+            continue;
+        }
+        if let Ok(value) = response.json::<Value>().await {
+            return Some(value);
+        }
+    }
+    None
+}
+
+// ─────────────────────────── 匿名统计设置 ───────────────────────────
+
+/// 匿名使用统计开关状态。
+async fn telemetry_get(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let telemetry = Telemetry::new(&state.home);
+    Ok(Json(json!({ "enabled": telemetry.enabled() })))
+}
+
+/// 设置匿名使用统计开关：{ "enabled": true|false }。
+/// 关闭后立即停止缓冲与上报；再次开启后重新开始统计。
+async fn telemetry_set(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let enabled = body
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| ApiError::bad_request("missing enabled: true|false"))?;
+    Telemetry::new(&state.home)
+        .set_enabled(enabled)
+        .map_err(|e| ApiError::internal(format!("failed to save telemetry setting: {e:#}")))?;
+    Ok(Json(json!({ "ok": true, "enabled": enabled })))
 }
 
 /// 停用/启用 MCP server：{ "enabled": true|false }。
@@ -990,7 +1326,9 @@ async fn set_session_cwd(
     }
     let path = std::path::Path::new(&cwd);
     if !path.is_dir() {
-        return Err(ApiError::bad_request(format!("directory does not exist: {cwd}")));
+        return Err(ApiError::bad_request(format!(
+            "directory does not exist: {cwd}"
+        )));
     }
     session.cwd = path.to_path_buf();
     store
@@ -1016,7 +1354,10 @@ fn sandboxed_path(state: &AppState, path: &str) -> Result<std::path::PathBuf, Ap
     if !raw.starts_with('/') {
         return Err(ApiError::bad_request("path must be absolute"));
     }
-    let root = state.cwd.canonicalize().unwrap_or_else(|_| state.cwd.clone());
+    let root = state
+        .cwd
+        .canonicalize()
+        .unwrap_or_else(|_| state.cwd.clone());
     let mut out = std::path::PathBuf::new();
     for component in std::path::Path::new(raw).components() {
         match component {
@@ -1074,10 +1415,20 @@ async fn fs_list(
         }));
     }
     items.sort_by(|a, b| {
-        let (ad, bd) = (a["is_dir"].as_bool().unwrap_or(false), b["is_dir"].as_bool().unwrap_or(false));
-        bd.cmp(&ad).then_with(|| a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or("")))
+        let (ad, bd) = (
+            a["is_dir"].as_bool().unwrap_or(false),
+            b["is_dir"].as_bool().unwrap_or(false),
+        );
+        bd.cmp(&ad).then_with(|| {
+            a["name"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(b["name"].as_str().unwrap_or(""))
+        })
     });
-    Ok(Json(json!({ "path": dir.display().to_string(), "entries": items })))
+    Ok(Json(
+        json!({ "path": dir.display().to_string(), "entries": items }),
+    ))
 }
 
 /// 读取文件内容（预览）：GET /api/fs/raw?path=...
@@ -1089,7 +1440,10 @@ async fn fs_raw(
         .ok_or_else(|| ApiError::bad_request("missing path"))?;
     let file = abs_path(path)?;
     if !file.is_file() {
-        return Err(ApiError::bad_request(format!("not a file: {}", file.display())));
+        return Err(ApiError::bad_request(format!(
+            "not a file: {}",
+            file.display()
+        )));
     }
     let bytes = std::fs::read(&file).map_err(|e| match e.kind() {
         std::io::ErrorKind::PermissionDenied => {
@@ -1122,7 +1476,10 @@ fn mime_for(path: &std::path::Path) -> &'static str {
     }
 }
 
-async fn fs_mkdir(State(state): State<AppState>, Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
+async fn fs_mkdir(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
     let path = body
         .get("path")
         .and_then(Value::as_str)
@@ -1133,7 +1490,10 @@ async fn fs_mkdir(State(state): State<AppState>, Json(body): Json<Value>) -> Res
     Ok(Json(json!({ "ok": true })))
 }
 
-async fn fs_delete(State(state): State<AppState>, Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
+async fn fs_delete(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
     let path = body
         .get("path")
         .and_then(Value::as_str)
@@ -1141,22 +1501,29 @@ async fn fs_delete(State(state): State<AppState>, Json(body): Json<Value>) -> Re
     let target = sandboxed_path(&state, path)?;
     // 禁止删除引擎工作根与配置根本身（防误删整片用户数据）。
     if target == state.cwd {
-        return Err(ApiError::bad_request("cannot delete the engine working root"));
+        return Err(ApiError::bad_request(
+            "cannot delete the engine working root",
+        ));
     }
     if target == state.home {
         return Err(ApiError::bad_request("cannot delete the config root"));
     }
     if target.is_dir() {
-        std::fs::remove_dir_all(&target)
-            .map_err(|e| ApiError::internal(format!("failed to delete {}: {e}", target.display())))?;
+        std::fs::remove_dir_all(&target).map_err(|e| {
+            ApiError::internal(format!("failed to delete {}: {e}", target.display()))
+        })?;
     } else if target.is_file() || target.is_symlink() {
-        std::fs::remove_file(&target)
-            .map_err(|e| ApiError::internal(format!("failed to delete {}: {e}", target.display())))?;
+        std::fs::remove_file(&target).map_err(|e| {
+            ApiError::internal(format!("failed to delete {}: {e}", target.display()))
+        })?;
     }
     Ok(Json(json!({ "ok": true })))
 }
 
-async fn fs_rename(State(state): State<AppState>, Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
+async fn fs_rename(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
     let from = body
         .get("from")
         .and_then(Value::as_str)
@@ -1167,12 +1534,16 @@ async fn fs_rename(State(state): State<AppState>, Json(body): Json<Value>) -> Re
         .ok_or_else(|| ApiError::bad_request("missing to"))?;
     let from_path = sandboxed_path(&state, from)?;
     let to_path = sandboxed_path(&state, to)?;
-    std::fs::rename(&from_path, &to_path)
-        .map_err(|e| ApiError::internal(format!("failed to rename {}: {e}", from_path.display())))?;
+    std::fs::rename(&from_path, &to_path).map_err(|e| {
+        ApiError::internal(format!("failed to rename {}: {e}", from_path.display()))
+    })?;
     Ok(Json(json!({ "ok": true })))
 }
 
-async fn fs_copy(State(state): State<AppState>, Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
+async fn fs_copy(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
     let from = body
         .get("from")
         .and_then(Value::as_str)
@@ -1201,7 +1572,10 @@ fn copy_recursive(from: &std::path::Path, to: &std::path::Path) -> std::io::Resu
     }
 }
 
-async fn fs_write(State(state): State<AppState>, Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
+async fn fs_write(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
     let path = body
         .get("path")
         .and_then(Value::as_str)
@@ -1519,6 +1893,8 @@ async fn websocket_session(socket: WebSocket, state: AppState, session_id: Strin
         tx.clone(),
         Arc::clone(&state.permission),
         Arc::clone(&task),
+        configured_reasoning_effort(&state.home),
+        configured_max_tool_rounds(&state.home),
     ));
     let writer = tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
@@ -1658,16 +2034,32 @@ async fn handle_command(
                     &turn_state,
                     &turn_session_id,
                     &turn_prompt,
+                    false,
                     Arc::clone(&turn_context),
                     Arc::clone(&turn_task),
                 )
                 .await
                 {
-                    turn_task.push_event(json!({
-                        "event_type": "agent_error",
-                        "message": format!("{error:#}"),
-                        "is_fatal": false,
-                    }));
+                    let message = format!("{error:#}");
+                    if is_retryable_error_text(&message)
+                        || message.contains("tool round limit reached")
+                    {
+                        turn_task.push_event(json!({
+                            "event_type": "retry_confirmation",
+                            "message": if message.contains("tool round limit reached") {
+                                "已达到本轮工具调用上限，任务已暂停"
+                            } else {
+                                "自动恢复失败，任务已暂停"
+                            },
+                            "detail": message,
+                        }));
+                    } else {
+                        turn_task.push_event(json!({
+                            "event_type": "agent_error",
+                            "message": message,
+                            "is_fatal": false,
+                        }));
+                    }
                 }
                 turn_task.push_event(json!({"event_type": "turn_end"}));
                 turn_task.running.store(false, Ordering::SeqCst);
@@ -1864,6 +2256,46 @@ async fn handle_command(
                 context.send_ack(envelope_id);
             }
         }
+        "set_reasoning_effort" => {
+            let effort = payload
+                .get("effort")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if !matches!(effort, "auto" | "low" | "medium" | "high" | "xhigh") {
+                context.send_error(envelope_id, "invalid reasoning effort");
+                return;
+            }
+            *context.reasoning_effort.write().await = effort.to_owned();
+            let mut settings = read_settings(&state.home);
+            settings["reasoning_effort"] = json!(effort);
+            if let Err(error) = write_settings(&state.home, &settings) {
+                context.send_error(
+                    envelope_id,
+                    format!("failed to persist reasoning effort: {}", error.message),
+                );
+                return;
+            }
+            context.send_ack(envelope_id);
+        }
+        "set_max_tool_rounds" => {
+            let rounds = payload.get("rounds").and_then(Value::as_u64).unwrap_or(192);
+            if !(1..=512).contains(&rounds) {
+                context.send_error(envelope_id, "tool rounds must be between 1 and 512");
+                return;
+            }
+            let rounds = usize::try_from(rounds).unwrap_or(192);
+            *context.max_tool_rounds.write().await = rounds;
+            let mut settings = read_settings(&state.home);
+            settings["max_tool_rounds"] = json!(rounds);
+            if let Err(error) = write_settings(&state.home, &settings) {
+                context.send_error(
+                    envelope_id,
+                    format!("failed to persist tool rounds: {}", error.message),
+                );
+                return;
+            }
+            context.send_ack(envelope_id);
+        }
         "send_guide" => {
             dispatch_guide(
                 state,
@@ -1874,8 +2306,89 @@ async fn handle_command(
             )
             .await;
         }
+        "retry_turn" => {
+            let task = Arc::clone(&context.task);
+            if task.running.swap(true, Ordering::SeqCst) {
+                context.send_error(envelope_id, "a turn is already running");
+                return;
+            }
+            context.send_ack(envelope_id);
+            let turn_state = state.clone();
+            let turn_session_id = session_id.to_owned();
+            let turn_context = Arc::clone(&context);
+            let turn_task = Arc::clone(&task);
+            let cleanup_state = state.clone();
+            let cleanup_session_id = session_id.to_owned();
+            let spawned = tokio::spawn(async move {
+                let result = retry_turn(
+                    &turn_state,
+                    &turn_session_id,
+                    Arc::clone(&turn_context),
+                    Arc::clone(&turn_task),
+                )
+                .await;
+                if let Err(error) = result {
+                    turn_task.push_event(json!({"event_type":"agent_error","message":format!("{error:#}"),"is_fatal":false}));
+                }
+                turn_task.push_event(json!({"event_type":"turn_end"}));
+                turn_task.running.store(false, Ordering::SeqCst);
+                turn_task
+                    .abort
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .take();
+                cleanup_state.remove_task(&cleanup_session_id);
+            });
+            *task.abort.lock().unwrap_or_else(|p| p.into_inner()) = Some(spawned.abort_handle());
+        }
         _ => context.send_error(envelope_id, format!("unsupported command: {command}")),
     }
+}
+
+async fn retry_turn(
+    state: &AppState,
+    session_id: &str,
+    context: Arc<ConnectionContext>,
+    task: Arc<SessionTask>,
+) -> Result<()> {
+    let store = SessionStore::new(&state.home);
+    let id = Uuid::parse_str(session_id).context("invalid session id")?;
+    let session = store.load(id).context("failed to load session for retry")?;
+    anyhow::ensure!(
+        session
+            .messages
+            .iter()
+            .any(|m| m.role == coomi_engine::Role::User),
+        "no user message to retry"
+    );
+    task.push_event(json!({"event_type":"connection_retry","attempt":1,"max_attempts":1,"delay":0,"message":"正在恢复上一轮任务"}));
+    run_turn(state, session_id, "", true, context, task).await
+}
+
+fn is_retryable_error_text(message: &str) -> bool {
+    let text = message.to_ascii_lowercase();
+    if ["http 400", "http 401", "http 402", "http 403", "http 404"]
+        .iter()
+        .any(|status| text.contains(status))
+    {
+        return false;
+    }
+    [
+        "timed out",
+        "timeout",
+        "connection",
+        "dns",
+        "reset",
+        "broken pipe",
+        "stream failed",
+        "502",
+        "503",
+        "504",
+        "429",
+        "temporarily unavailable",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
 }
 
 /// 发送引导命令：把内置引导注入会话（不调模型），像正常回复一样流式推送给前端。
@@ -1900,7 +2413,9 @@ async fn dispatch_guide(
     if let Ok(id) = Uuid::parse_str(session_id) {
         let store = SessionStore::new(&state.home);
         if let Ok(mut session) = store.load(id) {
-            session.messages.push(coomi_engine::ChatMessage::user((*title).to_owned()));
+            session
+                .messages
+                .push(coomi_engine::ChatMessage::user((*title).to_owned()));
             session.messages.push(coomi_engine::ChatMessage::assistant(
                 (*body).to_owned(),
                 Vec::new(),
@@ -1915,14 +2430,18 @@ async fn dispatch_guide(
         chunk.push(ch);
         count += 1;
         if count >= 16 {
-            context.task.push_event(json!({"event_type": "text_chunk", "content": chunk}));
+            context
+                .task
+                .push_event(json!({"event_type": "text_chunk", "content": chunk}));
             chunk.clear();
             count = 0;
             tokio::time::sleep(std::time::Duration::from_millis(220)).await;
         }
     }
     if !chunk.is_empty() {
-        context.task.push_event(json!({"event_type": "text_chunk", "content": chunk}));
+        context
+            .task
+            .push_event(json!({"event_type": "text_chunk", "content": chunk}));
     }
     context.task.push_event(json!({"event_type": "turn_end"}));
 }
@@ -1931,6 +2450,7 @@ async fn run_turn(
     state: &AppState,
     session_id: &str,
     prompt: &str,
+    recovery: bool,
     context: Arc<ConnectionContext>,
     task: Arc<SessionTask>,
 ) -> Result<()> {
@@ -1976,13 +2496,8 @@ async fn run_turn(
         policy = policy.with_blocked(blocked_private_dirs(&state.home));
     }
     let instructions = coomi_engine::discover_project_instructions(&cwd)?;
-    let mut prompt_context = system_prompt(
-        &state.home,
-        &cwd,
-        policy_mode,
-        &instructions,
-        global_memory,
-    );
+    let mut prompt_context =
+        system_prompt(&state.home, &cwd, policy_mode, &instructions, global_memory);
     // 注入已配置 MCP 清单：agent 需要知道装了哪些 MCP、状态如何、能调哪些工具。
     let mcp_runtime = Arc::new(McpRuntime::load(&state.home).await);
     let mcp_inventory = mcp_runtime.inventory();
@@ -2015,20 +2530,37 @@ async fn run_turn(
         task: Arc::clone(&task),
         permission: Arc::clone(&context.permission),
     };
+    let reasoning_effort = context.reasoning_effort.read().await.clone();
+    let max_tool_rounds = *context.max_tool_rounds.read().await;
+    let context_categories = estimate_context_categories(
+        &state.home,
+        &prompt_context,
+        &session,
+        &tools.specs(),
+        &mcp_runtime.specs(),
+    );
     let observer = BrowserObserver::new(
         Arc::clone(&task),
+        state.home.clone(),
+        reasoning_effort.clone(),
         session.usage.input_tokens,
+        session.usage.cached_input_tokens,
+        session.usage.cache_observed_input_tokens,
         session.usage.output_tokens,
+        context_categories,
     );
     let agent = Agent::new(prompt_context)
-        .with_max_tool_rounds(96)
+        .with_max_tool_rounds(max_tool_rounds)
+        .with_reasoning_effort(reasoning_effort)
         .with_input_queue(Arc::clone(&task.input_queue))
         // 图片降级：请求曾因图片被上游拒绝的会话，不再重放历史图片
-        .with_vision_replay(!state
-            .vision_degraded
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .contains(session_id))
+        .with_vision_replay(
+            !state
+                .vision_degraded
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains(session_id),
+        )
         // 上下文检查点：任务执行中（用户消息/模型回复/每轮工具后）落盘会话，
         // 意外中断、进程被杀、断线重连后都能从磁盘恢复完整上下文。
         .with_checkpoint({
@@ -2043,16 +2575,22 @@ async fn run_turn(
     // 部分回复）不丢失；否则下次继续时会话停留在旧历史（表现为「读不了上文」）。
     // touch() 把 updated_at 刷成执行结束时间：会话列表按它排序（而非前端点击时间）。
     session.touch();
-    let turn_result = agent
-        .run_turn(
-            &mut session,
-            prompt.to_owned(),
-            &provider,
-            &tools,
-            &approval,
-            &observer,
-        )
-        .await;
+    let turn_result = if recovery {
+        agent
+            .continue_interrupted_turn(&mut session, &provider, &tools, &approval, &observer)
+            .await
+    } else {
+        agent
+            .run_turn(
+                &mut session,
+                prompt.to_owned(),
+                &provider,
+                &tools,
+                &approval,
+                &observer,
+            )
+            .await
+    };
     // 图片降级检测：请求失败且会话含图片时标记该会话，后续轮次不再重放
     // 历史图片（会话恢复可用）。命中关键词立即降级；否则连续失败 2 次也降级
     // （兜住上游只回笼统错误、不包含图片相关措辞的情况）。
@@ -2159,28 +2697,57 @@ fn load_or_create_web_session(
 
 struct BrowserObserver {
     task: Arc<SessionTask>,
+    home: PathBuf,
+    reasoning_effort: String,
+    turn_started: StdMutex<Instant>,
     started: StdMutex<HashMap<String, Instant>>,
     usage: StdMutex<BrowserUsageState>,
+    context_categories: BTreeMap<String, u64>,
 }
 
 #[derive(Clone, Copy, Default)]
 struct BrowserUsageState {
     input_tokens: u64,
+    cached_input_tokens: u64,
+    cache_observed_input_tokens: u64,
     output_tokens: u64,
+    cache_data_available: bool,
+    turn_input_tokens: u64,
+    turn_cached_input_tokens: u64,
+    turn_cache_observed_input_tokens: u64,
+    turn_output_tokens: u64,
+    turn_cache_data_available: bool,
+    turn_active: bool,
     context_used_tokens: u64,
     context_window_tokens: u64,
 }
 
 impl BrowserObserver {
-    fn new(task: Arc<SessionTask>, input_tokens: u64, output_tokens: u64) -> Self {
+    fn new(
+        task: Arc<SessionTask>,
+        home: PathBuf,
+        reasoning_effort: String,
+        input_tokens: u64,
+        cached_input_tokens: u64,
+        cache_observed_input_tokens: u64,
+        output_tokens: u64,
+        context_categories: BTreeMap<String, u64>,
+    ) -> Self {
         Self {
             task,
+            home,
+            reasoning_effort,
+            turn_started: StdMutex::new(Instant::now()),
             started: StdMutex::new(HashMap::new()),
             usage: StdMutex::new(BrowserUsageState {
                 input_tokens,
+                cached_input_tokens,
+                cache_observed_input_tokens,
                 output_tokens,
+                cache_data_available: cache_observed_input_tokens > 0,
                 ..BrowserUsageState::default()
             }),
+            context_categories,
         }
     }
 
@@ -2189,7 +2756,27 @@ impl BrowserObserver {
             .usage
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.task.push_event(browser_usage_event(state));
+        let mut event = browser_usage_event(state);
+        let current_turn = (state.turn_active
+            && (state.turn_input_tokens > 0 || state.turn_output_tokens > 0))
+            .then(|| {
+            coomi_engine::TokenUsage {
+                input_tokens: state.turn_input_tokens,
+                cached_input_tokens: state.turn_cached_input_tokens,
+                cache_observed_input_tokens: state.turn_cache_observed_input_tokens,
+                output_tokens: state.turn_output_tokens,
+                cache_data_available: state.turn_cache_data_available,
+            }
+        });
+        let elapsed = self
+            .turn_started
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .elapsed();
+        event["reasoning_efforts"] =
+            load_reasoning_stats_value(&self.home, current_turn.as_ref(), elapsed, &self.reasoning_effort);
+        event["context_categories"] = json!(self.context_categories);
+        self.task.push_event(event);
     }
 }
 
@@ -2204,23 +2791,237 @@ fn browser_usage_event(state: BrowserUsageState) -> Value {
         "event_type": "usage_update",
         "usage": {
             "input_tokens": state.input_tokens,
+            "cached_input_tokens": state.cached_input_tokens,
             "output_tokens": state.output_tokens,
             "total_tokens": total_tokens,
             "context_used_tokens": state.context_used_tokens,
             "context_window_tokens": state.context_window_tokens,
             "context_ratio": context_ratio,
+            "cache_hit_rate": state.cache_data_available.then(|| {
+                if state.cache_observed_input_tokens == 0 { 0.0 } else {
+                    state.cached_input_tokens.min(state.cache_observed_input_tokens) as f64
+                        / state.cache_observed_input_tokens as f64
+                }
+            }),
+            "cache_data_available": state.cache_data_available,
+            "turn_cache_hit_rate": state.turn_cache_data_available.then(|| {
+                if state.turn_cache_observed_input_tokens == 0 { 0.0 } else {
+                    state.turn_cached_input_tokens.min(state.turn_cache_observed_input_tokens) as f64
+                        / state.turn_cache_observed_input_tokens as f64
+                }
+            }),
+            "turn_cache_data_available": state.turn_cache_data_available,
         },
     })
+}
+
+const REASONING_EFFORTS: [&str; 5] = ["auto", "low", "medium", "high", "xhigh"];
+static USAGE_FILE_LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct ReasoningAggregate {
+    turns: u64,
+    total_input_tokens: u64,
+    total_cached_input_tokens: u64,
+    #[serde(default)]
+    cache_observed_input_tokens: u64,
+    total_tokens: u64,
+    total_duration_ms: u64,
+    cache_turns: u64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct ReasoningStatsDocument {
+    schema_version: u8,
+    efforts: BTreeMap<String, ReasoningAggregate>,
+}
+
+fn usage_summary_path(home: &Path) -> PathBuf {
+    home.join("usage").join("summary.json")
+}
+
+fn load_reasoning_aggregates(home: &Path) -> BTreeMap<String, ReasoningAggregate> {
+    fs::read(usage_summary_path(home))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<ReasoningStatsDocument>(&bytes).ok())
+        .filter(|document| document.schema_version == 2)
+        .map(|document| document.efforts)
+        .unwrap_or_default()
+}
+
+fn save_reasoning_aggregates(
+    home: &Path,
+    aggregates: &BTreeMap<String, ReasoningAggregate>,
+) -> Result<()> {
+    let path = usage_summary_path(home);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let bytes = serde_json::to_vec_pretty(&ReasoningStatsDocument {
+            schema_version: 2,
+            efforts: aggregates.clone(),
+        })?;
+    let temp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    {
+        let mut file = fs::File::create(&temp)?;
+        std::io::Write::write_all(&mut file, &bytes)?;
+        file.sync_all()?;
+    }
+    #[cfg(windows)]
+    if path.exists() {
+        fs::remove_file(&path)?;
+    }
+    fs::rename(&temp, &path)?;
+    Ok(())
+}
+
+fn update_reasoning_stats(
+    home: &Path,
+    effort: &str,
+    usage: &coomi_engine::TokenUsage,
+    elapsed: Duration,
+) {
+    let lock = USAGE_FILE_LOCK.get_or_init(|| StdMutex::new(()));
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut aggregates = load_reasoning_aggregates(home);
+    let aggregate = aggregates.entry(effort.to_owned()).or_default();
+    add_reasoning_sample(aggregate, usage, elapsed);
+    if let Err(error) = save_reasoning_aggregates(home, &aggregates) {
+        eprintln!("[usage] failed to save reasoning statistics: {error}");
+    }
+}
+
+fn add_reasoning_sample(
+    aggregate: &mut ReasoningAggregate,
+    usage: &coomi_engine::TokenUsage,
+    elapsed: Duration,
+) {
+    aggregate.turns = aggregate.turns.saturating_add(1);
+    aggregate.total_input_tokens = aggregate
+        .total_input_tokens
+        .saturating_add(usage.input_tokens);
+    aggregate.total_cached_input_tokens = aggregate
+        .total_cached_input_tokens
+        .saturating_add(usage.cached_input_tokens);
+    if usage.cache_data_available {
+        aggregate.cache_observed_input_tokens = aggregate
+            .cache_observed_input_tokens
+            .saturating_add(usage.cache_observed_input_tokens);
+    }
+    aggregate.total_tokens = aggregate.total_tokens.saturating_add(usage.total_tokens());
+    aggregate.total_duration_ms = aggregate
+        .total_duration_ms
+        .saturating_add(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX));
+    if usage.cache_data_available {
+        aggregate.cache_turns = aggregate.cache_turns.saturating_add(1);
+    }
+}
+
+fn load_reasoning_stats_value(
+    home: &Path,
+    current_usage: Option<&coomi_engine::TokenUsage>,
+    current_elapsed: Duration,
+    current_effort: &str,
+) -> Value {
+    let mut aggregates = load_reasoning_aggregates(home);
+    if let Some(usage) = current_usage {
+        add_reasoning_sample(
+            aggregates.entry(current_effort.to_owned()).or_default(),
+            usage,
+            current_elapsed,
+        );
+    }
+    let mut output = serde_json::Map::new();
+    for effort in REASONING_EFFORTS {
+        let aggregate = aggregates.get(effort).cloned().unwrap_or_default();
+        let cache_denominator = if aggregate.cache_observed_input_tokens > 0 {
+            aggregate.cache_observed_input_tokens
+        } else if aggregate.cache_turns > 0 {
+            aggregate.total_input_tokens
+        } else {
+            0
+        };
+        let cache_available = cache_denominator > 0;
+        output.insert(
+            effort.to_owned(),
+            json!({
+                "turns": aggregate.turns,
+                "cache_hit_rate": cache_available.then(|| {
+                    aggregate.total_cached_input_tokens.min(cache_denominator) as f64
+                        / cache_denominator as f64
+                }),
+                "average_duration_ms": (aggregate.turns > 0).then(|| aggregate.total_duration_ms / aggregate.turns),
+                "average_total_tokens": (aggregate.turns > 0).then(|| aggregate.total_tokens / aggregate.turns),
+                "cache_available": cache_available,
+            }),
+        );
+    }
+    Value::Object(output)
+}
+
+fn estimated_tokens(value: &str) -> u64 {
+    u64::try_from(value.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(3)
+        / 4
+}
+
+fn estimate_context_categories(
+    home: &Path,
+    system_prompt: &str,
+    session: &Session,
+    tool_specs: &[coomi_engine::ToolSpec],
+    mcp_specs: &[coomi_engine::ToolSpec],
+) -> BTreeMap<String, u64> {
+    let mcp_names = mcp_specs
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<HashSet<_>>();
+    let mcp_tools = tool_specs
+        .iter()
+        .filter(|tool| mcp_names.contains(tool.name.as_str()))
+        .map(|tool| estimated_tokens(&serde_json::to_string(tool).unwrap_or_default()))
+        .sum();
+    let system_tools = tool_specs
+        .iter()
+        .filter(|tool| !mcp_names.contains(tool.name.as_str()))
+        .map(|tool| estimated_tokens(&serde_json::to_string(tool).unwrap_or_default()))
+        .sum();
+    let messages = session
+        .messages
+        .iter()
+        .map(|message| {
+            estimated_tokens(&message.content).saturating_add(estimated_tokens(
+                &serde_json::to_string(&message.tool_calls).unwrap_or_default(),
+            ))
+        })
+        .sum();
+    let skills = list_installed_skills(home)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|skill| skill.enabled)
+        .map(|skill| estimated_tokens(&format!("{} {}", skill.name, skill.source)))
+        .sum();
+    BTreeMap::from([
+        ("system_tools".to_owned(), system_tools),
+        ("messages".to_owned(), messages),
+        ("skills".to_owned(), skills),
+        ("mcp_tools".to_owned(), mcp_tools),
+        ("system_prompt".to_owned(), estimated_tokens(system_prompt)),
+        ("other".to_owned(), 0),
+    ])
 }
 
 impl AgentObserver for BrowserObserver {
     fn on_event(&self, event: &AgentEvent) {
         match event {
             AgentEvent::Text(content) | AgentEvent::TextDelta(content) => {
-                self.task.push_event(json!({"event_type": "text_chunk", "content": content}));
+                self.task
+                    .push_event(json!({"event_type": "text_chunk", "content": content}));
             }
             AgentEvent::ReasoningDelta(content) => {
-                self.task.push_event(json!({"event_type": "reasoning_chunk", "content": content}));
+                self.task
+                    .push_event(json!({"event_type": "reasoning_chunk", "content": content}));
             }
             AgentEvent::ToolStarted(call) => {
                 self.started
@@ -2264,12 +3065,72 @@ impl AgentObserver for BrowserObserver {
                     "images": images,
                 }));
             }
-            AgentEvent::TurnCompleted(usage) => {
+            AgentEvent::ModelUsage { total, request } => {
                 if let Ok(mut state) = self.usage.lock() {
-                    state.input_tokens = usage.input_tokens;
-                    state.output_tokens = usage.output_tokens;
+                    state.turn_active = true;
+                    state.input_tokens = total.input_tokens;
+                    state.cached_input_tokens = total.cached_input_tokens;
+                    state.cache_observed_input_tokens = total.cache_observed_input_tokens;
+                    state.output_tokens = total.output_tokens;
+                    state.cache_data_available = total.cache_data_available;
+                    state.turn_input_tokens = state
+                        .turn_input_tokens
+                        .saturating_add(request.input_tokens);
+                    state.turn_cached_input_tokens = state
+                        .turn_cached_input_tokens
+                        .saturating_add(request.cached_input_tokens);
+                    state.turn_cache_observed_input_tokens = state
+                        .turn_cache_observed_input_tokens
+                        .saturating_add(request.cache_observed_input_tokens);
+                    state.turn_output_tokens = state
+                        .turn_output_tokens
+                        .saturating_add(request.output_tokens);
+                    state.turn_cache_data_available |= request.cache_data_available;
                 }
                 self.send_usage();
+            }
+            AgentEvent::TurnCompleted { total, turn } => {
+                if let Ok(mut state) = self.usage.lock() {
+                    state.input_tokens = total.input_tokens;
+                    state.cached_input_tokens = total.cached_input_tokens;
+                    state.cache_observed_input_tokens = total.cache_observed_input_tokens;
+                    state.output_tokens = total.output_tokens;
+                    state.cache_data_available = total.cache_data_available;
+                    state.turn_input_tokens = turn.input_tokens;
+                    state.turn_cached_input_tokens = turn.cached_input_tokens;
+                    state.turn_cache_observed_input_tokens = turn.cache_observed_input_tokens;
+                    state.turn_output_tokens = turn.output_tokens;
+                    state.turn_cache_data_available = turn.cache_data_available;
+                    state.turn_active = false;
+                }
+                let elapsed = {
+                    let mut started = self
+                        .turn_started
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let elapsed = started.elapsed();
+                    *started = Instant::now();
+                    elapsed
+                };
+                update_reasoning_stats(&self.home, &self.reasoning_effort, turn, elapsed);
+                self.send_usage();
+            }
+            AgentEvent::ConnectionRetry {
+                attempt,
+                max_attempts,
+                delay_ms,
+                message,
+            } => {
+                self.task.push_event(json!({
+                    "event_type": "connection_retry",
+                    "attempt": attempt,
+                    "max_attempts": max_attempts,
+                    "delay_ms": delay_ms,
+                    "message": message,
+                }));
+            }
+            AgentEvent::StreamReset => {
+                self.task.push_event(json!({"event_type": "stream_reset"}));
             }
             AgentEvent::CompactionCompleted {
                 before_tokens,
@@ -2312,8 +3173,18 @@ impl AgentObserver for BrowserObserver {
                 }
                 self.send_usage();
             }
-            AgentEvent::ModelStarted { .. }
-            | AgentEvent::CompactionStarted { .. }
+            AgentEvent::ModelStarted { round, .. } => {
+                if *round == 1 && let Ok(mut state) = self.usage.lock() {
+                    state.turn_input_tokens = 0;
+                    state.turn_cached_input_tokens = 0;
+                    state.turn_cache_observed_input_tokens = 0;
+                    state.turn_output_tokens = 0;
+                    state.turn_cache_data_available = false;
+                    state.turn_active = true;
+                }
+                self.send_usage();
+            }
+            AgentEvent::CompactionStarted { .. }
             | AgentEvent::QueuedInputAccepted(_) => {}
         }
     }
@@ -2902,11 +3773,29 @@ mod tests {
             output_tokens: 800,
             context_used_tokens: 32_000,
             context_window_tokens: 128_000,
+            ..BrowserUsageState::default()
         });
         assert_eq!(value["usage"]["total_tokens"], 12_800);
         assert_eq!(value["usage"]["context_used_tokens"], 32_000);
         assert_eq!(value["usage"]["context_window_tokens"], 128_000);
         assert_eq!(value["usage"]["context_ratio"], 0.25);
+    }
+
+    #[test]
+    fn browser_cache_rates_are_bounded_and_use_observed_input() {
+        let value = browser_usage_event(BrowserUsageState {
+            input_tokens: 100_000,
+            cached_input_tokens: 120_000,
+            cache_observed_input_tokens: 100_000,
+            cache_data_available: true,
+            turn_input_tokens: 20_000,
+            turn_cached_input_tokens: 18_000,
+            turn_cache_observed_input_tokens: 20_000,
+            turn_cache_data_available: true,
+            ..BrowserUsageState::default()
+        });
+        assert_eq!(value["usage"]["cache_hit_rate"], 1.0);
+        assert_eq!(value["usage"]["turn_cache_hit_rate"], 0.9);
     }
 
     #[test]
@@ -2926,18 +3815,30 @@ mod tests {
         assert_eq!(custom_prompt(home.path()), identity);
 
         // 注入：置于整个系统提示词最前，且带占位段标题。
-        let prompt = system_prompt(home.path(), project.path(), AccessMode::FullAccess, "", true);
+        let prompt = system_prompt(
+            home.path(),
+            project.path(),
+            AccessMode::FullAccess,
+            "",
+            true,
+        );
         assert!(prompt.starts_with("## Custom Identity (身份定位)"));
         assert!(prompt.contains(identity));
-        assert!(prompt.contains(
-            "You are Coomi, a pragmatic coding agent running locally on Android."
-        ));
+        assert!(
+            prompt.contains("You are Coomi, a pragmatic coding agent running locally on Android.")
+        );
 
         // 空白定制提示词不注入。
         let mut settings = read_settings(home.path());
         settings["custom_prompt"] = json!("   ");
         write_settings(home.path(), &settings).expect("write blank custom_prompt");
-        let prompt = system_prompt(home.path(), project.path(), AccessMode::FullAccess, "", true);
+        let prompt = system_prompt(
+            home.path(),
+            project.path(),
+            AccessMode::FullAccess,
+            "",
+            true,
+        );
         assert!(!prompt.contains(identity));
     }
 
@@ -2965,11 +3866,23 @@ mod tests {
             )
             .expect("save shared memory");
 
-        let prompt = system_prompt(home.path(), project.path(), AccessMode::FullAccess, "", true);
+        let prompt = system_prompt(
+            home.path(),
+            project.path(),
+            AccessMode::FullAccess,
+            "",
+            true,
+        );
         assert!(!prompt.contains("CROSS_SESSION_SENTINEL"));
         assert!(!prompt.contains("Persistent memory:"));
         // 全局会话记忆关闭时，系统提示必须包含隐私禁令。
-        let locked = system_prompt(home.path(), project.path(), AccessMode::FullAccess, "", false);
+        let locked = system_prompt(
+            home.path(),
+            project.path(),
+            AccessMode::FullAccess,
+            "",
+            false,
+        );
         assert!(locked.contains("global session memory is OFF"));
     }
 
@@ -3013,6 +3926,7 @@ mod tests {
             tasks: Arc::new(StdMutex::new(HashMap::new())),
             vision_degraded: Arc::new(StdMutex::new(HashSet::new())),
             vision_failures: Arc::new(StdMutex::new(HashMap::new())),
+            registry_cache: Arc::new(StdMutex::new(None)),
         };
 
         let store = SessionStore::new(&home);
@@ -3032,13 +3946,24 @@ mod tests {
         for session in sessions {
             let id = session["id"].as_str().expect("session id");
             assert!(session["title"].is_string(), "session should expose title");
-            assert!(session["summary"].is_string(), "session should expose summary");
+            assert!(
+                session["summary"].is_string(),
+                "session should expose summary"
+            );
             if id == running_session.id.to_string() {
-                assert_eq!(session["running"], json!(true), "running session should report running");
+                assert_eq!(
+                    session["running"],
+                    json!(true),
+                    "running session should report running"
+                );
                 found_running = true;
             }
             if id == idle_session.id.to_string() {
-                assert_eq!(session["running"], json!(false), "idle session should not report running");
+                assert_eq!(
+                    session["running"],
+                    json!(false),
+                    "idle session should not report running"
+                );
                 found_idle = true;
             }
         }

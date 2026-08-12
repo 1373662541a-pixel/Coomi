@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import type { PermissionMode } from '@/protocol/commands'
+import type { PermissionMode, ReasoningEffort } from '@/protocol/commands'
 import { apiGet, apiSend } from '@/bridge/http'
 
 export interface ProviderConfig {
@@ -88,11 +88,21 @@ export const PERMISSION_MODES: { mode: PermissionMode; label: string; desc: stri
 ]
 
 /** 主题三档：system 跟随系统、light 明亮、dark 夜间。 */
-export type ThemeMode = 'system' | 'light' | 'dark'
+export type ThemeMode = 'system' | 'light' | 'dark' | 'book' | 'orange'
 export const THEME_MODES: { mode: ThemeMode; label: string; desc: string }[] = [
   { mode: 'system', label: '跟随系统', desc: '与手机系统深浅色保持一致' },
   { mode: 'light', label: '明亮模式', desc: '始终使用浅色界面' },
   { mode: 'dark', label: '夜间模式', desc: '始终使用深色界面' },
+  { mode: 'book', label: '书卷纸', desc: '柔和纸张底色与墨绿色点缀' },
+  { mode: 'orange', label: '橙白', desc: '明快白色底面与暖橙色点缀' },
+]
+
+export const REASONING_EFFORTS: { value: ReasoningEffort; label: string }[] = [
+  { value: 'auto', label: '自动' },
+  { value: 'low', label: '低' },
+  { value: 'medium', label: '中' },
+  { value: 'high', label: '高' },
+  { value: 'xhigh', label: '超高' },
 ]
 
 /** 取当前主题档位：优先 Android 原生偏好（JS 桥），其次 localStorage，默认跟随系统。 */
@@ -101,18 +111,18 @@ export function readThemeMode(): ThemeMode {
   if (bridge && typeof bridge.getThemeMode === 'function') {
     try {
       const v = String(bridge.getThemeMode() ?? '')
-      if (v === 'light' || v === 'dark' || v === 'system') return v
+      if (['light', 'dark', 'system', 'book', 'orange'].includes(v)) return v as ThemeMode
     } catch { /* 桥未就绪时走 localStorage */ }
   }
   const saved = localStorage.getItem('coomi.themeMode')
-  return saved === 'light' || saved === 'dark' || saved === 'system' ? saved : 'system'
+  return ['light', 'dark', 'system', 'book', 'orange'].includes(saved ?? '') ? saved as ThemeMode : 'system'
 }
 
 /** 写入 <html data-theme>，前端 global.css 据此切换暗色主题。 */
 export function applyTheme(mode: ThemeMode) {
   const dark = mode === 'dark'
     || (mode === 'system' && window.matchMedia?.('(prefers-color-scheme: dark)').matches)
-  document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light')
+  document.documentElement.setAttribute('data-theme', dark ? 'dark' : mode === 'book' || mode === 'orange' ? mode : 'light')
 }
 
 // 浏览器独立开发时的兜底数据（后端不可达时使用）
@@ -126,6 +136,10 @@ export const useConfigStore = defineStore('config', () => {
   const permissionMode = ref<PermissionMode>(['ask', 'auto', 'full'].includes(savedPermission ?? '') ? savedPermission! : 'ask')
   const planMode = ref(false)
   const themeMode = ref<ThemeMode>(readThemeMode())
+  const savedEffort = localStorage.getItem('coomi.reasoningEffort') as ReasoningEffort | null
+  const reasoningEffort = ref<ReasoningEffort>(REASONING_EFFORTS.some(item => item.value === savedEffort) ? savedEffort! : 'auto')
+  const savedRounds = Number(localStorage.getItem('coomi.maxToolRounds'))
+  const maxToolRounds = ref([192, 256, 512].includes(savedRounds) ? savedRounds : 192)
 
   const providers = ref<ProviderConfig[]>([])
   const activeId = ref('')
@@ -180,6 +194,14 @@ export const useConfigStore = defineStore('config', () => {
   function setPermissionMode(mode: PermissionMode) {
     permissionMode.value = mode
     localStorage.setItem('coomi.permissionMode', mode)
+  }
+  function setReasoningEffort(effort: ReasoningEffort) {
+    reasoningEffort.value = effort
+    localStorage.setItem('coomi.reasoningEffort', effort)
+  }
+  function setMaxToolRounds(rounds: number) {
+    maxToolRounds.value = [192, 256, 512].includes(rounds) ? rounds : 192
+    localStorage.setItem('coomi.maxToolRounds', String(maxToolRounds.value))
   }
 
   /**
@@ -393,9 +415,9 @@ export const useConfigStore = defineStore('config', () => {
   }
 
   return {
-    permissionMode, planMode, themeMode, globalMemory, customPrompt, providers, activeId, loading, usingMock, lastError,
+    permissionMode, planMode, themeMode, reasoningEffort, maxToolRounds, globalMemory, customPrompt, providers, activeId, loading, usingMock, lastError,
     currentProviderId, currentModel, currentProvider, mergedProviders,
-    fetchProviders, selectModel, setPermissionMode, setThemeMode, cyclePermissionMode, togglePlanMode,
+    fetchProviders, selectModel, setPermissionMode, setThemeMode, setReasoningEffort, setMaxToolRounds, cyclePermissionMode, togglePlanMode,
     toggleGlobalMemory, syncGlobalMemoryFromEngine, fetchCustomPrompt, saveCustomPrompt,
     upsertProvider, deleteProvider, activateProvider, copyProvider, revealProviderKey, discoverModels,
   }

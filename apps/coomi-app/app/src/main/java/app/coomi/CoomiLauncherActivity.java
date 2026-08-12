@@ -43,6 +43,17 @@ public class CoomiLauncherActivity extends Activity {
     private static final int REQUEST_CODE_BATTERY = 1002;
     private static final String PREFS_NAME = "coomi_launcher";
     private static final String PREF_CONTINUE = "onboarding_continue";
+    private static final String PREF_SETUP_COMPLETED = "setup_completed";
+
+    public static void markSetupCompleted(Context context) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putBoolean(PREF_SETUP_COMPLETED, true).apply();
+    }
+
+    private boolean isSetupCompleted() {
+        return getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .getBoolean(PREF_SETUP_COMPLETED, false);
+    }
 
     private View mWelcomeContainer;
     private View mLoadingContainer;
@@ -281,7 +292,7 @@ public class CoomiLauncherActivity extends Activity {
         }
 
         // 演示包不为权限拦人：这两个开关只影响引擎常驻，而演示包没有引擎。
-        mContinueButton.setEnabled(CoomiDemo.isEnabled() || (notifOk && battOk));
+        mContinueButton.setEnabled(true);
     }
 
     @Override
@@ -327,7 +338,7 @@ public class CoomiLauncherActivity extends Activity {
             return;
         }
 
-        if (!CoomiConfig.isConfigured()) {
+        if (!CoomiConfig.isConfigured() && !isSetupCompleted()) {
             Logger.logInfo(LOG_TAG, "Not configured, routing to auth step");
             mStatusText.setText(R.string.coomi_setup_required);
             Intent intent = new Intent(this, CoomiSetupActivity.class);

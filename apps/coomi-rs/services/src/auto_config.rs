@@ -2,6 +2,7 @@ use crate::ProviderDocument;
 use crate::ProviderSettings;
 use anyhow::Context;
 use anyhow::Result;
+use coomi_telemetry::Telemetry;
 use serde_json::Map;
 use serde_json::Value;
 use serde_json::json;
@@ -156,7 +157,29 @@ fn apply_mcp_command(home: &Path, command: &str) -> Result<AutoConfigResult> {
     apply_mcp(home, json!({"servers": {name: server}}))
 }
 
+/// 安装 Skill（本地目录 / GitHub URL）。github 来源的安装/失败会记录匿名统计事件
+/// （install_ok / install_fail），与 UI 市场安装共用同一统计维度（owner/repo）。
 async fn install_skill_as(
+    home: &Path,
+    source: &str,
+    name_override: Option<&str>,
+) -> Result<AutoConfigResult> {
+    let result = install_skill_as_inner(home, source, name_override).await;
+    if source.starts_with("https://github.com/") {
+        let telemetry = Telemetry::new(home);
+        match &result {
+            Ok(_) => {
+                let _ = telemetry.record("install_ok", source);
+            }
+            Err(_) => {
+                let _ = telemetry.record("install_fail", source);
+            }
+        }
+    }
+    result
+}
+
+async fn install_skill_as_inner(
     home: &Path,
     source: &str,
     name_override: Option<&str>,

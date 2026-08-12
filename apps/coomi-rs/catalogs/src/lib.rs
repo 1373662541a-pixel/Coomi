@@ -1,5 +1,6 @@
 use anyhow::Context;
 use anyhow::Result;
+use coomi_telemetry::Telemetry;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -138,6 +139,12 @@ impl CatalogInstaller {
         self.install_skill_inner(id, true)
     }
 
+    /// 安装社区注册表条目（市场）：条目来自远端 registry.json，不经内置 catalog
+    /// 查找，直接按 repository/ref/subdir 走与内置目录相同的下载安装流程。
+    pub fn install_remote_skill(&self, entry: &SkillEntry, replace: bool) -> Result<PathBuf> {
+        self.install_entry(entry, replace)
+    }
+
     /// 卸载 Skill：删除 skills/{id} 目录与 config/skills.json 中的条目。
     pub fn uninstall_skill(&self, id: &str) -> Result<PathBuf> {
         // 与安装一致：id 必须先在内置目录中解析出合法条目，杜绝路径穿越
@@ -178,6 +185,27 @@ impl CatalogInstaller {
             .iter()
             .find(|entry| entry.id.eq_ignore_ascii_case(id))
             .with_context(|| format!("Skill `{id}` is not in the built-in catalog"))?;
+        self.install_entry(entry, replace)
+    }
+
+    /// 安装核心：下载 zip → 解压 subdir → 复制到 skills/{id} → 写元数据。
+    /// 内置目录与社区市场共用此函数，埋点也集中在这里——无论用户手动点击
+    /// 还是 Agent 自动安装，install_ok / install_fail 都在此处产生。
+    fn install_entry(&self, entry: &SkillEntry, replace: bool) -> Result<PathBuf> {
+        let result = self.install_entry_inner(entry, replace);
+        let telemetry = Telemetry::new(&self.home);
+        match &result {
+            Ok(_) => {
+                let _ = telemetry.record("install_ok", &entry.id);
+            }
+            Err(_) => {
+                let _ = telemetry.record("install_fail", &entry.id);
+            }
+        }
+        result
+    }
+
+    fn install_entry_inner(&self, entry: &SkillEntry, replace: bool) -> Result<PathBuf> {
         let destination = self.home.join("skills").join(&entry.id);
         if destination.exists() && !replace {
             anyhow::bail!("Skill `{}` is already installed", entry.id)

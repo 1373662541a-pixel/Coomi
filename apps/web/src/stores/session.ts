@@ -4,6 +4,8 @@ import { createTransport, type Transport } from '@/bridge'
 import { authedFetch } from '@/bridge/http'
 import { isDemoMode } from '@/bridge/demoMode'
 import type { AgentEvent } from '@/protocol/events'
+import type { ReasoningEffortStats } from '@/protocol/events'
+import type { ReasoningEffort } from '@/protocol/commands'
 import type { InboundEnvelope } from '@/protocol/commands'
 import { nextId } from '@/bridge/envelope'
 import { useConnectionStore } from './connection'
@@ -16,13 +18,18 @@ export const useSessionStore = defineStore('session', () => {
   const config = useConfigStore()
   const sessions = useSessionsStore()
 
-  const sessionId = ref(createSessionId())
-  const timeline = ref<Timelineitem[]>([])
+  const sessionId = ref(readActiveSessionId())
+  const timeline = ref<Timelineitem[]>(sessions.loadTranscript(sessionId.value))
   const runState = ref<RunState>('idle')
   const usage = ref<{
     total: number; input: number; output: number; contextRatio: number
     contextUsed: number; contextWindow: number
+    cachedInput: number; cacheHitRate: number | null; cacheDataAvailable: boolean
+    turnCacheHitRate: number | null; turnCacheDataAvailable: boolean
+    reasoningEfforts: Partial<Record<ReasoningEffort, ReasoningEffortStats>>
+    contextCategories: Partial<Record<'system_tools' | 'messages' | 'skills' | 'mcp_tools' | 'system_prompt' | 'other', number>>
   } | null>(null)
+  const retryConfirmation = ref<string | null>(null)
   /** 当前会话的工作目录（会话标记路径，绑定为会话执行目录）。 */
   const cwd = ref('')
   const loop = ref<LoopProgress>({ active: false, currentStep: 0, totalSteps: 0, status: '' })
@@ -35,6 +42,8 @@ export const useSessionStore = defineStore('session', () => {
   const isBusy = computed(() => runState.value !== 'idle')
   const pendingApproval = computed(() => timeline.value.find((t): t is ToolCard => t.kind === 'tool' && t.status === 'awaiting_approval'))
   const pendingQuestion = computed(() => timeline.value.find((t): t is QuestionCard => t.kind === 'question' && !t.answered))
+
+  persistActiveSessionId(sessionId.value)
 
   /** 通知原生层任务状态：更新通知栏常驻通知（执行中 / 已完成）。 */
   function syncTaskStatus(status: 'running' | 'done') {
@@ -106,6 +115,8 @@ export const useSessionStore = defineStore('session', () => {
         if (config.currentProviderId && config.currentModel) {
           t.send({ command: 'select_model', provider_id: config.currentProviderId, model: config.currentModel })
         }
+        t.send({ command: 'set_reasoning_effort', effort: config.reasoningEffort })
+        t.send({ command: 'set_max_tool_rounds', rounds: config.maxToolRounds })
       }
     })
     t.onMessage(env => {
@@ -179,11 +190,31 @@ export const useSessionStore = defineStore('session', () => {
           contextRatio: ev.usage.context_ratio ?? previous?.contextRatio ?? 0,
           contextUsed: ev.usage.context_used_tokens ?? previous?.contextUsed ?? 0,
           contextWindow: ev.usage.context_window_tokens ?? previous?.contextWindow ?? 0,
+          cachedInput: ev.usage.cached_input_tokens ?? previous?.cachedInput ?? 0,
+          cacheHitRate: ev.usage.cache_hit_rate ?? previous?.cacheHitRate ?? null,
+          cacheDataAvailable: ev.usage.cache_data_available ?? previous?.cacheDataAvailable ?? false,
+          turnCacheHitRate: ev.usage.turn_cache_hit_rate ?? previous?.turnCacheHitRate ?? null,
+          turnCacheDataAvailable: ev.usage.turn_cache_data_available ?? previous?.turnCacheDataAvailable ?? false,
+          reasoningEfforts: ev.reasoning_efforts ?? previous?.reasoningEfforts ?? {},
+          contextCategories: ev.context_categories ?? previous?.contextCategories ?? {},
         }
         break
       }
       case 'compression': pushNotice('info', `上下文已压缩 ${fmtTokens(ev.before)} → ${fmtTokens(ev.after)}`); break
       case 'connection_retry': connection.setRetry(`${ev.message}（${ev.attempt}/${ev.max_attempts}）`); break
+      case 'stream_reset':
+        endAssistantStream()
+        while (timeline.value.length > 0) {
+          const last = timeline.value[timeline.value.length - 1]
+          if (last.kind === 'assistant' || last.kind === 'reasoning') timeline.value.pop()
+          else break
+        }
+        break
+      case 'retry_confirmation':
+        endAssistantStream()
+        runState.value = 'idle'
+        retryConfirmation.value = ev.message
+        break
       case 'agent_error': endAssistantStream(); pushNotice('error', ev.message); if (ev.is_fatal) runState.value = 'idle'; persistSoon(); break
       case 'agent_cancelled': endAssistantStream(); cancelRunningTools(); pushNotice('warn', '已停止本轮执行'); break
       case 'bg_task_detached': pushNotice('info', `↪ 已转入后台任务 #${ev.task_id}（${ev.tool_name}）`); break
@@ -211,11 +242,41 @@ export const useSessionStore = defineStore('session', () => {
           contextRatio: usage.value?.contextRatio ?? 0,
           contextUsed: usage.value?.contextUsed ?? 0,
           contextWindow: usage.value?.contextWindow ?? 0,
+          cachedInput: usage.value?.cachedInput ?? 0,
+          cacheHitRate: usage.value?.cacheHitRate ?? null,
+          cacheDataAvailable: usage.value?.cacheDataAvailable ?? false,
+          turnCacheHitRate: usage.value?.turnCacheHitRate ?? null,
+          turnCacheDataAvailable: usage.value?.turnCacheDataAvailable ?? false,
+          reasoningEfforts: usage.value?.reasoningEfforts ?? {},
+          contextCategories: usage.value?.contextCategories ?? {},
         }
         if (typeof ev.cwd === 'string' && ev.cwd) cwd.value = ev.cwd
         break
       }
     }
+  }
+
+  function activateSession(id: string) {
+    sessionId.value = id
+    persistActiveSessionId(id)
+  }
+
+  function retryInterruptedTurn() {
+    retryConfirmation.value = null
+    runState.value = 'thinking'
+    transport.value?.send({ command: 'retry_turn' })
+  }
+
+  function dismissRetry() { retryConfirmation.value = null }
+
+  function setReasoningEffort(effort: ReasoningEffort) {
+    config.setReasoningEffort(effort)
+    transport.value?.send({ command: 'set_reasoning_effort', effort })
+  }
+
+  function setMaxToolRounds(rounds: number) {
+    config.setMaxToolRounds(rounds)
+    transport.value?.send({ command: 'set_max_tool_rounds', rounds: config.maxToolRounds })
   }
 
   function cancelRunningTools() {
@@ -272,7 +333,7 @@ export const useSessionStore = defineStore('session', () => {
     flushPersistence()
     endAssistantStream(); timeline.value = []; usage.value = null
     loop.value = { active: false, currentStep: 0, totalSteps: 0, status: '' }; runState.value = 'idle'
-    sessionId.value = createSessionId()
+    activateSession(createSessionId())
     connect()
   }
 
@@ -373,7 +434,7 @@ export const useSessionStore = defineStore('session', () => {
     loop.value = { active: false, currentStep: 0, totalSteps: 0, status: '' }
     runState.value = 'idle'
     const targetId = isUuid(id) ? id : sessions.migrateId(id, createSessionId())
-    sessionId.value = targetId
+    activateSession(targetId)
     const restoredFromEngine = await restoreFromEngine(targetId)
     if (!restoredFromEngine) {
       const restored = sessions.loadTranscript(targetId)
@@ -396,7 +457,7 @@ export const useSessionStore = defineStore('session', () => {
       // 避免 flushPersistence 把已删会话写回，也避免引擎在文件删除后重建同 id 会话。
       endAssistantStream(); timeline.value = []; usage.value = null
       loop.value = { active: false, currentStep: 0, totalSteps: 0, status: '' }; runState.value = 'idle'
-      sessionId.value = createSessionId()
+      activateSession(createSessionId())
       connect()
     }
     sessions.remove(id)
@@ -446,15 +507,34 @@ export const useSessionStore = defineStore('session', () => {
   }
   function pushNotice(tone: 'info' | 'warn' | 'error' | 'success', text: string) { timeline.value.push({ kind: 'notice', id: nextId(), tone, text }) }
 
-  return { sessionId, timeline, runState, usage, cwd, loop, isBusy, pendingApproval, pendingQuestion, connect, disconnect, sendMessage, cancel, approve, answerQuestion, setPermissionMode, togglePlanMode, selectModel, completeFileTransfer, newSession, openSession, deleteSession, setSessionCwd, sendGuide }
+  return { sessionId, timeline, runState, usage, retryConfirmation, cwd, loop, isBusy, pendingApproval, pendingQuestion, connect, disconnect, flushPersistence, sendMessage, cancel, approve, answerQuestion, setPermissionMode, setReasoningEffort, setMaxToolRounds, togglePlanMode, selectModel, retryInterruptedTurn, dismissRetry, completeFileTransfer, newSession, openSession, deleteSession, setSessionCwd, sendGuide }
 })
 
 function fmtTokens(n: number): string { return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n) }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const ACTIVE_SESSION_KEY = 'coomi.activeSessionId.v1'
 
 function isUuid(value: string): boolean {
   return UUID_PATTERN.test(value)
+}
+
+function readActiveSessionId(): string {
+  try {
+    const saved = localStorage.getItem(ACTIVE_SESSION_KEY) ?? ''
+    if (isUuid(saved)) return saved
+  } catch {
+    // WebView storage can be unavailable during early startup; create a valid fallback.
+  }
+  return createSessionId()
+}
+
+function persistActiveSessionId(id: string) {
+  try {
+    localStorage.setItem(ACTIVE_SESSION_KEY, id)
+  } catch {
+    // Keeping the in-memory id is enough for this process lifetime.
+  }
 }
 
 /** 引擎磁盘上会话文件的原始消息结构（与 coomi-engine 的 ChatMessage 对应）。 */

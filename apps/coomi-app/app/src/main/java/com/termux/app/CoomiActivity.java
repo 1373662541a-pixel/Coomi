@@ -98,6 +98,7 @@ public class CoomiActivity extends Activity {
     private String mPendingExportName;
     private String mPendingImportRequestId;
     private String mPendingExportRequestId;
+    private String mAppliedThemeMode;
 
     private final ServiceConnection mConnection = new ServiceConnection() {
         @Override
@@ -118,7 +119,9 @@ public class CoomiActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         CoomiTheme.applyWebTheme(this);
         super.onCreate(savedInstanceState);
+        mAppliedThemeMode = CoomiTheme.getMode(this);
         setContentView(R.layout.activity_coomi);
+        CoomiTheme.applySystemBars(this);
         mWebView = findViewById(R.id.coomi_webview);
         mSplash = findViewById(R.id.coomi_splash);
         mSplashSpinner = findViewById(R.id.coomi_splash_spinner);
@@ -142,6 +145,24 @@ public class CoomiActivity extends Activity {
         Intent intent = new Intent(this, CoomiService.class);
         startService(intent);
         bindService(intent, mConnection, Context.BIND_AUTO_CREATE);
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        navigateToRoute(intent);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        String currentMode = CoomiTheme.getMode(this);
+        if (mAppliedThemeMode == null || !mAppliedThemeMode.equals(currentMode)) {
+            mAppliedThemeMode = currentMode;
+            applyThemeToWebView();
+        }
+        CoomiTheme.applySystemBars(this);
     }
 
     /**
@@ -257,6 +278,16 @@ public class CoomiActivity extends Activity {
         runOnUiThread(() -> mWebView.loadUrl(target));
     }
 
+    /** Reused singleTask instances switch SPA routes without reloading the WebView. */
+    private void navigateToRoute(Intent intent) {
+        if (mWebView == null || !mPageLoaded || intent == null) return;
+        String route = intent.getStringExtra(EXTRA_ROUTE);
+        if (route == null || !route.startsWith("#/")) return;
+        String hashPath = route.substring(1);
+        runOnUiThread(() -> mWebView.evaluateJavascript(
+            "window.location.hash=" + JSONObject.quote(hashPath), null));
+    }
+
     private void configureWebView() {
         WebSettings s = mWebView.getSettings();
         s.setJavaScriptEnabled(true);
@@ -355,10 +386,12 @@ public class CoomiActivity extends Activity {
             finish();
             return;
         }
+        // Persist the current streamed timeline before covering the WebView. The activity stays
+        // alive behind the dashboard, so its websocket and the running agent remain attached.
+        evaluateJavascript("window.dispatchEvent(new Event('coomi:flush-persistence'))");
         Intent intent = new Intent(this, CoomiDashboardActivity.class);
         intent.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
         startActivity(intent);
-        finish();
         // 返回动画与系统设置页（运行权限/手机存储访问）一致：
         // 复刻 framework 的 activity_close_enter / activity_close_exit 源码动画。
         overridePendingTransition(R.anim.coomi_activity_close_enter, R.anim.coomi_activity_close_exit);
@@ -372,8 +405,12 @@ public class CoomiActivity extends Activity {
     /** 把深浅色写入 <html data-theme>，前端 global.css 据此切换暗色主题。 */
     private void applyThemeToWebView() {
         if (mWebView == null) return;
+        String mode = CoomiTheme.getMode(this);
+        String webTheme = isDark() ? "dark"
+            : CoomiTheme.MODE_BOOK.equals(mode) ? "book"
+            : CoomiTheme.MODE_ORANGE.equals(mode) ? "orange" : "light";
         runOnUiThread(() -> evaluateJavascript(
-            "document.documentElement.setAttribute('data-theme','" + (isDark() ? "dark" : "light") + "')"));
+            "document.documentElement.setAttribute('data-theme','" + webTheme + "')"));
     }
 
     @Override
@@ -400,19 +437,7 @@ public class CoomiActivity extends Activity {
         /** 报错反馈：返回设备与 App 诊断信息（不含对话内容、不含 API Key）。 */
         @JavascriptInterface
         public String getDiagnostics() {
-            try {
-                org.json.JSONObject info = new org.json.JSONObject();
-                info.put("version_name", BuildConfig.VERSION_NAME);
-                info.put("version_code", BuildConfig.VERSION_CODE);
-                info.put("device_model", android.os.Build.MODEL);
-                info.put("manufacturer", android.os.Build.MANUFACTURER);
-                info.put("os", "Android");
-                info.put("android_version", android.os.Build.VERSION.RELEASE);
-                info.put("sdk_int", android.os.Build.VERSION.SDK_INT);
-                return info.toString();
-            } catch (Exception e) {
-                return "{}";
-            }
+            return app.coomi.CoomiFeedbackClient.diagnostics(CoomiActivity.this).toString();
         }
 
         /** 原生上报报错反馈：后台线程 POST，绕过 WebView 跨域/CORS 限制。
@@ -430,41 +455,7 @@ public class CoomiActivity extends Activity {
         }
 
         private String postFeedback(String json) {
-            try {
-                java.net.URL url = new java.net.URL("https://updates.septemc.com/coomi/feedback/api");
-                java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
-                conn.setRequestMethod("POST");
-                conn.setConnectTimeout(8000);
-                conn.setReadTimeout(8000);
-                conn.setRequestProperty("Content-Type", "application/json");
-                conn.setDoOutput(true);
-                try (OutputStream out = conn.getOutputStream()) {
-                    out.write(json.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-                }
-                int code = conn.getResponseCode();
-                InputStream stream = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
-                StringBuilder body = new StringBuilder();
-                if (stream != null) {
-                    try (InputStream in = stream) {
-                        byte[] buf = new byte[4096];
-                        int n;
-                        while ((n = in.read(buf)) >= 0) body.append(new String(buf, 0, n, java.nio.charset.StandardCharsets.UTF_8));
-                    }
-                }
-                conn.disconnect();
-                org.json.JSONObject out = new org.json.JSONObject();
-                out.put("ok", code >= 200 && code < 300);
-                if (!out.getBoolean("ok")) out.put("error", "HTTP " + code);
-                out.put("detail", body.toString());
-                return out.toString();
-            } catch (Exception e) {
-                org.json.JSONObject out = new org.json.JSONObject();
-                try {
-                    out.put("ok", false);
-                    out.put("error", e.getClass().getSimpleName() + ": " + e.getMessage());
-                } catch (Exception ignored) {}
-                return out.toString();
-            }
+            return app.coomi.CoomiFeedbackClient.post(json);
         }
 
         /** 当前主题档位（system/light/dark），前端初始化时同步。 */
@@ -478,8 +469,10 @@ public class CoomiActivity extends Activity {
         public void setThemeMode(String mode) {
             CoomiTheme.setMode(CoomiActivity.this, mode);
             runOnUiThread(() -> {
+                mAppliedThemeMode = CoomiTheme.getMode(CoomiActivity.this);
                 applyThemeToWebView();
                 CoomiTheme.applySystemBars(CoomiActivity.this);
+                sendBroadcast(new Intent(CoomiTheme.ACTION_THEME_CHANGED).setPackage(getPackageName()));
             });
         }
 
@@ -853,6 +846,12 @@ public class CoomiActivity extends Activity {
 
     private void evaluateJavascript(String script) {
         if (mWebView != null) mWebView.evaluateJavascript(script, null);
+    }
+
+    @Override
+    protected void onPause() {
+        evaluateJavascript("window.dispatchEvent(new Event('coomi:flush-persistence'))");
+        super.onPause();
     }
 
     @Override

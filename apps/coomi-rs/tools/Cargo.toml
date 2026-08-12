@@ -13,6 +13,7 @@ coomi-engine = { path = "../engine" }
 coomi-security = { path = "../security" }
 coomi-services = { path = "../services" }
 coomi-catalogs = { path = "../catalogs" }
+coomi-telemetry = { path = "../telemetry" }
 anyhow.workspace = true
 base64 = "0.22"
 ignore.workspace = true

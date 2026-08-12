@@ -214,6 +214,7 @@ pub struct ModelRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
     pub tools: Vec<ToolSpec>,
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -234,7 +235,11 @@ pub struct CompactionResponse {
 pub struct TokenUsage {
     pub input_tokens: u64,
     pub cached_input_tokens: u64,
+    #[serde(default)]
+    pub cache_observed_input_tokens: u64,
     pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_data_available: bool,
 }
 
 impl TokenUsage {
@@ -243,11 +248,29 @@ impl TokenUsage {
         self.cached_input_tokens = self
             .cached_input_tokens
             .saturating_add(other.cached_input_tokens);
+        self.cache_observed_input_tokens = self
+            .cache_observed_input_tokens
+            .saturating_add(other.cache_observed_input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.cache_data_available |= other.cache_data_available;
     }
 
     pub fn total_tokens(&self) -> u64 {
         self.input_tokens.saturating_add(self.output_tokens)
+    }
+
+    pub fn saturating_sub(&self, previous: &Self) -> Self {
+        Self {
+            input_tokens: self.input_tokens.saturating_sub(previous.input_tokens),
+            cached_input_tokens: self
+                .cached_input_tokens
+                .saturating_sub(previous.cached_input_tokens),
+            cache_observed_input_tokens: self
+                .cache_observed_input_tokens
+                .saturating_sub(previous.cache_observed_input_tokens),
+            output_tokens: self.output_tokens.saturating_sub(previous.output_tokens),
+            cache_data_available: self.cache_data_available,
+        }
     }
 }
 
@@ -424,10 +447,24 @@ pub enum AgentEvent {
         model: String,
         round: usize,
     },
+    ConnectionRetry {
+        attempt: u8,
+        max_attempts: u8,
+        delay_ms: u64,
+        message: String,
+    },
+    /// Discard partial stream output before retrying the same model request.
+    StreamReset,
     Text(String),
     TextDelta(String),
     ReasoningDelta(String),
     ContextUpdated(ContextStatus),
+    /// Usage reported by one completed model request. This is emitted after
+    /// every tool-loop model call so observers can refresh live statistics.
+    ModelUsage {
+        total: TokenUsage,
+        request: TokenUsage,
+    },
     CompactionStarted {
         automatic: bool,
     },
@@ -444,7 +481,10 @@ pub enum AgentEvent {
         call: ToolCall,
         result: ToolResult,
     },
-    TurnCompleted(TokenUsage),
+    TurnCompleted {
+        total: TokenUsage,
+        turn: TokenUsage,
+    },
 }
 
 pub trait AgentObserver: Send + Sync {

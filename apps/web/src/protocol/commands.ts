@@ -2,6 +2,7 @@ import type { AgentEvent } from './events'
 
 export type PermissionMode = 'ask' | 'auto' | 'full'
 export type ApprovalDecision = 'allow' | 'deny' | 'always'
+export type ReasoningEffort = 'auto' | 'low' | 'medium' | 'high' | 'xhigh'
 
 export interface SendMessageCommand { command: 'send_message'; text: string }
 export interface CancelCommand { command: 'cancel' }
@@ -14,12 +15,15 @@ export interface ExitPlanModeCommand { command: 'exit_plan_mode' }
 export interface SelectModelCommand { command: 'select_model'; provider_id: string; model: string }
 export interface FileTransferResultCommand { command: 'file_transfer_result'; request_id: string; paths: string[] }
 export interface SendGuideCommand { command: 'send_guide'; key: string }
+export interface RetryTurnCommand { command: 'retry_turn' }
+export interface SetReasoningEffortCommand { command: 'set_reasoning_effort'; effort: ReasoningEffort }
+export interface SetMaxToolRoundsCommand { command: 'set_max_tool_rounds'; rounds: number }
 
 export type AgentCommand =
   | SendMessageCommand | CancelCommand | JumpInCommand | ApproveToolCommand
   | AnswerQuestionCommand | SetPermissionModeCommand | EnterPlanModeCommand
   | ExitPlanModeCommand | SelectModelCommand | FileTransferResultCommand
-  | SendGuideCommand
+  | SendGuideCommand | RetryTurnCommand | SetReasoningEffortCommand | SetMaxToolRoundsCommand
 
 export const PROTOCOL_VERSION = 1
 export type EnvelopeType = 'event' | 'command' | 'ack' | 'error'

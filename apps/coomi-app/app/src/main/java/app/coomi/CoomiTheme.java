@@ -23,10 +23,14 @@ import com.termux.R;
  */
 public final class CoomiTheme {
 
+    public static final String ACTION_THEME_CHANGED = "com.coomi.android.action.THEME_CHANGED";
+
     /** 主题档位：system 跟随系统、light 明亮、dark 夜间。 */
     public static final String MODE_SYSTEM = "system";
     public static final String MODE_LIGHT = "light";
     public static final String MODE_DARK = "dark";
+    public static final String MODE_BOOK = "book";
+    public static final String MODE_ORANGE = "orange";
 
     public static final String PREF_THEME_MODE = "coomi.themeMode";
     private static final String PREF_NAME = "coomi_settings";
@@ -38,7 +42,7 @@ public final class CoomiTheme {
     public static String getMode(Context context) {
         SharedPreferences prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE);
         String mode = prefs.getString(PREF_THEME_MODE, MODE_SYSTEM);
-        if (!MODE_SYSTEM.equals(mode) && !MODE_LIGHT.equals(mode) && !MODE_DARK.equals(mode)) {
+        if (!isValid(mode)) {
             return MODE_SYSTEM;
         }
         return mode;
@@ -46,20 +50,25 @@ public final class CoomiTheme {
 
     /** 保存档位并立即应用系统栏颜色（Activity 已创建后的运行时切换）。 */
     public static void setMode(Context context, String mode) {
-        if (!MODE_SYSTEM.equals(mode) && !MODE_LIGHT.equals(mode) && !MODE_DARK.equals(mode)) {
+        if (!isValid(mode)) {
             return;
         }
         context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-            .edit().putString(PREF_THEME_MODE, mode).apply();
+            .edit().putString(PREF_THEME_MODE, mode).commit();
     }
 
     /** 按档位 + 系统深浅色计算最终是否深色。 */
     public static boolean isDark(Context context) {
         String mode = getMode(context);
         if (MODE_DARK.equals(mode)) return true;
-        if (MODE_LIGHT.equals(mode)) return false;
+        if (!MODE_SYSTEM.equals(mode)) return false;
         int night = context.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
         return night == Configuration.UI_MODE_NIGHT_YES;
+    }
+
+    private static boolean isValid(String mode) {
+        return MODE_SYSTEM.equals(mode) || MODE_LIGHT.equals(mode) || MODE_DARK.equals(mode)
+            || MODE_BOOK.equals(mode) || MODE_ORANGE.equals(mode);
     }
 
     /**
@@ -67,20 +76,31 @@ public final class CoomiTheme {
      * 必须在 {@code super.onCreate} 之前调用。
      */
     public static void applyTheme(Activity activity) {
-        activity.setTheme(isDark(activity) ? R.style.Theme_Coomi_Night : R.style.Theme_Coomi);
+        String mode = getMode(activity);
+        activity.setTheme(MODE_DARK.equals(mode) || (MODE_SYSTEM.equals(mode) && isDark(activity))
+            ? R.style.Theme_Coomi_Night
+            : MODE_BOOK.equals(mode) ? R.style.Theme_Coomi_Book
+            : MODE_ORANGE.equals(mode) ? R.style.Theme_Coomi_Orange
+            : R.style.Theme_Coomi);
     }
 
     /** 页面底色为灰的变体（Dashboard 等）：对应 Theme.Coomi.Page / Theme.Coomi.Night.Page。 */
     public static void applyPageTheme(Activity activity) {
-        activity.setTheme(isDark(activity)
+        String mode = getMode(activity);
+        activity.setTheme(MODE_DARK.equals(mode) || (MODE_SYSTEM.equals(mode) && isDark(activity))
             ? R.style.Theme_Coomi_Night_Page
+            : MODE_BOOK.equals(mode) ? R.style.Theme_Coomi_Book_Page
+            : MODE_ORANGE.equals(mode) ? R.style.Theme_Coomi_Orange_Page
             : R.style.Theme_Coomi_Page);
     }
 
     /** WebView 宿主闪屏变体：对应 Theme.Coomi.Web / Theme.Coomi.Night.Web。 */
     public static void applyWebTheme(Activity activity) {
-        activity.setTheme(isDark(activity)
+        String mode = getMode(activity);
+        activity.setTheme(MODE_DARK.equals(mode) || (MODE_SYSTEM.equals(mode) && isDark(activity))
             ? R.style.Theme_Coomi_Night_Web
+            : MODE_BOOK.equals(mode) ? R.style.Theme_Coomi_Book_Web
+            : MODE_ORANGE.equals(mode) ? R.style.Theme_Coomi_Orange_Web
             : R.style.Theme_Coomi_Web);
     }
 
@@ -89,10 +109,27 @@ public final class CoomiTheme {
      * 状态栏颜色与图标跟随 isDark；导航栏也一并处理。
      */
     public static void applySystemBars(Activity activity) {
+        applySystemBars(activity, false);
+    }
+
+    /** Applies bars using the page background used by dashboard-style screens. */
+    public static void applyPageSystemBars(Activity activity) {
+        applySystemBars(activity, true);
+    }
+
+    private static void applySystemBars(Activity activity, boolean page) {
         boolean dark = isDark(activity);
         Window window = activity.getWindow();
-        window.setStatusBarColor(dark ? Color.parseColor("#121316") : activity.getColor(R.color.coomi_white));
-        window.setNavigationBarColor(dark ? Color.parseColor("#121316") : activity.getColor(R.color.coomi_white));
+        String mode = getMode(activity);
+        int background = dark
+            ? activity.getColor(page ? R.color.coomi_night_page : R.color.coomi_night_bg)
+            : MODE_BOOK.equals(mode)
+                ? activity.getColor(page ? R.color.coomi_book_page : R.color.coomi_book_bg)
+            : MODE_ORANGE.equals(mode)
+                ? activity.getColor(page ? R.color.coomi_orange_theme_page : R.color.coomi_orange_theme_bg)
+            : activity.getColor(page ? R.color.coomi_page : R.color.coomi_white);
+        window.setStatusBarColor(background);
+        window.setNavigationBarColor(background);
         View decor = window.getDecorView();
         int flags = decor.getSystemUiVisibility();
         if (dark) {

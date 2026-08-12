@@ -24,11 +24,24 @@ const pathNotice = ref('')
 const providerGroups = computed(() => [...config.providers].sort((a, b) => Number(b.id === config.activeId) - Number(a.id === config.activeId)))
 const usagePercent = computed(() => Math.min(100, Math.max(0, Math.round((session.usage?.contextRatio ?? 0) * 100))))
 const usageStroke = computed(() => `${usagePercent.value} ${100 - usagePercent.value}`)
+const effortLabels = { auto: '自动', low: '低', medium: '中', high: '高', xhigh: '超高' } as const
+const categoryLabels = { system_tools: '系统工具', messages: '消息', skills: '技能', mcp_tools: 'MCP 工具', system_prompt: '系统提示', other: '其他' } as const
+const categoryTotal = computed(() => Object.values(session.usage?.contextCategories ?? {}).reduce((sum, value) => sum + (value ?? 0), 0))
+function categoryPercent(value: number | undefined): string {
+  return categoryTotal.value > 0 ? `${((value ?? 0) / categoryTotal.value * 100).toFixed(1)}%` : '--'
+}
 
 function formatTokens(value: number): string {
   if (value >= 1000000) return (value / 1000000).toFixed(1) + 'M'
   if (value >= 1000) return (value / 1000).toFixed(1) + 'k'
   return String(value)
+}
+function formatPercent(value: number | null | undefined): string {
+  return value == null ? '暂无缓存数据' : `${(value * 100).toFixed(1)}%`
+}
+function formatDuration(value: number | null | undefined): string {
+  if (value == null) return '--'
+  return value >= 1000 ? `${(value / 1000).toFixed(1)}s` : `${value}ms`
 }
 
 function choose(providerId: string, model: string) {
@@ -111,12 +124,30 @@ function browseInFileManager() {
 
     <button v-if="usageOpen" class="usage-scrim" aria-label="关闭上下文数据" @click="usageOpen = false" />
     <div v-if="usageOpen" class="usage-menu">
-      <p class="usage-title">本次会话用量</p>
+      <p class="usage-title">上下文用量</p>
       <div v-if="session.usage" class="usage-stats">
         <div><span>会话 Token</span><strong>{{ formatTokens(session.usage.total) }}</strong></div>
         <div><span>上下文使用</span><strong>{{ formatTokens(session.usage.contextUsed) }} / {{ formatTokens(session.usage.contextWindow) }}</strong></div>
+        <div><span>本轮缓存命中</span><strong>{{ formatPercent(session.usage.turnCacheHitRate) }}</strong></div>
+        <div><span>会话平均命中</span><strong>{{ formatPercent(session.usage.cacheHitRate) }}</strong></div>
       </div>
       <p v-else class="usage-empty">此对话尚无用量数据</p>
+      <template v-if="session.usage">
+        <p class="usage-subtitle">上下文构成</p>
+        <div class="category-grid">
+          <div v-for="(label, category) in categoryLabels" :key="category"><span>{{ label }}</span><strong>{{ categoryPercent(session.usage.contextCategories[category]) }}</strong></div>
+        </div>
+        <p class="usage-subtitle">各推理强度均轮统计</p>
+        <div class="effort-table">
+          <div class="effort-head"><span>强度</span><span>命中</span><span>耗时</span><span>用量</span></div>
+          <div v-for="(label, effort) in effortLabels" :key="effort" class="effort-row">
+            <span>{{ label }}</span>
+            <span>{{ formatPercent(session.usage.reasoningEfforts[effort]?.cache_hit_rate) }}</span>
+            <span>{{ formatDuration(session.usage.reasoningEfforts[effort]?.average_duration_ms) }}</span>
+            <span>{{ session.usage.reasoningEfforts[effort]?.average_total_tokens == null ? '--' : formatTokens(session.usage.reasoningEfforts[effort]!.average_total_tokens!) }}</span>
+          </div>
+        </div>
+      </template>
       <div class="usage-path">
         <span>会话标记路径</span>
         <button class="path-btn" @click="openPathPicker">{{ session.cwd || '点击选择' }}</button>
@@ -161,7 +192,7 @@ function browseInFileManager() {
 .usage-scrim { position: fixed; inset: 0; z-index: 19; border: 0; background: transparent; }
 .usage-menu {
   position: absolute; z-index: 20; top: calc(var(--safe-top) + 49px); right: 8px;
-  width: min(74vw, 246px); padding: 12px 13px;
+  width: min(92vw, 390px); max-height: min(72vh, 560px); overflow-y: auto; padding: 12px 13px;
   border: 1px solid var(--border); border-radius: var(--r-card);
   background: var(--bg); box-shadow: var(--shadow-2);
 }
@@ -171,6 +202,16 @@ function browseInFileManager() {
 .usage-stats span { font-size: 12px; color: var(--text-3); }
 .usage-stats strong { font-family: var(--font-mono); font-size: 12.5px; color: var(--text); }
 .usage-empty { margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-3); }
+.usage-subtitle { margin: 12px 0 6px; padding-top: 10px; border-top: 1px solid var(--border); font-size: 11.5px; font-weight: 650; color: var(--text-2); }
+.category-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:5px 12px; }
+.category-grid div { display:flex; justify-content:space-between; gap:8px; font-size:11px; }
+.category-grid span { color:var(--text-3); }
+.category-grid strong { color:var(--text-2); font-family:var(--font-mono); }
+.effort-table { display: grid; gap: 1px; font-variant-numeric: tabular-nums; }
+.effort-head, .effort-row { display: grid; grid-template-columns: 44px minmax(82px, 1.4fr) 54px 50px; align-items: center; gap: 5px; min-height: 27px; }
+.effort-head { color: var(--text-3); font-size: 10.5px; }
+.effort-row { border-top: 1px solid var(--border); color: var(--text-2); font-size: 11px; }
+.effort-head span:not(:first-child), .effort-row span:not(:first-child) { text-align: right; }
 .usage-path {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
   margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--border);

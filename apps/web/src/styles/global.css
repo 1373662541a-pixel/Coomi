@@ -128,6 +128,56 @@
     --user-bubble: var(--blue);
     --user-text: #ffffff;
   }
+:root[data-theme='book'] {
+  color-scheme: light;
+  --bg: #f7f2e7;
+  --page: #eee6d7;
+  --fill: #f1eadc;
+  --fill-strong: #e7decc;
+  --fill-press: #ddd2bd;
+  --border: #d8ccb6;
+  --border-strong: #c7b99f;
+  --text: #2d3028;
+  --text-2: #626457;
+  --text-3: #8a8979;
+  --blue: #496957;
+  --blue-press: #395343;
+  --blue-soft: #dce8dc;
+  --blue-soft-2: #cdddcf;
+  --blue-border: #abc1ae;
+  --orange: #a76642;
+  --orange-soft: #efe0d3;
+  --orange-border: #d9bda8;
+  --bg-card: #fffaf0;
+  --bg-input: #f1eadc;
+  --bg-elevated: #fffaf0;
+  --user-bubble: #496957;
+}
+:root[data-theme='orange'] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --page: #fff7f1;
+  --fill: #fff2e8;
+  --fill-strong: #ffe7d5;
+  --fill-press: #ffdbc2;
+  --border: #f3dac8;
+  --border-strong: #eac4a8;
+  --text: #28231f;
+  --text-2: #6e625a;
+  --text-3: #9b8c82;
+  --blue: #a94f12;
+  --blue-press: #873b0b;
+  --blue-soft: #f8e9de;
+  --blue-soft-2: #f1d8c6;
+  --blue-border: #ddb18f;
+  --orange: #a94f12;
+  --orange-soft: #f8e9de;
+  --orange-border: #ddb18f;
+  --bg-card: #ffffff;
+  --bg-input: #fff7f1;
+  --bg-elevated: #ffffff;
+  --user-bubble: #a94f12;
+}
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 /* 点击不出现蓝色高亮方块：WebView 的 tap highlight / focus ring 全部去掉，
    交互反馈交给各组件自己的 :active 样式。 */
