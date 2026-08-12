@@ -8,15 +8,77 @@ export interface ProviderConfig {
   models: string[]; baseUrl?: string
   type?: string; model?: string; fastModel?: string | null; toolProtocol?: string
   contextWindow?: number
+  modelContextWindows?: Record<string, number>
   supportsWebSearch?: boolean
   supportsVision?: boolean
   active?: boolean
+  builtin?: boolean
+  status?: ProviderStatus
 }
+
+export type ProviderProtocol = 'openai_compatible' | 'openai_responses' | 'anthropic_messages' | 'gemini_native'
+export type ProviderStatus = 'unconfigured' | 'configured' | 'current'
+
+export interface ProviderPreset {
+  id: string
+  name: string
+  baseUrl: string
+  protocol: ProviderProtocol
+}
+
+export const BUILTIN_PROVIDER_PRESETS: ProviderPreset[] = [
+  { id: 'deepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', protocol: 'openai_compatible' },
+  { id: 'zhipu', name: '智谱', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', protocol: 'openai_compatible' },
+  { id: 'minimax', name: 'MiniMax', baseUrl: 'https://api.minimaxi.com/v1', protocol: 'openai_compatible' },
+  { id: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', protocol: 'openai_responses' },
+  { id: 'anthropic', name: 'Anthropic', baseUrl: 'https://api.anthropic.com/v1', protocol: 'anthropic_messages' },
+  { id: 'google', name: 'Gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta', protocol: 'gemini_native' },
+  { id: 'opencode', name: 'OpenCode', baseUrl: 'https://opencode.ai/zen/go/v1', protocol: 'openai_compatible' },
+]
 
 export interface ProviderInput {
   id: string; name: string; apiKey: string; models: string[]
   baseUrl?: string; type?: string; toolProtocol?: string; contextWindow?: number
+  modelContextWindows?: Record<string, number>
   fastModel?: string | null; activate?: boolean; supportsWebSearch?: boolean; supportsVision?: boolean
+}
+
+export function providerStatus(provider: ProviderConfig, activeId: string): ProviderStatus {
+  const configured = Boolean(provider.hasKey && provider.models.length > 0)
+  if (configured && provider.id === activeId) return 'current'
+  return configured ? 'configured' : 'unconfigured'
+}
+
+export function mergeProviderList(configured: ProviderConfig[], activeId: string): ProviderConfig[] {
+  const configuredById = new Map(configured.map(provider => [provider.id, provider]))
+  const builtInIds = new Set(BUILTIN_PROVIDER_PRESETS.map(preset => preset.id))
+  const builtIns = BUILTIN_PROVIDER_PRESETS.map(preset => {
+    const saved = configuredById.get(preset.id)
+    const provider: ProviderConfig = {
+      id: preset.id,
+      name: saved?.name || preset.name,
+      apiKeyMasked: saved?.apiKeyMasked || '',
+      hasKey: Boolean(saved?.hasKey),
+      models: saved?.models ?? [],
+      baseUrl: saved?.baseUrl || preset.baseUrl,
+      type: saved?.type || preset.protocol,
+      model: saved?.model,
+      fastModel: saved?.fastModel,
+      toolProtocol: saved?.toolProtocol || preset.protocol,
+      contextWindow: saved?.contextWindow ?? 256000,
+      modelContextWindows: { ...(saved?.modelContextWindows ?? {}) },
+      supportsWebSearch: saved?.supportsWebSearch ?? false,
+      supportsVision: saved?.supportsVision ?? false,
+      active: activeId === preset.id,
+      builtin: true,
+    }
+    provider.status = providerStatus(provider, activeId)
+    return provider
+  })
+  const custom = configured
+    .filter(provider => !builtInIds.has(provider.id))
+    .map(provider => ({ ...provider, builtin: false, status: providerStatus(provider, activeId) }))
+  return [...builtIns, ...custom]
 }
 
 export const PERMISSION_MODES: { mode: PermissionMode; label: string; desc: string }[] = [
@@ -74,6 +136,7 @@ export const useConfigStore = defineStore('config', () => {
   const currentProviderId = ref('')
   const currentModel = ref('')
   const currentProvider = computed(() => providers.value.find(p => p.id === currentProviderId.value) ?? null)
+  const mergedProviders = computed(() => mergeProviderList(providers.value, activeId.value))
 
   function applyList(list: ProviderConfig[], active: string) {
     providers.value = list
@@ -86,6 +149,9 @@ export const useConfigStore = defineStore('config', () => {
       const saved = list.find(p => p.id === savedProvider && p.models.includes(savedModel ?? ''))
       currentProviderId.value = saved?.id ?? sel.id
       currentModel.value = savedModel && saved ? savedModel : (sel.model || sel.models[0] || '')
+    } else {
+      currentProviderId.value = ''
+      currentModel.value = ''
     }
   }
 
@@ -205,10 +271,29 @@ export const useConfigStore = defineStore('config', () => {
   async function upsertProvider(input: ProviderInput): Promise<boolean> {
     if (usingMock.value) {
       // 浏览器兜底：仅本地更新，不落盘
-      const masked = input.apiKey ? '****' + input.apiKey.slice(-4) : '****'
       const existing = providers.value.find(p => p.id === input.id)
-      if (existing) { existing.name = input.name; existing.apiKeyMasked = masked; existing.models = input.models; existing.baseUrl = input.baseUrl; existing.type = input.type; existing.toolProtocol = input.toolProtocol; existing.contextWindow = input.contextWindow }
-      else { providers.value.push({ id: input.id, name: input.name, apiKeyMasked: masked, hasKey: !!input.apiKey, models: input.models, baseUrl: input.baseUrl, type: input.type, toolProtocol: input.toolProtocol, contextWindow: input.contextWindow }) }
+      const apiKeyMasked = input.apiKey ? '****' + input.apiKey.slice(-4) : (existing?.apiKeyMasked ?? '')
+      const hasKey = input.apiKey ? true : (existing?.hasKey ?? false)
+      if (existing) {
+        Object.assign(existing, {
+          name: input.name, apiKeyMasked, hasKey, models: input.models,
+          baseUrl: input.baseUrl, type: input.type, toolProtocol: input.toolProtocol,
+          contextWindow: input.contextWindow, fastModel: input.fastModel,
+          modelContextWindows: { ...(input.modelContextWindows ?? {}) },
+          supportsWebSearch: input.supportsWebSearch, supportsVision: input.supportsVision,
+          model: input.models[0],
+        })
+      } else {
+        providers.value.push({
+          id: input.id, name: input.name, apiKeyMasked, hasKey, models: input.models,
+          baseUrl: input.baseUrl, type: input.type, toolProtocol: input.toolProtocol,
+          contextWindow: input.contextWindow, fastModel: input.fastModel,
+          modelContextWindows: { ...(input.modelContextWindows ?? {}) },
+          supportsWebSearch: input.supportsWebSearch, supportsVision: input.supportsVision,
+          model: input.models[0],
+        })
+      }
+      if (input.activate) activeId.value = input.id
       return true
     }
     try {
@@ -222,6 +307,7 @@ export const useConfigStore = defineStore('config', () => {
         type: input.type,
         toolProtocol: input.toolProtocol,
         contextWindow: input.contextWindow,
+        modelContextWindows: input.modelContextWindows,
         fastModel: input.fastModel,
         supportsWebSearch: input.supportsWebSearch,
         supportsVision: input.supportsVision,
@@ -237,7 +323,8 @@ export const useConfigStore = defineStore('config', () => {
 
   async function deleteProvider(id: string): Promise<boolean> {
     if (usingMock.value) {
-      providers.value = providers.value.filter(p => p.id !== id)
+      const remaining = providers.value.filter(p => p.id !== id)
+      applyList(remaining, activeId.value === id ? (remaining[0]?.id ?? '') : activeId.value)
       return true
     }
     try {
@@ -251,7 +338,11 @@ export const useConfigStore = defineStore('config', () => {
   }
 
   async function activateProvider(id: string): Promise<boolean> {
-    if (usingMock.value) { activeId.value = id; return true }
+    if (usingMock.value) {
+      if (!providers.value.some(provider => provider.id === id)) return false
+      activeId.value = id
+      return true
+    }
     try {
       await apiSend(`/api/providers/${encodeURIComponent(id)}/activate`, 'POST')
       await fetchProviders()
@@ -274,6 +365,7 @@ export const useConfigStore = defineStore('config', () => {
   }
 
   async function revealProviderKey(id: string): Promise<string | null> {
+    if (usingMock.value) return null
     try {
       const result = await apiSend<{ apiKey: string }>(`/api/providers/${encodeURIComponent(id)}/reveal`, 'POST')
       return result.apiKey
@@ -283,10 +375,15 @@ export const useConfigStore = defineStore('config', () => {
     }
   }
 
-  async function discoverModels(id: string): Promise<string[] | null> {
+  async function discoverModels(id: string, persist = false): Promise<string[] | null> {
+    if (usingMock.value) return providers.value.find(provider => provider.id === id)?.models ?? []
     try {
-      const result = await apiSend<{ models: string[] }>(`/api/providers/${encodeURIComponent(id)}/discover-models`, 'POST')
-      await fetchProviders()
+      const result = await apiSend<{ models: string[] }>(
+        `/api/providers/${encodeURIComponent(id)}/discover-models`,
+        'POST',
+        { persist },
+      )
+      if (persist) await fetchProviders()
       return result.models
     } catch (e) {
       lastError.value = String(e)
@@ -294,11 +391,17 @@ export const useConfigStore = defineStore('config', () => {
     }
   }
 
+  /** 内置 Provider 清空配置时删除已保存条目，预置行仍会保留。 */
+  async function clearProvider(id: string): Promise<boolean> {
+    if (!providers.value.some(provider => provider.id === id)) return true
+    return deleteProvider(id)
+  }
+
   return {
     permissionMode, planMode, themeMode, globalMemory, customPrompt, providers, activeId, loading, usingMock, lastError,
-    currentProviderId, currentModel, currentProvider,
+    currentProviderId, currentModel, currentProvider, mergedProviders,
     fetchProviders, selectModel, setPermissionMode, setThemeMode, cyclePermissionMode, togglePlanMode,
     toggleGlobalMemory, syncGlobalMemoryFromEngine, fetchCustomPrompt, saveCustomPrompt,
-    upsertProvider, deleteProvider, activateProvider, copyProvider, revealProviderKey, discoverModels,
+    upsertProvider, deleteProvider, clearProvider, activateProvider, copyProvider, revealProviderKey, discoverModels,
   }
 })

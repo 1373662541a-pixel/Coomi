@@ -1274,32 +1274,23 @@ async fn upsert_provider(
         }
         None => settings.context_window.or(Some(256_000)),
     };
+    if let Some(windows) = input.get("modelContextWindows") {
+        settings.model_context_windows = parse_model_context_windows(windows)?;
+    }
     settings.base_url = string_field(&input, "baseUrl")
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| default_base_url(&id));
 
-    let models = input
-        .get("models")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    if !models.is_empty() {
-        settings
-            .extra
-            .insert("models".into(), json!(models.clone()));
+    if let Some(models) = parse_model_array(&input)? {
+        apply_provider_models(&mut settings, &models, document.active == id)?;
+    } else {
+        settings.model = string_field(&input, "model")
+            .filter(|value| !value.is_empty())
+            .unwrap_or(settings.model);
+        if input.get("fastModel").is_some() {
+            settings.fast_model = string_field(&input, "fastModel").filter(|value| !value.is_empty());
+        }
     }
-    settings.model = string_field(&input, "model")
-        .filter(|value| !value.is_empty())
-        .or_else(|| models.first().cloned())
-        .unwrap_or(settings.model);
-    settings.fast_model = string_field(&input, "fastModel")
-        .filter(|value| !value.is_empty())
-        .or_else(|| models.get(1).cloned());
     if let Some(api_key) = string_field(&input, "apiKey").filter(|value| !value.is_empty()) {
         settings.api_key = api_key;
     }
@@ -1317,12 +1308,12 @@ async fn upsert_provider(
         return Err(ApiError::bad_request("base URL is required"));
     }
 
-    let wants_activate = document.active.is_empty()
-        || input
-            .get("activate")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-    if !settings.model.is_empty() && wants_activate {
+    let wants_activate = input
+        .get("activate")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if wants_activate {
+        validate_provider_activation(&settings)?;
         document.active = id.clone();
     }
     document.providers.insert(id.clone(), settings);
@@ -1338,11 +1329,6 @@ async fn delete_provider(
     let mut document = read_provider_document(&state.home).map_err(ApiError::from)?;
     if !document.providers.contains_key(&id) {
         return Err(ApiError::not_found("provider not found"));
-    }
-    if document.providers.len() == 1 {
-        return Err(ApiError::bad_request(
-            "at least one provider must remain configured",
-        ));
     }
     document.providers.remove(&id);
     if document.active == id {
@@ -1363,9 +1349,11 @@ async fn activate_provider(
 ) -> Result<Json<Value>, ApiError> {
     let path = providers_path(&state.home);
     let mut document = read_provider_document(&state.home).map_err(ApiError::from)?;
-    if !document.providers.contains_key(&id) {
-        return Err(ApiError::not_found("provider not found"));
-    }
+    let provider = document
+        .providers
+        .get(&id)
+        .ok_or_else(|| ApiError::not_found("provider not found"))?;
+    validate_provider_activation(provider)?;
     document.active = id;
     document.save(&path).map_err(ApiError::from)?;
     Ok(Json(json!({"ok": true})))
@@ -1409,9 +1397,15 @@ async fn reveal_provider_key(
 async fn discover_provider_models(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
+    body: Option<Json<Value>>,
 ) -> Result<Json<Value>, ApiError> {
     let path = providers_path(&state.home);
     let mut document = read_provider_document(&state.home).map_err(ApiError::from)?;
+    let persist = body
+        .as_ref()
+        .and_then(|Json(value)| value.get("persist"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
     let provider = document
         .providers
         .get(&id)
@@ -1423,12 +1417,12 @@ async fn discover_provider_models(
             "provider returned no available models",
         ));
     }
-    if let Some(settings) = document.providers.get_mut(&id) {
-        settings
-            .extra
-            .insert("models".into(), json!(models.clone()));
+    if persist {
+        if let Some(settings) = document.providers.get_mut(&id) {
+            apply_provider_models(settings, &models, document.active == id)?;
+        }
+        document.save(&path).map_err(ApiError::from)?;
     }
-    document.save(&path).map_err(ApiError::from)?;
     Ok(Json(json!({"models": models})))
 }
 
@@ -2497,6 +2491,7 @@ fn provider_json(id: &str, provider: &ProviderSettings, active: bool) -> Value {
         "fastModel": provider.fast_model,
         "toolProtocol": provider.tool_protocol,
         "contextWindow": provider.context_window.unwrap_or(256_000),
+        "modelContextWindows": provider.model_context_windows,
         "supportsWebSearch": provider.supports_web_search,
         "supportsVision": provider.supports_vision,
         "active": active,
@@ -2584,6 +2579,109 @@ fn string_field(value: &Value, key: &str) -> Option<String> {
         .map(|value| value.trim().to_owned())
 }
 
+fn parse_model_array(value: &Value) -> Result<Option<Vec<String>>, ApiError> {
+    let Some(raw) = value.get("models") else {
+        return Ok(None);
+    };
+    let array = raw
+        .as_array()
+        .ok_or_else(|| ApiError::bad_request("models must be an array"))?;
+    let mut models = Vec::new();
+    for model in array.iter().filter_map(Value::as_str).map(str::trim) {
+        if !model.is_empty() && !models.iter().any(|existing| existing == model) {
+            models.push(model.to_owned());
+        }
+    }
+    Ok(Some(models))
+}
+
+fn parse_model_context_windows(value: &Value) -> Result<BTreeMap<String, u64>, ApiError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| ApiError::bad_request("modelContextWindows must be an object"))?;
+    let mut windows = BTreeMap::new();
+    for (model, value) in object {
+        let model = model.trim();
+        if model.is_empty() {
+            continue;
+        }
+        let window = value
+            .as_u64()
+            .ok_or_else(|| ApiError::bad_request("model context window must be an integer"))?;
+        if !(32_000..=1_048_576).contains(&window) {
+            return Err(ApiError::bad_request(
+                "model context window must be between 32000 and 1048576",
+            ));
+        }
+        windows.insert(model.to_owned(), window);
+    }
+    Ok(windows)
+}
+
+fn replace_provider_models(provider: &mut ProviderSettings, models: &[String]) {
+    if models.is_empty() {
+        provider.extra.remove("models");
+        provider.model.clear();
+        provider.fast_model = None;
+        return;
+    }
+    provider.extra.insert("models".into(), json!(models));
+    provider.model = models[0].clone();
+    provider.fast_model = models.get(1).cloned();
+}
+
+fn apply_provider_models(
+    provider: &mut ProviderSettings,
+    models: &[String],
+    active: bool,
+) -> Result<(), ApiError> {
+    if active && models.is_empty() {
+        return Err(ApiError::bad_request(
+            "active provider cannot have an empty model list",
+        ));
+    }
+    replace_provider_models(provider, models);
+    Ok(())
+}
+
+fn validate_provider_activation(provider: &ProviderSettings) -> Result<(), ApiError> {
+    if provider.api_key.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "provider must have an API key before activation",
+        ));
+    }
+    let models = provider_models(provider);
+    if provider.model.trim().is_empty() || models.is_empty() {
+        return Err(ApiError::bad_request(
+            "provider must have a model before activation",
+        ));
+    }
+    if let Some(declared) = provider.extra.get("models").and_then(Value::as_array) {
+        let declared = declared
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|model| !model.is_empty());
+        if !declared.clone().any(|model| model == provider.model.trim()) {
+            return Err(ApiError::bad_request(
+                "provider model must be declared in its model list before activation",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn persist_discovered_models(
+    provider: &mut ProviderSettings,
+    models: &[String],
+    persist: bool,
+) {
+    if persist {
+        replace_provider_models(provider, models);
+    }
+}
+
 fn default_base_url(id: &str) -> String {
     match id.to_ascii_lowercase().as_str() {
         "openai" => "https://api.openai.com/v1",
@@ -2592,6 +2690,7 @@ fn default_base_url(id: &str) -> String {
         "deepseek" => "https://api.deepseek.com/v1",
         "zhipu" => "https://open.bigmodel.cn/api/paas/v4",
         "minimax" => "https://api.minimaxi.com/v1",
+        "opencode" => "https://opencode.ai/zen/go/v1",
         _ => "",
     }
     .to_owned()
@@ -2701,6 +2800,92 @@ mod tests {
         assert_eq!(value["models"], json!(["main", "fast"]));
         assert_eq!(value["contextWindow"], 256_000);
         assert!(!value.to_string().contains("secret-123456"));
+    }
+
+    #[test]
+    fn model_array_is_normalized_and_replaces_existing_models() {
+        let input = json!({"models": [" new-a ", "", "new-a", "new-b"]});
+        let models = parse_model_array(&input)
+            .expect("model array should parse")
+            .expect("models field should be present");
+        assert_eq!(models, vec!["new-a", "new-b"]);
+
+        let mut provider = ProviderSettings {
+            model: "old".into(),
+            fast_model: Some("old-fast".into()),
+            extra: BTreeMap::from([(String::from("models"), json!(["old", "old-fast"]))]),
+            ..ProviderSettings::default()
+        };
+        replace_provider_models(&mut provider, &models);
+        assert_eq!(provider.model, "new-a");
+        assert_eq!(provider.fast_model.as_deref(), Some("new-b"));
+        assert_eq!(provider_models(&provider), models);
+    }
+
+    #[test]
+    fn empty_model_array_clears_non_active_provider() {
+        let input = json!({"models": []});
+        let models = parse_model_array(&input)
+            .expect("model array should parse")
+            .expect("models field should be present");
+        let mut provider = ProviderSettings {
+            model: "old".into(),
+            fast_model: Some("old-fast".into()),
+            extra: BTreeMap::from([(String::from("models"), json!(["old", "old-fast"]))]),
+            ..ProviderSettings::default()
+        };
+        apply_provider_models(&mut provider, &models, false).expect("non-active clear");
+        assert!(provider.model.is_empty());
+        assert!(provider.fast_model.is_none());
+        assert!(provider.extra.get("models").is_none());
+    }
+
+    #[test]
+    fn empty_model_array_is_rejected_for_active_provider() {
+        let mut provider = ProviderSettings::default();
+        let error = apply_provider_models(&mut provider, &[], true)
+            .expect_err("active provider must not be cleared");
+        assert!(error.message.contains("active provider"));
+    }
+
+    #[test]
+    fn activation_requires_key_and_declared_model() {
+        let mut provider = ProviderSettings {
+            api_key: "secret".into(),
+            model: "main".into(),
+            extra: BTreeMap::from([(String::from("models"), json!(["main", "fast"]))]),
+            ..ProviderSettings::default()
+        };
+        validate_provider_activation(&provider).expect("declared model can be activated");
+
+        provider.api_key.clear();
+        assert!(validate_provider_activation(&provider)
+            .expect_err("activation needs an API key")
+            .message
+            .contains("API key"));
+
+        provider.api_key = "secret".into();
+        provider.model = "missing".into();
+        provider.extra.insert("models".into(), json!(["main", "fast"]));
+        assert!(validate_provider_activation(&provider)
+            .expect_err("activation needs a declared model")
+            .message
+            .contains("declared"));
+    }
+
+    #[test]
+    fn discovery_preview_does_not_persist_models() {
+        let mut provider = ProviderSettings {
+            model: "old".into(),
+            extra: BTreeMap::from([(String::from("models"), json!(["old"]))]),
+            ..ProviderSettings::default()
+        };
+        let original = provider_models(&provider);
+        let candidates = vec!["new-a".to_string(), "new-b".to_string()];
+        persist_discovered_models(&mut provider, &candidates, false);
+        assert_eq!(provider_models(&provider), original);
+        persist_discovered_models(&mut provider, &candidates, true);
+        assert_eq!(provider_models(&provider), candidates);
     }
 
     #[test]

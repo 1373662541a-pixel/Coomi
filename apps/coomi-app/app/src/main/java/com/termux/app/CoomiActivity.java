@@ -41,6 +41,7 @@ import app.coomi.CoomiDemo;
 import app.coomi.CoomiEngineMonitor;
 import app.coomi.CoomiService;
 import app.coomi.CoomiDashboardActivity;
+import app.coomi.CoomiSetupActivity;
 import app.coomi.CoomiTheme;
 import com.termux.R;
 import com.termux.shared.logger.Logger;
@@ -77,6 +78,8 @@ public class CoomiActivity extends Activity {
 
     /** Intent extra：直达前端 hash 路由，如 "#/catalog"。 */
     public static final String EXTRA_ROUTE = "coomi.route";
+    /** Return to the setup wizard instead of the dashboard when leaving a setup route. */
+    public static final String EXTRA_RETURN_TO_SETUP = "coomi.return_to_setup";
 
     private WebView mWebView;
     private View mSplash;
@@ -344,6 +347,14 @@ public class CoomiActivity extends Activity {
     }
 
     private void openDashboard() {
+        if (getIntent().getBooleanExtra(EXTRA_RETURN_TO_SETUP, false)) {
+            Intent intent = new Intent(this, CoomiSetupActivity.class);
+            intent.putExtra(CoomiSetupActivity.EXTRA_START_STEP, CoomiConstants.STEP_AUTH);
+            intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            startActivity(intent);
+            finish();
+            return;
+        }
         Intent intent = new Intent(this, CoomiDashboardActivity.class);
         intent.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
         startActivity(intent);

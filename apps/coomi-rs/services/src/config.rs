@@ -55,6 +55,8 @@ pub struct ProviderConfig {
     pub fast_model: Option<String>,
     /// 前端保存的模型列表（extra.models），用于 resolve 校验“已声明模型”。
     pub models: Vec<String>,
+    /// 模型级上下文窗口覆盖；未命中时使用供应商默认值。
+    pub model_context_windows: BTreeMap<String, u64>,
     pub capabilities: coomi_engine::ModelCapabilities,
     pub remote_compaction_mode: RemoteCompactionMode,
 }
@@ -70,6 +72,7 @@ impl std::fmt::Debug for ProviderConfig {
             .field("base_url", &self.base_url)
             .field("model", &self.model)
             .field("fast_model", &self.fast_model)
+            .field("model_context_windows", &self.model_context_windows)
             .field("capabilities", &self.capabilities)
             .field("remote_compaction_mode", &self.remote_compaction_mode)
             .finish()
@@ -119,6 +122,8 @@ pub struct ProviderSettings {
     pub fast_model: Option<String>,
     #[serde(default)]
     pub context_window: Option<u64>,
+    #[serde(default)]
+    pub model_context_windows: BTreeMap<String, u64>,
     #[serde(default)]
     pub effective_context_window_percent: Option<u8>,
     #[serde(default)]
@@ -175,6 +180,27 @@ impl ProviderRegistry {
             } else {
                 provider.display
             };
+            let mut capabilities = coomi_engine::ModelCapabilities {
+                context_window: provider.context_window.unwrap_or(256_000),
+                effective_context_window_percent: provider
+                    .effective_context_window_percent
+                    .unwrap_or(95)
+                    .clamp(1, 100),
+                auto_compact_token_limit: provider.auto_compact_token_limit,
+                auto_compact_scope: provider.auto_compact_scope,
+                comp_hash: provider.comp_hash,
+                max_output_tokens: provider.max_output_tokens.unwrap_or(8_192),
+                supports_remote_compaction: provider
+                    .supports_remote_compaction
+                    .unwrap_or(kind == ProviderKind::OpenAiResponses),
+                supports_vision: provider.supports_vision,
+                supports_native_tools: provider.supports_native_tools,
+                supports_web_search: provider.supports_web_search,
+                supports_parallel_tool_calls: provider.supports_parallel_tool_calls,
+            };
+            if let Some(window) = provider.model_context_windows.get(&provider.model) {
+                capabilities.context_window = *window;
+            }
             providers.insert(
                 id.clone(),
                 ProviderConfig {
@@ -194,24 +220,8 @@ impl ProviderRegistry {
                         .filter_map(Value::as_str)
                         .map(str::to_string)
                         .collect(),
-                    capabilities: coomi_engine::ModelCapabilities {
-                        context_window: provider.context_window.unwrap_or(256_000),
-                        effective_context_window_percent: provider
-                            .effective_context_window_percent
-                            .unwrap_or(95)
-                            .clamp(1, 100),
-                        auto_compact_token_limit: provider.auto_compact_token_limit,
-                        auto_compact_scope: provider.auto_compact_scope,
-                        comp_hash: provider.comp_hash,
-                        max_output_tokens: provider.max_output_tokens.unwrap_or(8_192),
-                        supports_remote_compaction: provider
-                            .supports_remote_compaction
-                            .unwrap_or(kind == ProviderKind::OpenAiResponses),
-                        supports_vision: provider.supports_vision,
-                        supports_native_tools: provider.supports_native_tools,
-                        supports_web_search: provider.supports_web_search,
-                        supports_parallel_tool_calls: provider.supports_parallel_tool_calls,
-                    },
+                    model_context_windows: provider.model_context_windows,
+                    capabilities,
                     remote_compaction_mode: provider.remote_compaction_mode,
                 },
             );
@@ -279,6 +289,7 @@ impl ProviderRegistry {
                     .context("model choice references a missing provider")?
                     .clone();
                 provider.model = choice.model;
+                apply_model_context_window(&mut provider);
                 return Ok(provider);
             }
         }
@@ -297,6 +308,7 @@ impl ProviderRegistry {
             if allowed {
                 let mut provider = provider.clone();
                 provider.model = model.to_string();
+                apply_model_context_window(&mut provider);
                 return Ok(provider);
             }
             anyhow::bail!(
@@ -314,6 +326,12 @@ impl ProviderRegistry {
                 .values()
                 .find(|provider| provider.id.eq_ignore_ascii_case(id))
         })
+    }
+}
+
+fn apply_model_context_window(provider: &mut ProviderConfig) {
+    if let Some(window) = provider.model_context_windows.get(&provider.model) {
+        provider.capabilities.context_window = *window;
     }
 }
 
@@ -335,20 +353,18 @@ impl ProviderDocument {
     }
 
     pub fn validate(&self) -> Result<()> {
-        anyhow::ensure!(
-            !self.providers.is_empty(),
-            "at least one provider is required"
-        );
-        anyhow::ensure!(
-            self.providers.contains_key(&self.active),
-            "active provider `{}` does not exist",
-            self.active
-        );
+        if !self.active.is_empty() {
+            anyhow::ensure!(
+                self.providers.contains_key(&self.active),
+                "active provider `{}` does not exist",
+                self.active
+            );
+        }
         for (id, provider) in &self.providers {
             anyhow::ensure!(!id.trim().is_empty(), "provider ID must not be empty");
             // 未激活的 provider 允许空模型/空 Base URL（草稿态：先保存配置，
             // 检索出模型后再补全并激活）。只有当前激活的 provider 必须完整可用。
-            if id == &self.active {
+            if !self.active.is_empty() && id == &self.active {
                 anyhow::ensure!(
                     !provider.model.trim().is_empty(),
                     "active provider `{id}` has no model"
@@ -375,6 +391,7 @@ impl Default for ProviderSettings {
             model: String::new(),
             fast_model: None,
             context_window: None,
+            model_context_windows: BTreeMap::new(),
             effective_context_window_percent: None,
             auto_compact_token_limit: None,
             auto_compact_scope: coomi_engine::AutoCompactScope::Total,
@@ -434,5 +451,29 @@ mod tests {
                 .effective_context_window(),
             243_200
         );
+    }
+
+    #[test]
+    fn provider_document_allows_empty_or_unactivated_drafts() {
+        let empty = ProviderDocument {
+            active: String::new(),
+            providers: BTreeMap::new(),
+            extra: BTreeMap::new(),
+        };
+        empty.validate().expect("empty document is valid for presets");
+
+        let draft = ProviderDocument {
+            active: String::new(),
+            providers: BTreeMap::from([(
+                String::from("openai"),
+                ProviderSettings {
+                    display: "OpenAI".into(),
+                    base_url: "https://api.openai.com/v1".into(),
+                    ..ProviderSettings::default()
+                },
+            )]),
+            extra: BTreeMap::new(),
+        };
+        draft.validate().expect("unactivated draft is valid");
     }
 }

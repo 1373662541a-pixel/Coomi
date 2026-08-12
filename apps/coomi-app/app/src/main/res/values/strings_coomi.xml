@@ -55,8 +55,12 @@
 
     <!-- ===== 步骤二：模型配置 ===== -->
     <string name="coomi_auth_title">连接模型</string>
-    <string name="coomi_auth_subtitle">选择服务商并填入 API Key，Key 只保存在本机配置文件里。</string>
+    <string name="coomi_auth_subtitle">在统一的 Provider 管理页面中配置服务商、API Key 和模型。</string>
     <string name="coomi_auth_section_provider">服务商</string>
+    <string name="coomi_auth_provider_hint">新的 Provider 页面支持内置服务商、自定义服务商和模型管理。</string>
+    <string name="coomi_auth_open_providers">打开 Provider 配置</string>
+    <string name="coomi_auth_provider_required">请先打开 Provider 配置并完成一个服务商配置。</string>
+    <string name="coomi_auth_provider_ready">Provider 已配置，可以继续。</string>
     <string name="coomi_auth_section_key">凭据</string>
     <string name="coomi_auth_key_label">API Key</string>
     <string name="coomi_auth_key_hint">粘贴你的 API Key</string>
