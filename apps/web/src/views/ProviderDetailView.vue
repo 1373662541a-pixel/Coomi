@@ -8,6 +8,7 @@ import {
   BUILTIN_PROVIDER_PRESETS,
   useConfigStore,
   type ProviderConfig,
+  type ProviderInput,
   type ProviderProtocol,
 } from '@/stores/config'
 
@@ -195,14 +196,8 @@ function discardAndBack() {
   router.push('/providers')
 }
 
-async function saveConfig() {
-  if (!draft.value || !canSave.value) return false
-  const value = draft.value
-  value.models = normalizeModels(value.models)
-  const startedAt = Date.now()
-  saving.value = true
-  error.value = ''
-  const ok = await config.upsertProvider({
+function providerInput(value: ProviderDraft): ProviderInput {
+  return {
     id: value.id.trim(),
     name: value.name.trim(),
     apiKey: value.apiKey.trim(),
@@ -211,11 +206,23 @@ async function saveConfig() {
     baseUrl: value.baseUrl.trim(),
     type: value.protocol,
     toolProtocol: value.protocol,
-    contextWindow: value.contextWindow === 0 ? Math.max(32, Math.min(1048, Math.round(customContextWindow.value || 64))) * 1000 : value.contextWindow,
+    contextWindow: value.contextWindow === 0
+      ? Math.max(32, Math.min(1048, Math.round(customContextWindow.value || 64))) * 1000
+      : value.contextWindow,
     supportsWebSearch: value.supportsWebSearch,
     supportsVision: value.supportsVision,
     activate: false,
-  })
+  }
+}
+
+async function saveProvider(successMessage: string, returnToList = false) {
+  if (!draft.value || !canSave.value) return false
+  const value = draft.value
+  value.models = normalizeModels(value.models)
+  const startedAt = Date.now()
+  saving.value = true
+  error.value = ''
+  const ok = await config.upsertProvider(providerInput(value))
   await waitForSaveFeedback(startedAt)
   saving.value = false
   if (!ok) {
@@ -224,43 +231,25 @@ async function saveConfig() {
   }
   idLocked.value = true
   original.value = clone(value)
-  message.value = '配置已保存'
-  if (isNew.value) {
+  message.value = successMessage
+  if (returnToList) {
+    await router.replace('/providers')
+  } else if (isNew.value) {
     await router.replace(`/providers/${encodeURIComponent(value.id)}`)
   }
   return true
 }
 
+async function saveConfig() {
+  return saveProvider('配置已保存')
+}
+
+async function saveConfigAndBack() {
+  return saveProvider('配置已保存', true)
+}
+
 async function saveModels() {
-  if (!draft.value) return false
-  if (!(await saveConfig())) return false
-  const value = draft.value
-  const startedAt = Date.now()
-  saving.value = true
-  error.value = ''
-  const ok = await config.upsertProvider({
-    id: value.id,
-    name: value.name,
-    apiKey: '',
-    models: [...value.models],
-    modelContextWindows: { ...value.modelContextWindows },
-    baseUrl: value.baseUrl,
-    type: value.protocol,
-    toolProtocol: value.protocol,
-    contextWindow: value.contextWindow === 0 ? Math.max(32, Math.min(1048, Math.round(customContextWindow.value || 64))) * 1000 : value.contextWindow,
-    supportsWebSearch: value.supportsWebSearch,
-    supportsVision: value.supportsVision,
-    activate: false,
-  })
-  await waitForSaveFeedback(startedAt)
-  saving.value = false
-  if (!ok) {
-    error.value = config.lastError || '模型保存失败'
-    return false
-  }
-  original.value = clone(value)
-  message.value = '模型列表已保存'
-  return true
+  return saveProvider('模型列表已保存')
 }
 
 async function revealKey() {
@@ -319,13 +308,9 @@ function removeModel(model: string) {
 
 async function clearBuiltin() {
   if (!draft.value || !isBuiltin.value) return
-  if (isCurrent.value) {
-    error.value = '请先切换到其他供应商，再清空当前供应商'
-    pendingClear.value = false
-    return
-  }
   pendingClear.value = false
-  if (!(await config.clearProvider(draft.value.id))) {
+  const hasSavedConfig = config.providers.some(provider => provider.id === draft.value?.id)
+  if (hasSavedConfig && !(await config.deleteProvider(draft.value.id))) {
     error.value = config.lastError || '清空失败'
     return
   }
@@ -369,7 +354,7 @@ function openModelConfig() {
   <div class="page">
     <PageHead :title="draft?.name || (isNew ? '新建供应商' : '供应商详情')" @back="back">
       <template #right>
-        <button v-if="tab === 'config'" class="head-save" :disabled="!canSave || saving" @click="saveConfig">保存</button>
+        <button v-if="tab === 'config'" class="head-save" :disabled="!canSave || saving" @click="saveConfigAndBack">保存</button>
       </template>
     </PageHead>
 
@@ -475,7 +460,7 @@ function openModelConfig() {
       </section>
 
       <div class="danger-area">
-        <button v-if="isBuiltin" class="danger-link" :disabled="isCurrent" @click="pendingClear = true">清空配置</button>
+        <button v-if="isBuiltin" class="danger-link" @click="pendingClear = true">清空配置</button>
         <button v-else class="danger-link" :disabled="isCurrent" @click="pendingDelete = true">删除供应商</button>
       </div>
     </main>

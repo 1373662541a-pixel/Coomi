@@ -322,6 +322,7 @@ export const useConfigStore = defineStore('config', () => {
   }
 
   async function deleteProvider(id: string): Promise<boolean> {
+    if (!id.trim()) return true
     if (usingMock.value) {
       const remaining = providers.value.filter(p => p.id !== id)
       applyList(remaining, activeId.value === id ? (remaining[0]?.id ?? '') : activeId.value)
@@ -391,17 +392,11 @@ export const useConfigStore = defineStore('config', () => {
     }
   }
 
-  /** 内置 Provider 清空配置时删除已保存条目，预置行仍会保留。 */
-  async function clearProvider(id: string): Promise<boolean> {
-    if (!providers.value.some(provider => provider.id === id)) return true
-    return deleteProvider(id)
-  }
-
   return {
     permissionMode, planMode, themeMode, globalMemory, customPrompt, providers, activeId, loading, usingMock, lastError,
     currentProviderId, currentModel, currentProvider, mergedProviders,
     fetchProviders, selectModel, setPermissionMode, setThemeMode, cyclePermissionMode, togglePlanMode,
     toggleGlobalMemory, syncGlobalMemoryFromEngine, fetchCustomPrompt, saveCustomPrompt,
-    upsertProvider, deleteProvider, clearProvider, activateProvider, copyProvider, revealProviderKey, discoverModels,
+    upsertProvider, deleteProvider, activateProvider, copyProvider, revealProviderKey, discoverModels,
   }
 })

@@ -69,7 +69,6 @@ function backToDashboard() {
       </div>
 
       <p v-if="!config.loading && providers.length === 0" class="hint">还没有供应商配置。</p>
-      <p class="note">内置供应商会一直显示；只有保存配置后才会写入应用配置。</p>
     </main>
   </div>
 </template>
@@ -106,5 +105,4 @@ function backToDashboard() {
 .status.configured { color: var(--ok); background: var(--ok-soft); }
 .status.current { color: var(--blue); background: var(--blue-soft); }
 .arrow { flex-shrink: 0; color: var(--text-3); }
-.note { margin: 14px 4px 0; font-size: 12px; line-height: 1.7; color: var(--text-3); }
 </style>

@@ -11,6 +11,7 @@ import org.json.JSONObject;
 import java.io.File;
 import java.io.FileReader;
 import java.io.FileWriter;
+import java.util.Iterator;
 
 /** Reads and writes the native coomi-rs provider registry. */
 public final class CoomiConfig {
@@ -174,10 +175,33 @@ public final class CoomiConfig {
     }
 
     public static boolean isConfigured() {
-        JSONObject document = readConfig();
-        String active = document.optString("active", "");
-        JSONObject providers = document.optJSONObject("providers");
-        JSONObject provider = providers == null ? null : providers.optJSONObject(active);
+        synchronized (CONFIG_LOCK) {
+            JSONObject document = readConfig();
+            JSONObject providers = document.optJSONObject("providers");
+            if (providers == null) return false;
+
+            String active = document.optString("active", "");
+            if (isProviderConfigured(providers.optJSONObject(active))) return true;
+
+            // Provider 页面允许保存配置而不设置“当前”；首次完成引导时，
+            // 选第一个完整配置作为运行时默认，保持对话中的模型仍可自由切换。
+            Iterator<String> keys = providers.keys();
+            while (keys.hasNext()) {
+                String id = keys.next();
+                if (!isProviderConfigured(providers.optJSONObject(id))) continue;
+                try {
+                    document.put("active", id);
+                } catch (JSONException e) {
+                    Logger.logError(LOG_TAG, "Cannot select configured provider: " + e.getMessage());
+                    return false;
+                }
+                return writeConfig(document);
+            }
+            return false;
+        }
+    }
+
+    private static boolean isProviderConfigured(JSONObject provider) {
         return provider != null
             && !TextUtils.isEmpty(provider.optString("model"))
             && !TextUtils.isEmpty(provider.optString("base_url"))
