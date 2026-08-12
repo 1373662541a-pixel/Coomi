@@ -50,6 +50,7 @@ pub struct Agent {
     /// 为 false 时（图片降级会话）每个模型请求前都会剥离历史/当轮
     /// 工具消息携带的图片，避免上游拒绝图片导致整会话反复失败。
     vision_replay: bool,
+    reasoning_effort: Option<String>,
     /// 上下文检查点回调：任务执行中的关键节点（用户消息、模型回复、每轮
     /// 工具结果）落盘会话，意外中断/重启后仍能从磁盘恢复完整上下文。
     checkpoint: Option<Arc<dyn Fn(&Session) + Send + Sync>>,
@@ -59,10 +60,11 @@ impl Agent {
     pub fn new(system_prompt: impl Into<String>) -> Self {
         Self {
             system_prompt: system_prompt.into(),
-            max_tool_rounds: 96,
+            max_tool_rounds: 192,
             force_compaction: false,
             input_queue: None,
             vision_replay: true,
+            reasoning_effort: None,
             checkpoint: None,
         }
     }
@@ -87,7 +89,7 @@ impl Agent {
     }
 
     pub fn with_max_tool_rounds(mut self, max_tool_rounds: usize) -> Self {
-        self.max_tool_rounds = max_tool_rounds.max(1);
+        self.max_tool_rounds = max_tool_rounds.clamp(1, 512);
         self
     }
 
@@ -98,6 +100,11 @@ impl Agent {
 
     pub fn with_vision_replay(mut self, vision_replay: bool) -> Self {
         self.vision_replay = vision_replay;
+        self
+    }
+
+    pub fn with_reasoning_effort(mut self, effort: impl Into<String>) -> Self {
+        self.reasoning_effort = Some(effort.into());
         self
     }
 
@@ -113,6 +120,29 @@ impl Agent {
         self.run_accounted_turn(
             session,
             ChatMessage::user(prompt),
+            provider,
+            tools,
+            approval,
+            observer,
+        )
+        .await
+    }
+
+    /// Resume an interrupted turn without presenting the recovery instruction as a
+    /// new user-authored message in clients or transcript-derived metadata.
+    pub async fn continue_interrupted_turn(
+        &self,
+        session: &mut Session,
+        provider: &dyn ModelProvider,
+        tools: &dyn ToolRuntime,
+        approval: &dyn ApprovalHandler,
+        observer: &dyn AgentObserver,
+    ) -> Result<String, AgentError> {
+        self.run_accounted_turn(
+            session,
+            ChatMessage::internal_user(
+                "<recovery_context>The previous turn was interrupted by a temporary network or upstream service failure. Continue from the current session checkpoint, complete only the unfinished work, and do not repeat completed tool operations.</recovery_context>",
+            ),
             provider,
             tools,
             approval,
@@ -185,7 +215,8 @@ impl Agent {
         approval: &dyn ApprovalHandler,
         observer: &dyn AgentObserver,
     ) -> Result<String, AgentError> {
-        let usage_before = session.usage.total_tokens();
+        let usage_snapshot = session.usage.clone();
+        let usage_before = usage_snapshot.total_tokens();
         let started = Instant::now();
         let mut result = self
             .run_turn_message(session, prompt, provider, tools, approval, observer)
@@ -214,6 +245,12 @@ impl Agent {
             result.as_ref().err(),
             observer,
         );
+        if result.is_ok() {
+            observer.on_event(&AgentEvent::TurnCompleted {
+                total: session.usage.clone(),
+                turn: session.usage.saturating_sub(&usage_snapshot),
+            });
+        }
         result
     }
 
@@ -303,9 +340,13 @@ impl Agent {
                 model: provider.model().to_string(),
                 messages,
                 tools: tool_specs.clone(),
+                reasoning_effort: self.reasoning_effort.clone(),
             };
             let stream_observer = ObserverStream { observer };
-            let response = match provider.complete_stream(request, &stream_observer).await {
+            let response = match provider
+                .complete_stream(request.clone(), &stream_observer)
+                .await
+            {
                 Ok(response) => response,
                 Err(error) if !compacted_for_provider_error && is_context_window_error(&error) => {
                     compacted_for_provider_error = true;
@@ -314,10 +355,28 @@ impl Agent {
                     self.run_checkpoint(session);
                     continue;
                 }
+                Err(error) if is_transient_provider_error(&error) => {
+                    observer.on_event(&AgentEvent::StreamReset);
+                    observer.on_event(&AgentEvent::ConnectionRetry {
+                        attempt: 1,
+                        max_attempts: 1,
+                        delay_ms: 2000,
+                        message: "网络或上游服务暂时不可用，正在自动恢复".into(),
+                    });
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    match provider.complete_stream(request, &stream_observer).await {
+                        Ok(response) => response,
+                        Err(retry_error) => return Err(AgentError::Provider(retry_error)),
+                    }
+                }
                 Err(error) => return Err(AgentError::Provider(error)),
             };
 
             session.usage.add(&response.usage);
+            observer.on_event(&AgentEvent::ModelUsage {
+                total: session.usage.clone(),
+                request: response.usage.clone(),
+            });
             if !response.streamed && !response.content.is_empty() {
                 observer.on_event(&AgentEvent::Text(response.content.clone()));
             }
@@ -342,7 +401,6 @@ impl Agent {
                     continue;
                 }
                 session.touch();
-                observer.on_event(&AgentEvent::TurnCompleted(session.usage.clone()));
                 return Ok(response.content);
             }
 
@@ -432,6 +490,7 @@ impl Agent {
                     model: provider.model().to_string(),
                     messages: compact_input,
                     tools: Vec::new(),
+                    reasoning_effort: None,
                 })
                 .await
                 .map_err(AgentError::Compaction)?;
@@ -472,6 +531,32 @@ impl Agent {
         observer.on_event(&AgentEvent::QueuedInputAccepted(messages));
         true
     }
+}
+
+fn is_transient_provider_error(error: &anyhow::Error) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    if ["http 400", "http 401", "http 402", "http 403", "http 404"]
+        .iter()
+        .any(|status| text.contains(status))
+    {
+        return false;
+    }
+    [
+        "timed out",
+        "timeout",
+        "connection",
+        "dns",
+        "reset",
+        "broken pipe",
+        "stream failed",
+        "502",
+        "503",
+        "504",
+        "429",
+        "temporarily unavailable",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
 }
 
 fn update_loop_accounting(
@@ -785,6 +870,23 @@ mod tests {
         assert!(session.messages.last().is_some_and(|message| {
             message.compaction_summary && message.content.contains("summary")
         }));
+    }
+
+    #[test]
+    fn transient_retry_excludes_non_retryable_http_statuses() {
+        for status in [400, 401, 402, 403, 404] {
+            assert!(!is_transient_provider_error(&anyhow::anyhow!(
+                "provider returned HTTP {status}: connection field invalid"
+            )));
+        }
+        for status in [429, 502, 503, 504] {
+            assert!(is_transient_provider_error(&anyhow::anyhow!(
+                "provider returned HTTP {status}"
+            )));
+        }
+        assert!(is_transient_provider_error(&anyhow::anyhow!(
+            "provider stream failed: connection reset"
+        )));
     }
 
     #[test]

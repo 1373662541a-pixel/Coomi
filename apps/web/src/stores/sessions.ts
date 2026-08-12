@@ -238,7 +238,9 @@ export const useSessionsStore = defineStore('sessions', () => {
    */
   function touch(id: string, patch: Partial<Pick<SessionMeta, 'title' | 'turns'>> = {}) {
     const m = ensure(id)
-    if (patch.title) m.title = patch.title
+    // Automatic titles may arrive again after reconnecting or syncing with the engine.
+    // Once the user has renamed a session, that explicit title always wins.
+    if (patch.title && !m.renamed) m.title = patch.title
     if (patch.turns != null) m.turns = patch.turns
     persistMeta()
   }

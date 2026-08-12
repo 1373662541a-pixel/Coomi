@@ -68,11 +68,8 @@ impl HttpModelProvider {
             );
             body["tool_choice"] = Value::String("auto".into());
         }
-        let response = self
-            .authenticated(self.client.post(endpoint))
-            .json(&body)
-            .send()
-            .await?;
+        apply_reasoning_effort(&mut body, request.reasoning_effort.as_deref(), false);
+        let response = self.send_with_reasoning_fallback(&endpoint, &body).await?;
         let value = checked_json(response).await?;
         let message = value
             .pointer("/choices/0/message")
@@ -120,11 +117,8 @@ impl HttpModelProvider {
             );
             body["tool_choice"] = Value::String("auto".into());
         }
-        let response = self
-            .authenticated(self.client.post(endpoint))
-            .json(&body)
-            .send()
-            .await?;
+        apply_reasoning_effort(&mut body, request.reasoning_effort.as_deref(), false);
+        let response = self.send_with_reasoning_fallback(&endpoint, &body).await?;
         let status = response.status();
         if !status.is_success() {
             return checked_json(response)
@@ -253,11 +247,8 @@ impl HttpModelProvider {
             body["tools"] = Value::Array(provider_tools);
             body["tool_choice"] = Value::String("auto".into());
         }
-        let response = self
-            .authenticated(self.client.post(endpoint))
-            .json(&body)
-            .send()
-            .await?;
+        apply_reasoning_effort(&mut body, request.reasoning_effort.as_deref(), true);
+        let response = self.send_with_reasoning_fallback(&endpoint, &body).await?;
         let value = checked_json(response).await?;
         let mut content = String::new();
         let mut tool_calls = Vec::new();
@@ -314,11 +305,8 @@ impl HttpModelProvider {
             body["tools"] = Value::Array(provider_tools);
             body["tool_choice"] = Value::String("auto".into());
         }
-        let response = self
-            .authenticated(self.client.post(endpoint))
-            .json(&body)
-            .send()
-            .await?;
+        apply_reasoning_effort(&mut body, request.reasoning_effort.as_deref(), true);
+        let response = self.send_with_reasoning_fallback(&endpoint, &body).await?;
         let status = response.status();
         if !status.is_success() {
             return checked_json(response)
@@ -397,15 +385,11 @@ impl HttpModelProvider {
                 _ => {}
             }
         }
-        let usage = value.get("usage");
+        let usage = anthropic_usage(value.get("usage"));
         Ok(ModelResponse {
             content,
             tool_calls,
-            usage: TokenUsage {
-                input_tokens: nested_u64(usage, "input_tokens"),
-                cached_input_tokens: nested_u64(usage, "cache_read_input_tokens"),
-                output_tokens: nested_u64(usage, "output_tokens"),
-            },
+            usage,
             streamed: false,
         })
     }
@@ -480,7 +464,16 @@ impl HttpModelProvider {
             usage: TokenUsage {
                 input_tokens: nested_u64(usage, "promptTokenCount"),
                 cached_input_tokens: nested_u64(usage, "cachedContentTokenCount"),
+                cache_observed_input_tokens: if usage
+                    .is_some_and(|value| value.get("cachedContentTokenCount").is_some())
+                {
+                    nested_u64(usage, "promptTokenCount")
+                } else {
+                    0
+                },
                 output_tokens: nested_u64(usage, "candidatesTokenCount"),
+                cache_data_available: usage
+                    .is_some_and(|value| value.get("cachedContentTokenCount").is_some()),
             },
             streamed: false,
         })
@@ -493,6 +486,71 @@ impl HttpModelProvider {
             builder.bearer_auth(&self.config.api_key)
         }
     }
+
+    async fn send_with_reasoning_fallback(&self, endpoint: &str, body: &Value) -> Result<Response> {
+        let response = self
+            .authenticated(self.client.post(endpoint))
+            .json(body)
+            .send()
+            .await?;
+        if response.status().as_u16() != 400 || !has_reasoning_field(body) {
+            return Ok(response);
+        }
+
+        let status = response.status();
+        let response_body = response
+            .text()
+            .await
+            .context("failed to read provider response")?;
+        if !rejects_reasoning_field(&response_body) {
+            let detail = response_body.chars().take(800).collect::<String>();
+            anyhow::bail!("provider returned HTTP {status}: {detail}")
+        }
+
+        let mut fallback = body.clone();
+        remove_reasoning_fields(&mut fallback);
+        Ok(self
+            .authenticated(self.client.post(endpoint))
+            .json(&fallback)
+            .send()
+            .await?)
+    }
+}
+
+fn apply_reasoning_effort(body: &mut Value, effort: Option<&str>, responses_api: bool) {
+    let Some(effort) = effort.filter(|value| *value != "auto") else {
+        return;
+    };
+    if responses_api {
+        body["reasoning"] = json!({"effort": effort});
+    } else {
+        body["reasoning_effort"] = Value::String(effort.to_owned());
+    }
+}
+
+fn has_reasoning_field(body: &Value) -> bool {
+    body.get("reasoning_effort").is_some() || body.get("reasoning").is_some()
+}
+
+fn remove_reasoning_fields(body: &mut Value) {
+    if let Some(object) = body.as_object_mut() {
+        object.remove("reasoning_effort");
+        object.remove("reasoning");
+    }
+}
+
+fn rejects_reasoning_field(body: &str) -> bool {
+    let text = body.to_ascii_lowercase();
+    let mentions_field = text.contains("reasoning_effort")
+        || text.contains("reasoning.effort")
+        || text.contains("reasoning");
+    let rejects_field = text.contains("unknown")
+        || text.contains("unsupported")
+        || text.contains("unrecognized")
+        || text.contains("not allowed")
+        || text.contains("extra field")
+        || text.contains("invalid parameter");
+    mentions_field && rejects_field
 }
 
 fn openai_responses_tools(tools: &[coomi_engine::ToolSpec], native_web_search: bool) -> Vec<Value> {
@@ -1008,7 +1066,10 @@ fn remote_compaction_v2_body(
     Ok(body)
 }
 
-fn anthropic_messages(messages: &[ChatMessage], supports_vision: bool) -> Result<(String, Vec<Value>)> {
+fn anthropic_messages(
+    messages: &[ChatMessage],
+    supports_vision: bool,
+) -> Result<(String, Vec<Value>)> {
     let mut system = Vec::new();
     let mut output = Vec::new();
     for message in messages {
@@ -1064,7 +1125,10 @@ fn anthropic_messages(messages: &[ChatMessage], supports_vision: bool) -> Result
     Ok((system.join("\n\n"), output))
 }
 
-fn gemini_messages(messages: &[ChatMessage], supports_vision: bool) -> Result<(String, Vec<Value>)> {
+fn gemini_messages(
+    messages: &[ChatMessage],
+    supports_vision: bool,
+) -> Result<(String, Vec<Value>)> {
     let mut system = Vec::new();
     let mut output = Vec::new();
     let mut call_names = Map::new();
@@ -1108,12 +1172,12 @@ fn gemini_messages(messages: &[ChatMessage], supports_vision: bool) -> Result<(S
                 })];
                 if supports_vision {
                     parts.extend(message.images.iter().map(|image| {
-                    json!({
-                        "inlineData": {
-                            "mimeType": image.media_type,
-                            "data": image.data
-                        }
-                    })
+                        json!({
+                            "inlineData": {
+                                "mimeType": image.media_type,
+                                "data": image.data
+                            }
+                        })
                     }));
                 }
                 output.push(json!({"role": "user", "parts": parts}));
@@ -1202,24 +1266,64 @@ fn role_name(role: Role) -> &'static str {
 }
 
 fn openai_usage(value: Option<&Value>) -> TokenUsage {
+    let cache_available = value
+        .and_then(|usage| usage.pointer("/prompt_tokens_details/cached_tokens"))
+        .is_some();
     TokenUsage {
         input_tokens: nested_u64(value, "prompt_tokens"),
         cached_input_tokens: value
             .and_then(|usage| usage.pointer("/prompt_tokens_details/cached_tokens"))
             .and_then(Value::as_u64)
             .unwrap_or(0),
+        cache_observed_input_tokens: if cache_available {
+            nested_u64(value, "prompt_tokens")
+        } else {
+            0
+        },
         output_tokens: nested_u64(value, "completion_tokens"),
+        cache_data_available: cache_available,
+    }
+}
+
+fn anthropic_usage(value: Option<&Value>) -> TokenUsage {
+    let uncached_input = nested_u64(value, "input_tokens");
+    let cache_read_input = nested_u64(value, "cache_read_input_tokens");
+    let cache_creation_input = nested_u64(value, "cache_creation_input_tokens");
+    let cache_available = value.is_some_and(|usage| {
+        usage.get("cache_read_input_tokens").is_some()
+            || usage.get("cache_creation_input_tokens").is_some()
+    });
+    // Anthropic reports uncached, cache-read, and cache-creation input in
+    // separate fields. The actual request input is their sum.
+    let observed_input = uncached_input
+        .saturating_add(cache_read_input)
+        .saturating_add(cache_creation_input);
+    TokenUsage {
+        input_tokens: observed_input,
+        cached_input_tokens: cache_read_input,
+        cache_observed_input_tokens: if cache_available { observed_input } else { 0 },
+        output_tokens: nested_u64(value, "output_tokens"),
+        cache_data_available: cache_available,
     }
 }
 
 fn responses_usage(value: Option<&Value>) -> TokenUsage {
+    let cache_available = value
+        .and_then(|usage| usage.pointer("/input_tokens_details/cached_tokens"))
+        .is_some();
     TokenUsage {
         input_tokens: nested_u64(value, "input_tokens"),
         cached_input_tokens: value
             .and_then(|usage| usage.pointer("/input_tokens_details/cached_tokens"))
             .and_then(Value::as_u64)
             .unwrap_or(0),
+        cache_observed_input_tokens: if cache_available {
+            nested_u64(value, "input_tokens")
+        } else {
+            0
+        },
         output_tokens: nested_u64(value, "output_tokens"),
+        cache_data_available: cache_available,
     }
 }
 
@@ -1237,6 +1341,42 @@ mod tests {
     #[test]
     fn rejects_non_object_tool_arguments() {
         assert!(parse_arguments(&Value::String("[]".into())).is_err());
+    }
+
+    #[test]
+    fn reasoning_fields_are_mapped_and_removed_for_fallback() {
+        let mut chat = json!({"model": "m"});
+        apply_reasoning_effort(&mut chat, Some("high"), false);
+        assert_eq!(chat["reasoning_effort"], "high");
+        remove_reasoning_fields(&mut chat);
+        assert!(!has_reasoning_field(&chat));
+
+        let mut responses = json!({"model": "m"});
+        apply_reasoning_effort(&mut responses, Some("xhigh"), true);
+        assert_eq!(responses["reasoning"], json!({"effort": "xhigh"}));
+        assert!(rejects_reasoning_field(
+            r#"{"error":{"message":"Unknown field reasoning.effort"}}"#
+        ));
+
+        let mut automatic = json!({"model": "m"});
+        apply_reasoning_effort(&mut automatic, Some("auto"), false);
+        assert!(!has_reasoning_field(&automatic));
+    }
+
+    #[test]
+    fn anthropic_cache_usage_uses_total_observed_input() {
+        let value = json!({
+            "input_tokens": 10_000,
+            "cache_read_input_tokens": 90_000,
+            "cache_creation_input_tokens": 2_000,
+            "output_tokens": 500
+        });
+        let usage = anthropic_usage(Some(&value));
+        assert_eq!(usage.input_tokens, 102_000);
+        assert_eq!(usage.cached_input_tokens, 90_000);
+        assert_eq!(usage.cache_observed_input_tokens, 102_000);
+        assert!(usage.cache_data_available);
+        assert!(usage.cached_input_tokens <= usage.cache_observed_input_tokens);
     }
 
     #[test]
@@ -1303,8 +1443,8 @@ mod tests {
             "type": "compaction",
             "encrypted_content": "opaque"
         });
-        let input =
-            responses_input(&[ChatMessage::provider_item(item.clone())], true).expect("responses input");
+        let input = responses_input(&[ChatMessage::provider_item(item.clone())], true)
+            .expect("responses input");
         assert_eq!(input, vec![item]);
         assert!(
             openai_messages(

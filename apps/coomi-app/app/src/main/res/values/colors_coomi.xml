@@ -73,4 +73,25 @@
     <color name="coomi_night_text_3">#68717F</color>
     <color name="coomi_night_blue_soft">#1C2C50</color>
     <color name="coomi_night_danger_soft">#3D241F</color>
+
+    <color name="coomi_book_bg">#F7F2E7</color>
+    <color name="coomi_book_page">#EEE6D7</color>
+    <color name="coomi_book_card">#FFFAF0</color>
+    <color name="coomi_book_fill">#F1EADC</color>
+    <color name="coomi_book_border">#D8CCB6</color>
+    <color name="coomi_book_text">#2D3028</color>
+    <color name="coomi_book_text_2">#626457</color>
+    <color name="coomi_book_text_3">#8A8979</color>
+    <color name="coomi_book_accent">#496957</color>
+    <color name="coomi_book_accent_soft">#DCE8DC</color>
+
+    <color name="coomi_orange_theme_bg">#FFFFFF</color>
+    <color name="coomi_orange_theme_page">#FFF7F1</color>
+    <color name="coomi_orange_theme_fill">#FFF2E8</color>
+    <color name="coomi_orange_theme_border">#F3DAC8</color>
+    <color name="coomi_orange_theme_text">#28231F</color>
+    <color name="coomi_orange_theme_text_2">#6E625A</color>
+    <color name="coomi_orange_theme_text_3">#9B8C82</color>
+    <color name="coomi_orange_theme_accent">#A94F12</color>
+    <color name="coomi_orange_theme_accent_soft">#F8E9DE</color>
 </resources>

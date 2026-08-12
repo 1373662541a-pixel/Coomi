@@ -1152,7 +1152,9 @@ async fn registry_index(State(state): State<AppState>) -> Result<Json<Value>, Ap
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             cache
                 .as_ref()
-                .filter(|entry| entry.fetched_at.elapsed() < Duration::from_secs(REGISTRY_CACHE_SECS))
+                .filter(|entry| {
+                    entry.fetched_at.elapsed() < Duration::from_secs(REGISTRY_CACHE_SECS)
+                })
                 .map(|entry| entry.payload.clone())
         };
         match fresh {
@@ -2045,10 +2047,16 @@ async fn handle_command(
                 .await
                 {
                     let message = format!("{error:#}");
-                    if is_retryable_error_text(&message) {
+                    if is_retryable_error_text(&message)
+                        || message.contains("tool round limit reached")
+                    {
                         turn_task.push_event(json!({
                             "event_type": "retry_confirmation",
-                            "message": "自动恢复失败，任务已暂停",
+                            "message": if message.contains("tool round limit reached") {
+                                "已达到本轮工具调用上限，任务已暂停"
+                            } else {
+                                "自动恢复失败，任务已暂停"
+                            },
                             "detail": message,
                         }));
                     } else {
@@ -2365,6 +2373,12 @@ async fn retry_turn(
 
 fn is_retryable_error_text(message: &str) -> bool {
     let text = message.to_ascii_lowercase();
+    if ["http 400", "http 401", "http 402", "http 403", "http 404"]
+        .iter()
+        .any(|status| text.contains(status))
+    {
+        return false;
+    }
     [
         "timed out",
         "timeout",
@@ -2524,13 +2538,22 @@ async fn run_turn(
     };
     let reasoning_effort = context.reasoning_effort.read().await.clone();
     let max_tool_rounds = *context.max_tool_rounds.read().await;
+    let context_categories = estimate_context_categories(
+        &state.home,
+        &prompt_context,
+        &session,
+        &tools.specs(),
+        &mcp_runtime.specs(),
+    );
     let observer = BrowserObserver::new(
         Arc::clone(&task),
         state.home.clone(),
         reasoning_effort.clone(),
         session.usage.input_tokens,
         session.usage.cached_input_tokens,
+        session.usage.cache_observed_input_tokens,
         session.usage.output_tokens,
+        context_categories,
     );
     let agent = Agent::new(prompt_context)
         .with_max_tool_rounds(max_tool_rounds)
@@ -2682,17 +2705,25 @@ struct BrowserObserver {
     task: Arc<SessionTask>,
     home: PathBuf,
     reasoning_effort: String,
-    turn_started: Instant,
+    turn_started: StdMutex<Instant>,
     started: StdMutex<HashMap<String, Instant>>,
     usage: StdMutex<BrowserUsageState>,
+    context_categories: BTreeMap<String, u64>,
 }
 
 #[derive(Clone, Copy, Default)]
 struct BrowserUsageState {
     input_tokens: u64,
     cached_input_tokens: u64,
+    cache_observed_input_tokens: u64,
     output_tokens: u64,
     cache_data_available: bool,
+    turn_input_tokens: u64,
+    turn_cached_input_tokens: u64,
+    turn_cache_observed_input_tokens: u64,
+    turn_output_tokens: u64,
+    turn_cache_data_available: bool,
+    turn_active: bool,
     context_used_tokens: u64,
     context_window_tokens: u64,
 }
@@ -2704,20 +2735,25 @@ impl BrowserObserver {
         reasoning_effort: String,
         input_tokens: u64,
         cached_input_tokens: u64,
+        cache_observed_input_tokens: u64,
         output_tokens: u64,
+        context_categories: BTreeMap<String, u64>,
     ) -> Self {
         Self {
             task,
             home,
             reasoning_effort,
-            turn_started: Instant::now(),
+            turn_started: StdMutex::new(Instant::now()),
             started: StdMutex::new(HashMap::new()),
             usage: StdMutex::new(BrowserUsageState {
                 input_tokens,
                 cached_input_tokens,
+                cache_observed_input_tokens,
                 output_tokens,
+                cache_data_available: cache_observed_input_tokens > 0,
                 ..BrowserUsageState::default()
             }),
+            context_categories,
         }
     }
 
@@ -2727,7 +2763,25 @@ impl BrowserObserver {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut event = browser_usage_event(state);
-        event["reasoning_efforts"] = load_reasoning_stats_value(&self.home);
+        let current_turn = (state.turn_active
+            && (state.turn_input_tokens > 0 || state.turn_output_tokens > 0))
+            .then(|| {
+            coomi_engine::TokenUsage {
+                input_tokens: state.turn_input_tokens,
+                cached_input_tokens: state.turn_cached_input_tokens,
+                cache_observed_input_tokens: state.turn_cache_observed_input_tokens,
+                output_tokens: state.turn_output_tokens,
+                cache_data_available: state.turn_cache_data_available,
+            }
+        });
+        let elapsed = self
+            .turn_started
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .elapsed();
+        event["reasoning_efforts"] =
+            load_reasoning_stats_value(&self.home, current_turn.as_ref(), elapsed, &self.reasoning_effort);
+        event["context_categories"] = json!(self.context_categories);
         self.task.push_event(event);
     }
 }
@@ -2750,11 +2804,19 @@ fn browser_usage_event(state: BrowserUsageState) -> Value {
             "context_window_tokens": state.context_window_tokens,
             "context_ratio": context_ratio,
             "cache_hit_rate": state.cache_data_available.then(|| {
-                if state.input_tokens == 0 { 0.0 } else {
-                    state.cached_input_tokens as f64 / state.input_tokens as f64
+                if state.cache_observed_input_tokens == 0 { 0.0 } else {
+                    state.cached_input_tokens.min(state.cache_observed_input_tokens) as f64
+                        / state.cache_observed_input_tokens as f64
                 }
             }),
             "cache_data_available": state.cache_data_available,
+            "turn_cache_hit_rate": state.turn_cache_data_available.then(|| {
+                if state.turn_cache_observed_input_tokens == 0 { 0.0 } else {
+                    state.turn_cached_input_tokens.min(state.turn_cache_observed_input_tokens) as f64
+                        / state.turn_cache_observed_input_tokens as f64
+                }
+            }),
+            "turn_cache_data_available": state.turn_cache_data_available,
         },
     })
 }
@@ -2767,9 +2829,17 @@ struct ReasoningAggregate {
     turns: u64,
     total_input_tokens: u64,
     total_cached_input_tokens: u64,
+    #[serde(default)]
+    cache_observed_input_tokens: u64,
     total_tokens: u64,
     total_duration_ms: u64,
     cache_turns: u64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct ReasoningStatsDocument {
+    schema_version: u8,
+    efforts: BTreeMap<String, ReasoningAggregate>,
 }
 
 fn usage_summary_path(home: &Path) -> PathBuf {
@@ -2779,7 +2849,9 @@ fn usage_summary_path(home: &Path) -> PathBuf {
 fn load_reasoning_aggregates(home: &Path) -> BTreeMap<String, ReasoningAggregate> {
     fs::read(usage_summary_path(home))
         .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .and_then(|bytes| serde_json::from_slice::<ReasoningStatsDocument>(&bytes).ok())
+        .filter(|document| document.schema_version == 2)
+        .map(|document| document.efforts)
         .unwrap_or_default()
 }
 
@@ -2791,7 +2863,21 @@ fn save_reasoning_aggregates(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(path, serde_json::to_vec_pretty(aggregates)?)?;
+    let bytes = serde_json::to_vec_pretty(&ReasoningStatsDocument {
+            schema_version: 2,
+            efforts: aggregates.clone(),
+        })?;
+    let temp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    {
+        let mut file = fs::File::create(&temp)?;
+        std::io::Write::write_all(&mut file, &bytes)?;
+        file.sync_all()?;
+    }
+    #[cfg(windows)]
+    if path.exists() {
+        fs::remove_file(&path)?;
+    }
+    fs::rename(&temp, &path)?;
     Ok(())
 }
 
@@ -2805,6 +2891,17 @@ fn update_reasoning_stats(
     let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut aggregates = load_reasoning_aggregates(home);
     let aggregate = aggregates.entry(effort.to_owned()).or_default();
+    add_reasoning_sample(aggregate, usage, elapsed);
+    if let Err(error) = save_reasoning_aggregates(home, &aggregates) {
+        eprintln!("[usage] failed to save reasoning statistics: {error}");
+    }
+}
+
+fn add_reasoning_sample(
+    aggregate: &mut ReasoningAggregate,
+    usage: &coomi_engine::TokenUsage,
+    elapsed: Duration,
+) {
     aggregate.turns = aggregate.turns.saturating_add(1);
     aggregate.total_input_tokens = aggregate
         .total_input_tokens
@@ -2812,6 +2909,11 @@ fn update_reasoning_stats(
     aggregate.total_cached_input_tokens = aggregate
         .total_cached_input_tokens
         .saturating_add(usage.cached_input_tokens);
+    if usage.cache_data_available {
+        aggregate.cache_observed_input_tokens = aggregate
+            .cache_observed_input_tokens
+            .saturating_add(usage.cache_observed_input_tokens);
+    }
     aggregate.total_tokens = aggregate.total_tokens.saturating_add(usage.total_tokens());
     aggregate.total_duration_ms = aggregate
         .total_duration_ms
@@ -2819,23 +2921,40 @@ fn update_reasoning_stats(
     if usage.cache_data_available {
         aggregate.cache_turns = aggregate.cache_turns.saturating_add(1);
     }
-    if let Err(error) = save_reasoning_aggregates(home, &aggregates) {
-        eprintln!("[usage] failed to save reasoning statistics: {error}");
-    }
 }
 
-fn load_reasoning_stats_value(home: &Path) -> Value {
-    let aggregates = load_reasoning_aggregates(home);
+fn load_reasoning_stats_value(
+    home: &Path,
+    current_usage: Option<&coomi_engine::TokenUsage>,
+    current_elapsed: Duration,
+    current_effort: &str,
+) -> Value {
+    let mut aggregates = load_reasoning_aggregates(home);
+    if let Some(usage) = current_usage {
+        add_reasoning_sample(
+            aggregates.entry(current_effort.to_owned()).or_default(),
+            usage,
+            current_elapsed,
+        );
+    }
     let mut output = serde_json::Map::new();
     for effort in REASONING_EFFORTS {
         let aggregate = aggregates.get(effort).cloned().unwrap_or_default();
-        let cache_available = aggregate.cache_turns > 0 && aggregate.total_input_tokens > 0;
+        let cache_denominator = if aggregate.cache_observed_input_tokens > 0 {
+            aggregate.cache_observed_input_tokens
+        } else if aggregate.cache_turns > 0 {
+            aggregate.total_input_tokens
+        } else {
+            0
+        };
+        let cache_available = cache_denominator > 0;
         output.insert(
             effort.to_owned(),
             json!({
                 "turns": aggregate.turns,
                 "cache_hit_rate": cache_available.then(|| {
-                    aggregate.total_cached_input_tokens as f64 / aggregate.total_input_tokens as f64
+                    aggregate.total_cached_input_tokens.min(cache_denominator) as f64
+                        / cache_denominator as f64
                 }),
                 "average_duration_ms": (aggregate.turns > 0).then(|| aggregate.total_duration_ms / aggregate.turns),
                 "average_total_tokens": (aggregate.turns > 0).then(|| aggregate.total_tokens / aggregate.turns),
@@ -2844,6 +2963,59 @@ fn load_reasoning_stats_value(home: &Path) -> Value {
         );
     }
     Value::Object(output)
+}
+
+fn estimated_tokens(value: &str) -> u64 {
+    u64::try_from(value.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(3)
+        / 4
+}
+
+fn estimate_context_categories(
+    home: &Path,
+    system_prompt: &str,
+    session: &Session,
+    tool_specs: &[coomi_engine::ToolSpec],
+    mcp_specs: &[coomi_engine::ToolSpec],
+) -> BTreeMap<String, u64> {
+    let mcp_names = mcp_specs
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<HashSet<_>>();
+    let mcp_tools = tool_specs
+        .iter()
+        .filter(|tool| mcp_names.contains(tool.name.as_str()))
+        .map(|tool| estimated_tokens(&serde_json::to_string(tool).unwrap_or_default()))
+        .sum();
+    let system_tools = tool_specs
+        .iter()
+        .filter(|tool| !mcp_names.contains(tool.name.as_str()))
+        .map(|tool| estimated_tokens(&serde_json::to_string(tool).unwrap_or_default()))
+        .sum();
+    let messages = session
+        .messages
+        .iter()
+        .map(|message| {
+            estimated_tokens(&message.content).saturating_add(estimated_tokens(
+                &serde_json::to_string(&message.tool_calls).unwrap_or_default(),
+            ))
+        })
+        .sum();
+    let skills = list_installed_skills(home)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|skill| skill.enabled)
+        .map(|skill| estimated_tokens(&format!("{} {}", skill.name, skill.source)))
+        .sum();
+    BTreeMap::from([
+        ("system_tools".to_owned(), system_tools),
+        ("messages".to_owned(), messages),
+        ("skills".to_owned(), skills),
+        ("mcp_tools".to_owned(), mcp_tools),
+        ("system_prompt".to_owned(), estimated_tokens(system_prompt)),
+        ("other".to_owned(), 0),
+    ])
 }
 
 impl AgentObserver for BrowserObserver {
@@ -2899,19 +3071,54 @@ impl AgentObserver for BrowserObserver {
                     "images": images,
                 }));
             }
-            AgentEvent::TurnCompleted(usage) => {
+            AgentEvent::ModelUsage { total, request } => {
                 if let Ok(mut state) = self.usage.lock() {
-                    state.input_tokens = usage.input_tokens;
-                    state.cached_input_tokens = usage.cached_input_tokens;
-                    state.output_tokens = usage.output_tokens;
-                    state.cache_data_available = usage.cache_data_available;
+                    state.turn_active = true;
+                    state.input_tokens = total.input_tokens;
+                    state.cached_input_tokens = total.cached_input_tokens;
+                    state.cache_observed_input_tokens = total.cache_observed_input_tokens;
+                    state.output_tokens = total.output_tokens;
+                    state.cache_data_available = total.cache_data_available;
+                    state.turn_input_tokens = state
+                        .turn_input_tokens
+                        .saturating_add(request.input_tokens);
+                    state.turn_cached_input_tokens = state
+                        .turn_cached_input_tokens
+                        .saturating_add(request.cached_input_tokens);
+                    state.turn_cache_observed_input_tokens = state
+                        .turn_cache_observed_input_tokens
+                        .saturating_add(request.cache_observed_input_tokens);
+                    state.turn_output_tokens = state
+                        .turn_output_tokens
+                        .saturating_add(request.output_tokens);
+                    state.turn_cache_data_available |= request.cache_data_available;
                 }
-                update_reasoning_stats(
-                    &self.home,
-                    &self.reasoning_effort,
-                    usage,
-                    self.turn_started.elapsed(),
-                );
+                self.send_usage();
+            }
+            AgentEvent::TurnCompleted { total, turn } => {
+                if let Ok(mut state) = self.usage.lock() {
+                    state.input_tokens = total.input_tokens;
+                    state.cached_input_tokens = total.cached_input_tokens;
+                    state.cache_observed_input_tokens = total.cache_observed_input_tokens;
+                    state.output_tokens = total.output_tokens;
+                    state.cache_data_available = total.cache_data_available;
+                    state.turn_input_tokens = turn.input_tokens;
+                    state.turn_cached_input_tokens = turn.cached_input_tokens;
+                    state.turn_cache_observed_input_tokens = turn.cache_observed_input_tokens;
+                    state.turn_output_tokens = turn.output_tokens;
+                    state.turn_cache_data_available = turn.cache_data_available;
+                    state.turn_active = false;
+                }
+                let elapsed = {
+                    let mut started = self
+                        .turn_started
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let elapsed = started.elapsed();
+                    *started = Instant::now();
+                    elapsed
+                };
+                update_reasoning_stats(&self.home, &self.reasoning_effort, turn, elapsed);
                 self.send_usage();
             }
             AgentEvent::ConnectionRetry {
@@ -2927,6 +3134,9 @@ impl AgentObserver for BrowserObserver {
                     "delay_ms": delay_ms,
                     "message": message,
                 }));
+            }
+            AgentEvent::StreamReset => {
+                self.task.push_event(json!({"event_type": "stream_reset"}));
             }
             AgentEvent::CompactionCompleted {
                 before_tokens,
@@ -2969,8 +3179,18 @@ impl AgentObserver for BrowserObserver {
                 }
                 self.send_usage();
             }
-            AgentEvent::ModelStarted { .. }
-            | AgentEvent::CompactionStarted { .. }
+            AgentEvent::ModelStarted { round, .. } => {
+                if *round == 1 && let Ok(mut state) = self.usage.lock() {
+                    state.turn_input_tokens = 0;
+                    state.turn_cached_input_tokens = 0;
+                    state.turn_cache_observed_input_tokens = 0;
+                    state.turn_output_tokens = 0;
+                    state.turn_cache_data_available = false;
+                    state.turn_active = true;
+                }
+                self.send_usage();
+            }
+            AgentEvent::CompactionStarted { .. }
             | AgentEvent::QueuedInputAccepted(_) => {}
         }
     }
@@ -3368,11 +3588,29 @@ mod tests {
             output_tokens: 800,
             context_used_tokens: 32_000,
             context_window_tokens: 128_000,
+            ..BrowserUsageState::default()
         });
         assert_eq!(value["usage"]["total_tokens"], 12_800);
         assert_eq!(value["usage"]["context_used_tokens"], 32_000);
         assert_eq!(value["usage"]["context_window_tokens"], 128_000);
         assert_eq!(value["usage"]["context_ratio"], 0.25);
+    }
+
+    #[test]
+    fn browser_cache_rates_are_bounded_and_use_observed_input() {
+        let value = browser_usage_event(BrowserUsageState {
+            input_tokens: 100_000,
+            cached_input_tokens: 120_000,
+            cache_observed_input_tokens: 100_000,
+            cache_data_available: true,
+            turn_input_tokens: 20_000,
+            turn_cached_input_tokens: 18_000,
+            turn_cache_observed_input_tokens: 20_000,
+            turn_cache_data_available: true,
+            ..BrowserUsageState::default()
+        });
+        assert_eq!(value["usage"]["cache_hit_rate"], 1.0);
+        assert_eq!(value["usage"]["turn_cache_hit_rate"], 0.9);
     }
 
     #[test]
@@ -3503,6 +3741,7 @@ mod tests {
             tasks: Arc::new(StdMutex::new(HashMap::new())),
             vision_degraded: Arc::new(StdMutex::new(HashSet::new())),
             vision_failures: Arc::new(StdMutex::new(HashMap::new())),
+            registry_cache: Arc::new(StdMutex::new(None)),
         };
 
         let store = SessionStore::new(&home);

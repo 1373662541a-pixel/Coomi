@@ -155,8 +155,19 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let paths = resolve_paths(&cli)?;
     match &cli.command {
-        Some(Command::Serve { port, token, static_dir }) => {
-            web::serve(paths.home, paths.cwd, *port, token.clone(), static_dir.clone()).await?
+        Some(Command::Serve {
+            port,
+            token,
+            static_dir,
+        }) => {
+            web::serve(
+                paths.home,
+                paths.cwd,
+                *port,
+                token.clone(),
+                static_dir.clone(),
+            )
+            .await?
         }
         Some(Command::Models) => print_models(&load_registry(&paths.home)?),
         Some(Command::Sessions { all }) => print_sessions(
@@ -453,7 +464,11 @@ fn print_sessions(store: &SessionStore, cwd: Option<&Path>) -> Result<()> {
             session.updated_at.format("%Y-%m-%d %H:%M"),
             session.provider_id,
             session.model,
-            if session.title.is_empty() { &session.preview } else { &session.title }
+            if session.title.is_empty() {
+                &session.preview
+            } else {
+                &session.title
+            }
         );
     }
     Ok(())
@@ -553,10 +568,13 @@ impl AgentObserver for TerminalObserver {
             AgentEvent::Text(text) => println!("\n{text}"),
             AgentEvent::TextDelta(text) => print!("{text}"),
             AgentEvent::ReasoningDelta(text) => eprint!("{text}"),
+            AgentEvent::ConnectionRetry { message, .. } => eprintln!("\n{message}"),
+            AgentEvent::StreamReset => eprintln!("\n[discarding interrupted partial response]"),
             AgentEvent::ContextUpdated(status) => eprintln!(
                 "[context {}% {}/{}]",
                 status.used_percent, status.used_tokens, status.effective_context_window
             ),
+            AgentEvent::ModelUsage { .. } => {}
             AgentEvent::CompactionStarted { automatic } => eprintln!(
                 "[context compaction {}]",
                 if *automatic { "automatic" } else { "manual" }
@@ -582,7 +600,7 @@ impl AgentObserver for TerminalObserver {
                 let status = if result.success { "ok" } else { "error" };
                 eprintln!("[tool {} {status}] {}", call.name, preview(&result.output));
             }
-            AgentEvent::TurnCompleted(usage) => print_usage(usage),
+            AgentEvent::TurnCompleted { total, .. } => print_usage(total),
             AgentEvent::ModelStarted { .. } => {}
         }
     }

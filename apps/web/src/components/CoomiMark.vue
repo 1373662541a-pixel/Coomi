@@ -37,8 +37,8 @@ const RINGS: [number, number][] = [
 
 <style scoped>
 .mark { display: block; flex-shrink: 0; }
-.ink { fill: var(--blue); }
-.paper { fill: var(--bg); }
+.ink { fill: #2d61c6; }
+.paper { fill: #ffffff; }
 .spark { fill: #92b6ec; }
 .mark.muted .ink { fill: var(--text-3); }
 .mark.muted .spark { fill: var(--border-strong); }

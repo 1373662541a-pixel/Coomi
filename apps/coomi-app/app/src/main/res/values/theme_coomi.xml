@@ -120,6 +120,78 @@
         <item name="android:windowBackground">@color/coomi_night_bg</item>
     </style>
 
+    <style name="Theme.Coomi.Book" parent="Theme.Coomi">
+        <item name="colorPrimary">@color/coomi_book_accent</item>
+        <item name="colorPrimaryDark">@color/coomi_book_accent</item>
+        <item name="colorAccent">@color/coomi_book_accent</item>
+        <item name="colorControlNormal">@color/coomi_book_text_3</item>
+        <item name="colorControlActivated">@color/coomi_book_accent</item>
+        <item name="colorControlHighlight">@color/coomi_book_accent_soft</item>
+        <item name="android:windowBackground">@color/coomi_book_bg</item>
+        <item name="android:colorBackground">@color/coomi_book_bg</item>
+        <item name="android:statusBarColor">@color/coomi_book_bg</item>
+        <item name="android:navigationBarColor">@color/coomi_book_bg</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:textColorPrimary">@color/coomi_book_text</item>
+        <item name="android:textColorSecondary">@color/coomi_book_text_2</item>
+        <item name="android:textColorHint">@color/coomi_book_text_3</item>
+        <item name="android:textColorLink">@color/coomi_book_accent</item>
+        <item name="coomiPage">@color/coomi_book_page</item>
+        <item name="coomiText">@color/coomi_book_text</item>
+        <item name="coomiText2">@color/coomi_book_text_2</item>
+        <item name="coomiText3">@color/coomi_book_text_3</item>
+        <item name="coomiCard">@color/coomi_book_card</item>
+        <item name="coomiBorder">@color/coomi_book_border</item>
+        <item name="coomiDivider">@color/coomi_book_border</item>
+        <item name="coomiFill">@color/coomi_book_fill</item>
+        <item name="coomiBlue">@color/coomi_book_accent</item>
+        <item name="coomiBlueSoft">@color/coomi_book_accent_soft</item>
+    </style>
+    <style name="Theme.Coomi.Book.Page" parent="Theme.Coomi.Book">
+        <item name="android:windowBackground">@color/coomi_book_page</item>
+        <item name="android:statusBarColor">@color/coomi_book_page</item>
+        <item name="android:navigationBarColor">@color/coomi_book_page</item>
+    </style>
+    <style name="Theme.Coomi.Book.Web" parent="Theme.Coomi.Book">
+        <item name="android:windowBackground">@color/coomi_book_bg</item>
+    </style>
+
+    <style name="Theme.Coomi.Orange" parent="Theme.Coomi">
+        <item name="colorPrimary">@color/coomi_orange_theme_accent</item>
+        <item name="colorPrimaryDark">@color/coomi_orange_theme_accent</item>
+        <item name="colorAccent">@color/coomi_orange_theme_accent</item>
+        <item name="colorControlNormal">@color/coomi_orange_theme_text_3</item>
+        <item name="colorControlActivated">@color/coomi_orange_theme_accent</item>
+        <item name="colorControlHighlight">@color/coomi_orange_theme_accent_soft</item>
+        <item name="android:windowBackground">@color/coomi_orange_theme_bg</item>
+        <item name="android:colorBackground">@color/coomi_orange_theme_bg</item>
+        <item name="android:statusBarColor">@color/coomi_orange_theme_bg</item>
+        <item name="android:navigationBarColor">@color/coomi_orange_theme_bg</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:textColorPrimary">@color/coomi_orange_theme_text</item>
+        <item name="android:textColorSecondary">@color/coomi_orange_theme_text_2</item>
+        <item name="android:textColorHint">@color/coomi_orange_theme_text_3</item>
+        <item name="android:textColorLink">@color/coomi_orange_theme_accent</item>
+        <item name="coomiPage">@color/coomi_orange_theme_page</item>
+        <item name="coomiText">@color/coomi_orange_theme_text</item>
+        <item name="coomiText2">@color/coomi_orange_theme_text_2</item>
+        <item name="coomiText3">@color/coomi_orange_theme_text_3</item>
+        <item name="coomiCard">@color/coomi_orange_theme_bg</item>
+        <item name="coomiBorder">@color/coomi_orange_theme_border</item>
+        <item name="coomiDivider">@color/coomi_orange_theme_border</item>
+        <item name="coomiFill">@color/coomi_orange_theme_fill</item>
+        <item name="coomiBlue">@color/coomi_orange_theme_accent</item>
+        <item name="coomiBlueSoft">@color/coomi_orange_theme_accent_soft</item>
+    </style>
+    <style name="Theme.Coomi.Orange.Page" parent="Theme.Coomi.Orange">
+        <item name="android:windowBackground">@color/coomi_orange_theme_page</item>
+        <item name="android:statusBarColor">@color/coomi_orange_theme_page</item>
+        <item name="android:navigationBarColor">@color/coomi_orange_theme_page</item>
+    </style>
+    <style name="Theme.Coomi.Orange.Web" parent="Theme.Coomi.Orange">
+        <item name="android:windowBackground">@color/coomi_orange_theme_bg</item>
+    </style>
+
 
     <!-- ==================== 文字 ==================== -->
 

@@ -361,7 +361,7 @@ function goDashboard() {
 
 <template>
   <div class="page">
-    <PageHead title="SKILL / MCP 管理" @back="goDashboard" />
+    <PageHead title="拓展管理" @back="goDashboard" />
     <main class="body">
       <!-- 一级：已安装 | 仓库 | 市场 -->
       <div class="seg" role="tablist">
@@ -372,7 +372,7 @@ function goDashboard() {
           <CoomiIcon name="globe" :size="14" />仓库
         </button>
         <button class="segitem" :class="{ on: scope === 'market' }" @click="switchScope('market')">
-          <CoomiIcon name="sparkle" :size="14" />市场
+          <CoomiIcon name="sparkle" :size="14" />广场
         </button>
       </div>
 
@@ -391,6 +391,17 @@ function goDashboard() {
           <span class="cnt">{{ marketWorkflows.length }}</span>
         </button>
       </div>
+
+      <a
+        v-if="scope === 'market'"
+        class="submit-extension"
+        href="https://github.com/TensorHub-ORG/coomi-registry/issues/new?template=submission.yml"
+        target="_blank"
+        rel="noopener noreferrer"
+      >
+        <span>去提交一个拓展</span>
+        <CoomiIcon name="chevronRight" :size="16" />
+      </a>
 
       <p v-if="notice" class="notice" :class="{ err: notice.startsWith('安装失败') }">{{ notice }}</p>
       <p v-if="error" class="notice err">加载失败：{{ error }}</p>
@@ -477,13 +488,13 @@ function goDashboard() {
         <p v-if="marketLoading" class="hint">加载中…</p>
         <template v-else>
           <p v-if="tab === 'skills' && marketSkills.length === 0" class="hint">
-            市场里还没有 SKILL。<a class="hint-link" href="https://github.com/TensorHub-ORG/coomi-registry/issues/new?template=submission.yml" target="_blank">去提交第一个 →</a>
+            广场里还没有 SKILL。
           </p>
           <p v-else-if="tab === 'mcp' && marketMcps.length === 0" class="hint">
-            市场里还没有 MCP。<a class="hint-link" href="https://github.com/TensorHub-ORG/coomi-registry/issues/new?template=submission.yml" target="_blank">去提交第一个 →</a>
+            广场里还没有 MCP。
           </p>
           <p v-else-if="tab === 'workflow' && marketWorkflows.length === 0" class="hint">
-            市场里还没有 Workflow。提交后在此展示，安装支持将在后续版本提供。
+            广场里还没有 Workflow。提交后在此展示，安装支持将在后续版本提供。
           </p>
           <p v-else-if="tab === 'skills' && marketSkills.length > 0" class="hint sub">
             社区注册表 · 更新于 {{ marketUpdatedAt || '—' }} · 内容托管在贡献者自己的仓库
@@ -664,6 +675,14 @@ function goDashboard() {
   -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain;
 }
 .tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+.submit-extension {
+  display: flex; align-items: center; justify-content: space-between;
+  min-height: 44px; margin: -2px 0 14px; padding: 0 13px;
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--bg); color: var(--blue); font-size: 13px; font-weight: 650;
+  text-decoration: none;
+}
+.submit-extension:active { background: var(--blue-soft); }
 .seg {
   display: flex; gap: 2px; margin-bottom: 12px; padding: 3px;
   border-radius: var(--r-pill); background: var(--fill);

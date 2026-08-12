@@ -5,7 +5,7 @@
  */
 import { computed, ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { useConfigStore, PERMISSION_MODES, THEME_MODES } from '@/stores/config'
+import { useConfigStore, PERMISSION_MODES, REASONING_EFFORTS, THEME_MODES } from '@/stores/config'
 import { useSessionStore } from '@/stores/session'
 import { useSessionsStore } from '@/stores/sessions'
 import { useConnectionStore } from '@/stores/connection'
@@ -113,6 +113,21 @@ onMounted(async () => {
         </button>
       </div>
 
+      <p class="sec-label">推理强度</p>
+      <div class="group compact-options">
+        <button v-for="item in REASONING_EFFORTS" :key="item.value" class="option" :class="{ selected: config.reasoningEffort === item.value }" @click="session.setReasoningEffort(item.value)">
+          {{ item.label }}
+        </button>
+      </div>
+
+      <p class="sec-label">工具调用上限</p>
+      <div class="group compact-options rounds">
+        <button v-for="rounds in [192, 256, 512]" :key="rounds" class="option" :class="{ selected: config.maxToolRounds === rounds }" @click="session.setMaxToolRounds(rounds)">
+          {{ rounds }}
+        </button>
+      </div>
+      <p class="option-note">默认 192，256 为进阶选项，512 为硬上限。</p>
+
       <p class="sec-label">身份定位</p>
       <div class="group">
         <button class="row" @click="router.push('/persona')">
@@ -195,6 +210,11 @@ onMounted(async () => {
   max-height: min(42vh, 360px); overflow-y: auto;
   overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
 }
+.compact-options { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); padding: 5px; gap: 4px; }
+.compact-options.rounds { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.option { min-width: 0; height: 38px; padding: 0 4px; border-radius: 6px; background: transparent; color: var(--text-2); font-size: 13px; }
+.option.selected { background: var(--blue-soft); color: var(--blue); font-weight: 650; }
+.option-note { margin: 6px 4px 0; font-size: 11.5px; color: var(--text-3); }
 .row {
   display: flex; align-items: center; gap: 11px;
   width: 100%; min-height: 56px; padding: 11px 13px;
