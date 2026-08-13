@@ -35,6 +35,7 @@ export interface ConnectionRetryEvent { event_type: 'connection_retry'; attempt:
 export interface StreamResetEvent { event_type: 'stream_reset' }
 export interface CompressionEvent { event_type: 'compression'; before: number; after: number }
 export interface AgentErrorEvent { event_type: 'agent_error'; message: string; is_fatal: boolean }
+export interface ConfigurationRequiredEvent { event_type: 'configuration_required'; message: string; route: '/providers' }
 export interface RetryConfirmationEvent { event_type: 'retry_confirmation'; message: string }
 export interface AgentCancelledEvent { event_type: 'agent_cancelled' }
 export interface BgTaskDetachedEvent { event_type: 'bg_task_detached'; task_id: string; tool_name: string }
@@ -44,7 +45,9 @@ export interface LoopStepDoneEvent { event_type: 'loop_step_done'; step_index: n
 export interface LoopProgressEvent { event_type: 'loop_progress'; current_step: number; total_steps: number; status: string }
 export interface LoopIssueCreatedEvent { event_type: 'loop_issue_created'; step_index: number; step_description: string }
 export interface ToolApprovalRequestEvent { event_type: 'tool_approval_request'; call_id: string; tool_name: string; arguments: Record<string, unknown>; access: ToolAccess; risk_summary?: string; }
-export interface UserQuestionRequestEvent { event_type: 'user_question_request'; call_id: string; question: string; options?: string[]; allow_free_text?: boolean }
+export interface UserQuestionOption { label: string; description: string }
+export interface UserQuestion { id: string; header: string; question: string; options: UserQuestionOption[] }
+export interface UserQuestionRequestEvent { event_type: 'user_question_request'; call_id: string; questions: UserQuestion[] }
 export interface FileTransferRequestEvent { event_type: 'file_transfer_request'; request_id: string; operation: 'import' | 'export'; path?: string; suggested_name?: string; multiple: boolean }
 export interface TurnEndEvent { event_type: 'turn_end' }
 /** 重连补发：会话是否正在后台执行（切走会话后任务继续跑）。 */
@@ -59,7 +62,7 @@ export interface SessionLoadedEvent {
 export type AgentEvent =
   | TextChunkEvent | ReasoningChunkEvent | ToolStartEvent | ToolRunningEvent
   | ToolDoneEvent | ToolCacheHitEvent | UsageUpdateEvent | ConnectionRetryEvent | StreamResetEvent
-  | CompressionEvent | AgentErrorEvent | AgentCancelledEvent | BgTaskDetachedEvent
+  | CompressionEvent | AgentErrorEvent | ConfigurationRequiredEvent | AgentCancelledEvent | BgTaskDetachedEvent
   | BgTaskCompletedEvent | LoopStepStartEvent | LoopStepDoneEvent | LoopProgressEvent
   | LoopIssueCreatedEvent | RetryConfirmationEvent | ToolApprovalRequestEvent | UserQuestionRequestEvent
   | FileTransferRequestEvent

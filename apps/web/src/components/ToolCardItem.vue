@@ -23,8 +23,116 @@ const copied = ref(false)
 // ── 图片瀑布流 + 全屏预览（点击放大 / 另存为）──
 const previewSrc = ref('')
 const previewName = ref('coomi-image.png')
+const previewStage = ref<HTMLElement | null>(null)
+const previewImage = ref<HTMLImageElement | null>(null)
+const previewScale = ref(1)
+const previewX = ref(0)
+const previewY = ref(0)
+const pointers = new Map<number, { x: number; y: number }>()
+let gestureScale = 1
+let gestureX = 0
+let gestureY = 0
+let gestureDistance = 0
+let gestureMidX = 0
+let gestureMidY = 0
+
+const previewTransform = computed(() => ({
+  transform: `translate3d(${previewX.value}px, ${previewY.value}px, 0) scale(${previewScale.value})`,
+}))
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value))
+}
+
+function clampPreviewPosition() {
+  const stage = previewStage.value
+  const image = previewImage.value
+  if (!stage || !image) return
+  const maxX = Math.max(0, (image.offsetWidth * previewScale.value - stage.clientWidth) / 2)
+  const maxY = Math.max(0, (image.offsetHeight * previewScale.value - stage.clientHeight) / 2)
+  previewX.value = clamp(previewX.value, -maxX, maxX)
+  previewY.value = clamp(previewY.value, -maxY, maxY)
+}
+
+function resetPreviewTransform() {
+  previewScale.value = 1
+  previewX.value = 0
+  previewY.value = 0
+  pointers.clear()
+}
+
+function closePreview() {
+  previewSrc.value = ''
+  resetPreviewTransform()
+}
+
+function pointerDistance(points: Array<{ x: number; y: number }>) {
+  return Math.hypot(points[1].x - points[0].x, points[1].y - points[0].y)
+}
+
+function pointerMidpoint(points: Array<{ x: number; y: number }>) {
+  return { x: (points[0].x + points[1].x) / 2, y: (points[0].y + points[1].y) / 2 }
+}
+
+function startGesture() {
+  const points = [...pointers.values()]
+  gestureScale = previewScale.value
+  gestureX = previewX.value
+  gestureY = previewY.value
+  if (points.length >= 2) {
+    gestureDistance = Math.max(1, pointerDistance(points))
+    const midpoint = pointerMidpoint(points)
+    gestureMidX = midpoint.x
+    gestureMidY = midpoint.y
+  } else if (points.length === 1) {
+    gestureMidX = points[0].x
+    gestureMidY = points[0].y
+  }
+}
+
+function onPreviewPointerDown(event: PointerEvent) {
+  previewStage.value?.setPointerCapture(event.pointerId)
+  pointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
+  startGesture()
+}
+
+function onPreviewPointerMove(event: PointerEvent) {
+  if (!pointers.has(event.pointerId)) return
+  pointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
+  const points = [...pointers.values()]
+  if (points.length >= 2) {
+    const midpoint = pointerMidpoint(points)
+    previewScale.value = clamp(gestureScale * pointerDistance(points) / gestureDistance, 1, 5)
+    previewX.value = gestureX + midpoint.x - gestureMidX
+    previewY.value = gestureY + midpoint.y - gestureMidY
+  } else if (points.length === 1 && previewScale.value > 1) {
+    previewX.value = gestureX + points[0].x - gestureMidX
+    previewY.value = gestureY + points[0].y - gestureMidY
+  }
+  clampPreviewPosition()
+}
+
+function onPreviewPointerEnd(event: PointerEvent) {
+  pointers.delete(event.pointerId)
+  startGesture()
+}
+
+function togglePreviewZoom(event: MouseEvent) {
+  if (previewScale.value > 1) {
+    resetPreviewTransform()
+    return
+  }
+  const stage = previewStage.value
+  if (!stage) return
+  const rect = stage.getBoundingClientRect()
+  previewScale.value = 2.5
+  previewX.value = (rect.width / 2 - (event.clientX - rect.left)) * 1.5
+  previewY.value = (rect.height / 2 - (event.clientY - rect.top)) * 1.5
+  clampPreviewPosition()
+}
 
 function openPreview(src: string) {
+  resetPreviewTransform()
   previewSrc.value = src
   const mime = src.match(/^data:([^;]+)/)?.[1] ?? 'image/png'
   const ext = (mime.split('/')[1] ?? 'png').replace('jpeg', 'jpg')
@@ -197,15 +305,21 @@ async function copy(text: string) {
 
     <!-- 全屏图片预览：点击放大 / 另存为 -->
     <Teleport to="body">
-      <div v-if="previewSrc" class="iv-mask" @click.self="previewSrc = ''">
-        <img
-          :src="previewSrc"
-          class="iv-img"
-          @click.self="previewSrc = ''"
-        />
+      <div v-if="previewSrc" class="iv-mask">
+        <div
+          ref="previewStage"
+          class="iv-stage"
+          @pointerdown="onPreviewPointerDown"
+          @pointermove="onPreviewPointerMove"
+          @pointerup="onPreviewPointerEnd"
+          @pointercancel="onPreviewPointerEnd"
+          @dblclick.prevent="togglePreviewZoom"
+        >
+          <img ref="previewImage" :src="previewSrc" class="iv-img" :style="previewTransform" draggable="false" />
+        </div>
         <div class="iv-bar">
           <button class="iv-btn primary" @click.stop="savePreview">另存为</button>
-          <button class="iv-btn" @click.stop="previewSrc = ''">关闭</button>
+          <button class="iv-btn" @click.stop="closePreview">关闭</button>
         </div>
       </div>
     </Teleport>
@@ -375,9 +489,14 @@ async function copy(text: string) {
   background: rgba(4, 6, 10, .92);
   padding: 18px 14px calc(var(--safe-bottom, 0px) + 18px);
 }
+.iv-stage {
+  position: relative; flex: 1; align-self: stretch; min-height: 0;
+  display: grid; place-items: center; overflow: hidden;
+  touch-action: none; user-select: none;
+}
 .iv-img {
-  flex: 1; min-height: 0; max-width: 100%; max-height: 100%;
-  object-fit: contain;
+  max-width: 100%; max-height: 100%; object-fit: contain;
+  transform-origin: center; will-change: transform;
 }
 .iv-bar {
   display: flex; align-items: center; gap: 10px; margin-top: 14px;
@@ -390,4 +509,3 @@ async function copy(text: string) {
 .iv-btn:active { background: rgba(255, 255, 255, .2); }
 .iv-btn.primary { background: var(--blue); }
 </style>
-

@@ -7,18 +7,23 @@ use async_trait::async_trait;
 use coomi_engine::ChatMessage;
 use coomi_engine::CompactionRequest;
 use coomi_engine::CompactionResponse;
+use coomi_engine::InvalidToolCall;
 use coomi_engine::ModelCapabilities;
 use coomi_engine::ModelProvider;
 use coomi_engine::ModelRequest;
 use coomi_engine::ModelResponse;
 use coomi_engine::ModelStreamObserver;
+use coomi_engine::ProviderErrorKind;
+use coomi_engine::ProviderRequestError;
 use coomi_engine::Role;
 use coomi_engine::TokenUsage;
 use coomi_engine::ToolCall;
 use coomi_engine::retained_user_history;
 use futures_util::StreamExt;
 use reqwest::Client;
+use reqwest::RequestBuilder;
 use reqwest::Response;
+use reqwest::header::HeaderMap;
 use serde_json::Map;
 use serde_json::Value;
 use serde_json::json;
@@ -33,6 +38,7 @@ pub struct HttpModelProvider {
 impl HttpModelProvider {
     pub fn new(config: ProviderConfig) -> Result<Self> {
         let client = Client::builder()
+            .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(180))
             .build()
             .context("failed to build provider HTTP client")?;
@@ -70,15 +76,16 @@ impl HttpModelProvider {
         }
         apply_reasoning_effort(&mut body, request.reasoning_effort.as_deref(), false);
         let response = self.send_with_reasoning_fallback(&endpoint, &body).await?;
-        let value = checked_json(response).await?;
+        let value = checked_json(response, "response_body").await?;
         let message = value
             .pointer("/choices/0/message")
             .context("provider response has no choices[0].message")?;
         let content = text_content(message.get("content"));
-        let tool_calls = parse_openai_tool_calls(message.get("tool_calls"))?;
+        let (tool_calls, invalid_tool_calls) = parse_openai_tool_calls(message.get("tool_calls"))?;
         Ok(ModelResponse {
             content,
             tool_calls,
+            invalid_tool_calls,
             usage: openai_usage(value.get("usage")),
             streamed: false,
         })
@@ -121,12 +128,15 @@ impl HttpModelProvider {
         let response = self.send_with_reasoning_fallback(&endpoint, &body).await?;
         let status = response.status();
         if !status.is_success() {
-            return checked_json(response)
+            return checked_json(response, "response_body")
                 .await
                 .map(|_| ModelResponse::default());
         }
         let mut state = ChatStreamState::default();
-        read_sse(response, |value| state.consume(&value, observer)).await?;
+        read_sse(response, "response_stream", |value| {
+            state.consume(&value, observer)
+        })
+        .await?;
         state.finish()
     }
 
@@ -141,10 +151,12 @@ impl HttpModelProvider {
             "instructions": request.system_prompt
         });
         let value = checked_json(
-            self.authenticated(self.client.post(endpoint))
-                .json(&body)
-                .send()
-                .await?,
+            send_request(
+                self.authenticated(self.client.post(endpoint)).json(&body),
+                "request_send",
+            )
+            .await?,
+            "response_body",
         )
         .await?;
         let mut messages = Vec::new();
@@ -219,15 +231,16 @@ impl HttpModelProvider {
             .authenticated(self.client.post(endpoint))
             .json(&body)
             .send()
-            .await?;
+            .await
+            .map_err(|error| transport_error("request_send", error))?;
         let status = response.status();
         if !status.is_success() {
-            return checked_json(response)
+            return checked_json(response, "response_body")
                 .await
                 .and_then(|_| anyhow::bail!("remote compaction returned no stream"));
         }
         let mut state = CompactionStreamState::default();
-        read_sse(response, |value| state.consume(&value)).await?;
+        read_sse(response, "compaction_stream", |value| state.consume(&value)).await?;
         let (item, usage) = state.finish()?;
         let mut messages = retained_user_history(&request.messages);
         messages.push(ChatMessage::provider_item(item));
@@ -249,9 +262,10 @@ impl HttpModelProvider {
         }
         apply_reasoning_effort(&mut body, request.reasoning_effort.as_deref(), true);
         let response = self.send_with_reasoning_fallback(&endpoint, &body).await?;
-        let value = checked_json(response).await?;
+        let value = checked_json(response, "response_body").await?;
         let mut content = String::new();
         let mut tool_calls = Vec::new();
+        let mut invalid_tool_calls = Vec::new();
         for item in value
             .get("output")
             .and_then(Value::as_array)
@@ -274,15 +288,17 @@ impl HttpModelProvider {
                         }
                     }
                 }
-                Some("function_call") => {
-                    tool_calls.push(parse_function_call_item(item)?);
-                }
+                Some("function_call") => match parse_function_call_item(item) {
+                    Ok(call) => tool_calls.push(call),
+                    Err(error) => invalid_tool_calls.push(invalid_tool_call(item, error)),
+                },
                 _ => {}
             }
         }
         Ok(ModelResponse {
             content,
             tool_calls,
+            invalid_tool_calls,
             usage: responses_usage(value.get("usage")),
             streamed: false,
         })
@@ -309,12 +325,15 @@ impl HttpModelProvider {
         let response = self.send_with_reasoning_fallback(&endpoint, &body).await?;
         let status = response.status();
         if !status.is_success() {
-            return checked_json(response)
+            return checked_json(response, "response_body")
                 .await
                 .map(|_| ModelResponse::default());
         }
         let mut state = ResponsesStreamState::default();
-        read_sse(response, |value| state.consume(&value, observer)).await?;
+        read_sse(response, "response_stream", |value| {
+            state.consume(&value, observer)
+        })
+        .await?;
         state.finish()
     }
 
@@ -363,9 +382,14 @@ impl HttpModelProvider {
         if !self.config.api_key.is_empty() {
             builder = builder.header("x-api-key", &self.config.api_key);
         }
-        let value = checked_json(builder.json(&body).send().await?).await?;
+        let value = checked_json(
+            send_request(builder.json(&body), "request_send").await?,
+            "response_body",
+        )
+        .await?;
         let mut content = String::new();
         let mut tool_calls = Vec::new();
+        let mut invalid_tool_calls = Vec::new();
         for block in value
             .get("content")
             .and_then(Value::as_array)
@@ -377,11 +401,19 @@ impl HttpModelProvider {
                         content.push_str(text);
                     }
                 }
-                Some("tool_use") => tool_calls.push(ToolCall {
-                    id: required_string(block, "id")?.to_string(),
-                    name: required_string(block, "name")?.to_string(),
-                    arguments: block.get("input").cloned().unwrap_or_else(|| json!({})),
-                }),
+                Some("tool_use") => {
+                    let parsed = (|| {
+                        Ok::<_, anyhow::Error>(ToolCall {
+                            id: required_string(block, "id")?.to_string(),
+                            name: required_string(block, "name")?.to_string(),
+                            arguments: parse_arguments(block.get("input").unwrap_or(&Value::Null))?,
+                        })
+                    })();
+                    match parsed {
+                        Ok(call) => tool_calls.push(call),
+                        Err(error) => invalid_tool_calls.push(invalid_tool_call(block, error)),
+                    }
+                }
                 _ => {}
             }
         }
@@ -389,6 +421,7 @@ impl HttpModelProvider {
         Ok(ModelResponse {
             content,
             tool_calls,
+            invalid_tool_calls,
             usage,
             streamed: false,
         })
@@ -438,29 +471,50 @@ impl HttpModelProvider {
         if !self.config.api_key.is_empty() {
             builder = builder.header("x-goog-api-key", &self.config.api_key);
         }
-        let value = checked_json(builder.json(&body).send().await?).await?;
+        let value = checked_json(
+            send_request(builder.json(&body), "request_send").await?,
+            "response_body",
+        )
+        .await?;
         let parts = value
             .pointer("/candidates/0/content/parts")
             .and_then(Value::as_array)
             .context("gemini response has no candidate content")?;
         let mut content = String::new();
         let mut tool_calls = Vec::new();
+        let mut invalid_tool_calls = Vec::new();
         for (index, part) in parts.iter().enumerate() {
             if let Some(text) = part.get("text").and_then(Value::as_str) {
                 content.push_str(text);
             }
             if let Some(call) = part.get("functionCall") {
-                tool_calls.push(ToolCall {
-                    id: format!("gemini-call-{index}"),
-                    name: required_string(call, "name")?.to_string(),
-                    arguments: call.get("args").cloned().unwrap_or_else(|| json!({})),
-                });
+                let id = format!("gemini-call-{index}");
+                let parsed = (|| {
+                    Ok::<_, anyhow::Error>(ToolCall {
+                        id: id.clone(),
+                        name: required_string(call, "name")?.to_string(),
+                        arguments: parse_arguments(call.get("args").unwrap_or(&Value::Null))?,
+                    })
+                })();
+                match parsed {
+                    Ok(call) => tool_calls.push(call),
+                    Err(error) => invalid_tool_calls.push(InvalidToolCall {
+                        id,
+                        name: call
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown")
+                            .to_owned(),
+                        reason: error.to_string(),
+                    }),
+                }
             }
         }
         let usage = value.get("usageMetadata");
         Ok(ModelResponse {
             content,
             tool_calls,
+            invalid_tool_calls,
             usage: TokenUsage {
                 input_tokens: nested_u64(usage, "promptTokenCount"),
                 cached_input_tokens: nested_u64(usage, "cachedContentTokenCount"),
@@ -492,19 +546,30 @@ impl HttpModelProvider {
             .authenticated(self.client.post(endpoint))
             .json(body)
             .send()
-            .await?;
+            .await
+            .map_err(|error| transport_error("request_send", error))?;
         if response.status().as_u16() != 400 || !has_reasoning_field(body) {
             return Ok(response);
         }
 
         let status = response.status();
+        let retry_after_ms = retry_after_ms(response.headers());
+        let request_id = response_request_id(response.headers());
         let response_body = response
             .text()
             .await
-            .context("failed to read provider response")?;
+            .map_err(|error| transport_error("response_body", error))?;
         if !rejects_reasoning_field(&response_body) {
-            let detail = response_body.chars().take(800).collect::<String>();
-            anyhow::bail!("provider returned HTTP {status}: {detail}")
+            return Err(ProviderRequestError {
+                phase: "response_body",
+                kind: ProviderErrorKind::Http,
+                status: Some(status.as_u16()),
+                retry_after_ms,
+                request_id,
+                retryable: false,
+                detail: safe_http_error_detail(status.as_u16(), &response_body),
+            }
+            .into());
         }
 
         let mut fallback = body.clone();
@@ -513,7 +578,8 @@ impl HttpModelProvider {
             .authenticated(self.client.post(endpoint))
             .json(&fallback)
             .send()
-            .await?)
+            .await
+            .map_err(|error| transport_error("request_send", error))?)
     }
 }
 
@@ -626,17 +692,76 @@ impl ModelProvider for HttpModelProvider {
     }
 }
 
-async fn read_sse(response: Response, mut consume: impl FnMut(Value) -> Result<()>) -> Result<()> {
+async fn send_request(builder: RequestBuilder, phase: &'static str) -> Result<Response> {
+    builder
+        .send()
+        .await
+        .map_err(|error| transport_error(phase, error))
+}
+
+fn transport_error(phase: &'static str, error: reqwest::Error) -> anyhow::Error {
+    let kind = if error.is_timeout() {
+        ProviderErrorKind::Timeout
+    } else if error.is_connect() {
+        ProviderErrorKind::Connect
+    } else {
+        ProviderErrorKind::Request
+    };
+    let retryable = matches!(
+        kind,
+        ProviderErrorKind::Timeout | ProviderErrorKind::Connect
+    );
+    let detail = error.without_url().to_string();
+    ProviderRequestError {
+        phase,
+        kind,
+        status: None,
+        retry_after_ms: None,
+        request_id: None,
+        retryable,
+        detail,
+    }
+    .into()
+}
+
+async fn read_sse(
+    response: Response,
+    phase: &'static str,
+    mut consume: impl FnMut(Value) -> Result<()>,
+) -> Result<()> {
+    let request_id = response_request_id(response.headers());
     let mut stream = response.bytes_stream();
     let mut buffer = Vec::new();
     while let Some(chunk) = stream.next().await {
-        buffer.extend_from_slice(&chunk.context("provider stream failed")?);
+        let chunk = chunk.map_err(|error| {
+            let detail = error.without_url().to_string();
+            anyhow::Error::new(ProviderRequestError {
+                phase,
+                kind: ProviderErrorKind::Stream,
+                status: None,
+                retry_after_ms: None,
+                request_id: request_id.clone(),
+                retryable: true,
+                detail,
+            })
+        })?;
+        buffer.extend_from_slice(&chunk);
         while let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
             let mut line = buffer.drain(..=newline).collect::<Vec<_>>();
             while matches!(line.last(), Some(b'\n' | b'\r')) {
                 line.pop();
             }
-            let line = String::from_utf8(line).context("provider stream was not UTF-8")?;
+            let line = String::from_utf8(line).map_err(|_| {
+                anyhow::Error::new(ProviderRequestError {
+                    phase,
+                    kind: ProviderErrorKind::Decode,
+                    status: None,
+                    retry_after_ms: None,
+                    request_id: request_id.clone(),
+                    retryable: false,
+                    detail: "provider stream was not UTF-8".into(),
+                })
+            })?;
             let Some(data) = line.strip_prefix("data:") else {
                 continue;
             };
@@ -644,7 +769,18 @@ async fn read_sse(response: Response, mut consume: impl FnMut(Value) -> Result<(
             if data.is_empty() || data == "[DONE]" {
                 continue;
             }
-            consume(serde_json::from_str(data).context("invalid provider SSE JSON")?)?;
+            let value = serde_json::from_str(data).map_err(|_| {
+                anyhow::Error::new(ProviderRequestError {
+                    phase,
+                    kind: ProviderErrorKind::Decode,
+                    status: None,
+                    retry_after_ms: None,
+                    request_id: request_id.clone(),
+                    retryable: false,
+                    detail: "provider stream contained invalid SSE JSON".into(),
+                })
+            })?;
+            consume(value)?;
         }
     }
     Ok(())
@@ -713,36 +849,38 @@ impl ChatStreamState {
     fn finish(mut self) -> Result<ModelResponse> {
         let tools = std::mem::take(&mut self.tools);
         let mut tool_calls = Vec::new();
+        let mut invalid_tool_calls = Vec::new();
         for (index, call) in tools.into_values().enumerate() {
-            // 容错：部分 OpenAI 兼容模型流式返回时漏掉 function.name。
-            // 不中断整个流：把该调用降级为文本追加到 content，让模型在下一轮
-            // 看到自己没有名称的原始参数后自行纠正。
+            let id = if call.id.is_empty() {
+                format!("call-{index}")
+            } else {
+                call.id
+            };
             if call.name.trim().is_empty() {
-                if !call.arguments.is_empty() {
-                    eprintln!(
-                        "[provider] streamed tool call has no name; demoting raw arguments to text: {}",
-                        call.arguments
-                    );
-                    self.content.push_str(&format!(
-                        "\n[tool call missing name; raw arguments: {}]\n",
-                        call.arguments
-                    ));
-                }
+                invalid_tool_calls.push(InvalidToolCall {
+                    id,
+                    name: "unknown".into(),
+                    reason: "streamed tool call has no function name".into(),
+                });
                 continue;
             }
-            tool_calls.push(ToolCall {
-                id: if call.id.is_empty() {
-                    format!("call-{index}")
-                } else {
-                    call.id
-                },
-                name: call.name,
-                arguments: parse_arguments(&Value::String(call.arguments))?,
-            });
+            match parse_arguments(&Value::String(call.arguments)) {
+                Ok(arguments) => tool_calls.push(ToolCall {
+                    id,
+                    name: call.name,
+                    arguments,
+                }),
+                Err(error) => invalid_tool_calls.push(InvalidToolCall {
+                    id,
+                    name: call.name,
+                    reason: error.to_string(),
+                }),
+            }
         }
         Ok(ModelResponse {
             content: self.content,
             tool_calls,
+            invalid_tool_calls,
             usage: self.usage,
             streamed: true,
         })
@@ -772,13 +910,7 @@ impl CompactionStreamState {
                 self.usage = responses_usage(value.pointer("/response/usage"));
             }
             Some("error" | "response.failed") => {
-                anyhow::bail!(
-                    "provider compaction stream failed: {}",
-                    value
-                        .pointer("/error/message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown error")
-                );
+                return Err(stream_event_error("compaction_stream", value));
             }
             _ => {}
         }
@@ -855,13 +987,7 @@ impl ResponsesStreamState {
                 self.usage = responses_usage(value.pointer("/response/usage"));
             }
             Some("error" | "response.failed") => {
-                anyhow::bail!(
-                    "provider stream failed: {}",
-                    value
-                        .pointer("/error/message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown error")
-                );
+                return Err(stream_event_error("response_stream", value));
             }
             _ => {}
         }
@@ -871,36 +997,38 @@ impl ResponsesStreamState {
     fn finish(mut self) -> Result<ModelResponse> {
         let tools = std::mem::take(&mut self.tools);
         let mut tool_calls = Vec::new();
+        let mut invalid_tool_calls = Vec::new();
         for (index, call) in tools.into_values().enumerate() {
-            // 容错：部分 OpenAI 兼容模型流式返回时漏掉 function.name。
-            // 不中断整个流：把该调用降级为文本追加到 content，让模型在下一轮
-            // 看到自己没有名称的原始参数后自行纠正。
+            let id = if call.id.is_empty() {
+                format!("call-{index}")
+            } else {
+                call.id
+            };
             if call.name.trim().is_empty() {
-                if !call.arguments.is_empty() {
-                    eprintln!(
-                        "[provider] streamed tool call has no name; demoting raw arguments to text: {}",
-                        call.arguments
-                    );
-                    self.content.push_str(&format!(
-                        "\n[tool call missing name; raw arguments: {}]\n",
-                        call.arguments
-                    ));
-                }
+                invalid_tool_calls.push(InvalidToolCall {
+                    id,
+                    name: "unknown".into(),
+                    reason: "streamed tool call has no function name".into(),
+                });
                 continue;
             }
-            tool_calls.push(ToolCall {
-                id: if call.id.is_empty() {
-                    format!("call-{index}")
-                } else {
-                    call.id
-                },
-                name: call.name,
-                arguments: parse_arguments(&Value::String(call.arguments))?,
-            });
+            match parse_arguments(&Value::String(call.arguments)) {
+                Ok(arguments) => tool_calls.push(ToolCall {
+                    id,
+                    name: call.name,
+                    arguments,
+                }),
+                Err(error) => invalid_tool_calls.push(InvalidToolCall {
+                    id,
+                    name: call.name,
+                    reason: error.to_string(),
+                }),
+            }
         }
         Ok(ModelResponse {
             content: self.content,
             tool_calls,
+            invalid_tool_calls,
             usage: self.usage,
             streamed: true,
         })
@@ -916,17 +1044,156 @@ fn endpoint(base_url: &str, suffix: &str) -> String {
     }
 }
 
-async fn checked_json(response: Response) -> Result<Value> {
+async fn checked_json(response: Response, phase: &'static str) -> Result<Value> {
     let status = response.status();
+    let retry_after_ms = retry_after_ms(response.headers());
+    let request_id = response_request_id(response.headers());
     let body = response
         .text()
         .await
-        .context("failed to read provider response")?;
+        .map_err(|error| transport_error(phase, error))?;
     if !status.is_success() {
-        let detail = body.chars().take(800).collect::<String>();
-        anyhow::bail!("provider returned HTTP {status}: {detail}")
+        return Err(ProviderRequestError {
+            phase,
+            kind: ProviderErrorKind::Http,
+            status: Some(status.as_u16()),
+            retry_after_ms,
+            request_id,
+            retryable: matches!(status.as_u16(), 408 | 425 | 429 | 500 | 502 | 503 | 504),
+            detail: safe_http_error_detail(status.as_u16(), &body),
+        }
+        .into());
     }
-    serde_json::from_str(&body).context("provider returned invalid JSON")
+    serde_json::from_str(&body).map_err(|_| {
+        ProviderRequestError {
+            phase,
+            kind: ProviderErrorKind::Decode,
+            status: Some(status.as_u16()),
+            retry_after_ms: None,
+            request_id,
+            retryable: false,
+            detail: "provider returned invalid JSON".into(),
+        }
+        .into()
+    })
+}
+
+fn retry_after_ms(headers: &HeaderMap) -> Option<u64> {
+    let value = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(seconds.saturating_mul(1_000));
+    }
+    let target = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    let delay = target.timestamp_millis() - chrono::Utc::now().timestamp_millis();
+    u64::try_from(delay.max(0)).ok()
+}
+
+fn response_request_id(headers: &HeaderMap) -> Option<String> {
+    ["x-request-id", "request-id", "x-trace-id"]
+        .iter()
+        .find_map(|name| headers.get(*name))
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
+        .map(ToOwned::to_owned)
+}
+
+fn safe_http_error_detail(status: u16, body: &str) -> String {
+    let lower = body.to_ascii_lowercase();
+    let summary = if ["image_url", "input_image", "inline_data", "media_type"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+        || lower.contains("vision is not supported")
+        || lower.contains("image input is not supported")
+        || lower.contains("multimodal")
+        || lower.contains("expected `text`")
+    {
+        "provider rejected image input (image_url)"
+    } else if lower.contains("context_window_exceeded")
+        || lower.contains("context length")
+        || lower.contains("maximum context")
+        || lower.contains("too many tokens")
+    {
+        "provider context_window_exceeded"
+    } else if status == 429
+        || lower.contains("rate limit")
+        || lower.contains("tpm")
+        || lower.contains("quota")
+    {
+        "provider rate or token limit was exceeded"
+    } else if matches!(status, 401 | 403) {
+        "provider authentication or authorization failed"
+    } else if status == 404 {
+        "provider endpoint was not found; verify the Base URL and protocol"
+    } else if status >= 500 {
+        "provider service is temporarily unavailable"
+    } else {
+        "provider rejected the request"
+    };
+    let code = serde_json::from_str::<Value>(body).ok().and_then(|value| {
+        value
+            .pointer("/error/code")
+            .or_else(|| value.pointer("/error/type"))
+            .or_else(|| value.get("code"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 80
+                    && value.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                    })
+            })
+            .map(ToOwned::to_owned)
+    });
+    match code {
+        Some(code) => format!("{summary} (code={code})"),
+        None => summary.to_owned(),
+    }
+}
+
+fn stream_event_error(phase: &'static str, value: &Value) -> anyhow::Error {
+    let message = value
+        .pointer("/error/message")
+        .or_else(|| value.pointer("/response/error/message"))
+        .and_then(Value::as_str)
+        .unwrap_or("provider stream failed");
+    let lower = message.to_ascii_lowercase();
+    let retryable = lower.contains("rate limit")
+        || lower.contains("tpm")
+        || lower.contains("quota")
+        || lower.contains("temporarily unavailable")
+        || lower.contains("internal server error")
+        || lower.contains("overloaded")
+        || lower.contains("service unavailable");
+    let status = if lower.contains("rate limit") || lower.contains("tpm") || lower.contains("quota")
+    {
+        429
+    } else if retryable {
+        503
+    } else {
+        400
+    };
+    ProviderRequestError {
+        phase,
+        kind: ProviderErrorKind::Stream,
+        status: None,
+        retry_after_ms: None,
+        request_id: None,
+        retryable,
+        detail: safe_http_error_detail(status, &value.to_string()),
+    }
+    .into()
 }
 
 fn openai_messages(messages: &[ChatMessage], supports_vision: bool) -> Result<Vec<Value>> {
@@ -1187,25 +1454,47 @@ fn gemini_messages(
     Ok((system.join("\n\n"), output))
 }
 
-fn parse_openai_tool_calls(value: Option<&Value>) -> Result<Vec<ToolCall>> {
-    value
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .map(|call| {
+fn parse_openai_tool_calls(value: Option<&Value>) -> Result<(Vec<ToolCall>, Vec<InvalidToolCall>)> {
+    let mut valid = Vec::new();
+    let mut invalid = Vec::new();
+    for call in value.and_then(Value::as_array).into_iter().flatten() {
+        let parsed = (|| {
             let function = call
                 .get("function")
                 .context("tool call has no function object")?;
             let arguments = function
                 .get("arguments")
                 .context("tool call has no arguments")?;
-            Ok(ToolCall {
+            Ok::<_, anyhow::Error>(ToolCall {
                 id: required_string(call, "id")?.to_string(),
                 name: required_string(function, "name")?.to_string(),
                 arguments: parse_arguments(arguments)?,
             })
-        })
-        .collect()
+        })();
+        match parsed {
+            Ok(call) => valid.push(call),
+            Err(error) => invalid.push(invalid_tool_call(call, error)),
+        }
+    }
+    Ok((valid, invalid))
+}
+
+fn invalid_tool_call(value: &Value, error: anyhow::Error) -> InvalidToolCall {
+    let function = value.get("function").unwrap_or(value);
+    InvalidToolCall {
+        id: value
+            .get("call_id")
+            .or_else(|| value.get("id"))
+            .and_then(Value::as_str)
+            .unwrap_or("invalid-tool-call")
+            .to_owned(),
+        name: function
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned(),
+        reason: error.to_string(),
+    }
 }
 
 fn parse_function_call_item(item: &Value) -> Result<ToolCall> {
@@ -1226,15 +1515,92 @@ fn parse_function_call_item(item: &Value) -> Result<ToolCall> {
 
 fn parse_arguments(value: &Value) -> Result<Value> {
     let parsed = match value {
-        Value::String(value) => {
-            serde_json::from_str(value).context("tool arguments are not valid JSON")?
-        }
+        Value::String(value) => parse_argument_text(value)?,
         value => value.clone(),
     };
     if !parsed.is_object() {
         anyhow::bail!("tool arguments must be a JSON object")
     }
     Ok(parsed)
+}
+
+fn parse_argument_text(input: &str) -> Result<Value> {
+    let trimmed = input.trim();
+    if let Ok(value) = serde_json::from_str(trimmed) {
+        return Ok(value);
+    }
+    if let Some(fenced) = strip_json_fence(trimmed)
+        && let Ok(value) = serde_json::from_str(fenced)
+    {
+        return Ok(value);
+    }
+    if let Some(object) = extract_json_object(trimmed)
+        && let Ok(value) = serde_json::from_str(object)
+    {
+        return Ok(value);
+    }
+    anyhow::bail!("tool arguments are not valid JSON")
+}
+
+fn strip_json_fence(input: &str) -> Option<&str> {
+    let body = input.strip_prefix("```")?;
+    let newline = body.find('\n')?;
+    let language = body[..newline].trim();
+    if !language.is_empty() && !language.eq_ignore_ascii_case("json") {
+        return None;
+    }
+    body[newline + 1..].strip_suffix("```").map(str::trim)
+}
+
+fn extract_json_object(input: &str) -> Option<&str> {
+    let bytes = input.as_bytes();
+    let mut start = None;
+    let mut candidate = None;
+    let mut depth = 0_u32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (offset, byte) in bytes.iter().copied().enumerate() {
+        if depth == 0 {
+            if byte != b'{' {
+                continue;
+            }
+            start = Some(offset);
+            depth = 1;
+            in_string = false;
+            escaped = false;
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    let object_start = start?;
+                    let value = input.get(object_start..=offset)?;
+                    if serde_json::from_str::<Map<String, Value>>(value).is_ok() {
+                        if candidate.is_some() {
+                            return None;
+                        }
+                        candidate = Some(value);
+                    }
+                    start = None;
+                }
+            }
+            _ => {}
+        }
+    }
+    candidate
 }
 
 fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
@@ -1338,9 +1704,120 @@ fn nested_u64(value: Option<&Value>, key: &str) -> u64 {
 mod tests {
     use super::*;
 
+    struct IgnoreStream;
+
+    impl ModelStreamObserver for IgnoreStream {
+        fn on_text_delta(&self, _delta: &str) {}
+
+        fn on_reasoning_delta(&self, _delta: &str) {}
+    }
+
     #[test]
     fn rejects_non_object_tool_arguments() {
         assert!(parse_arguments(&Value::String("[]".into())).is_err());
+    }
+
+    #[test]
+    fn normalizes_safe_wrappers_around_tool_arguments() {
+        assert_eq!(
+            parse_arguments(&Value::String(
+                "```json\n{\"path\":\"README.md\"}\n```".into()
+            ))
+            .expect("JSON fence"),
+            json!({"path": "README.md"})
+        );
+        assert_eq!(
+            parse_arguments(&Value::String(
+                "I will use these arguments: {\"path\":\"README.md\"}.".into()
+            ))
+            .expect("one embedded object"),
+            json!({"path": "README.md"})
+        );
+    }
+
+    #[test]
+    fn does_not_guess_or_choose_ambiguous_tool_arguments() {
+        for input in [
+            "{\"path\":\"README.md\"",
+            "{'path':'README.md'}",
+            "prefix [1, 2] suffix",
+            "first {\"a\":1} then {\"b\":2}",
+        ] {
+            assert!(
+                parse_arguments(&Value::String(input.into())).is_err(),
+                "unexpectedly accepted {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn streamed_invalid_tool_arguments_are_reported_not_executed() {
+        let mut state = ChatStreamState::default();
+        state
+            .consume(
+                &json!({
+                    "choices": [{"delta": {"tool_calls": [{
+                        "index": 0,
+                        "id": "call-1",
+                        "function": {"name": "read_file", "arguments": "{\"path\":"}
+                    }]}}]
+                }),
+                &IgnoreStream,
+            )
+            .expect("consume stream delta");
+        let response = state.finish().expect("finish stream");
+        assert!(response.tool_calls.is_empty());
+        assert_eq!(response.invalid_tool_calls.len(), 1);
+        assert_eq!(response.invalid_tool_calls[0].name, "read_file");
+    }
+
+    #[test]
+    fn retry_after_and_request_id_headers_are_strictly_parsed() {
+        let mut headers = HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "12".parse().expect("header"));
+        headers.insert("x-request-id", "req_abc-123.4".parse().expect("header"));
+        assert_eq!(retry_after_ms(&headers), Some(12_000));
+        assert_eq!(
+            response_request_id(&headers).as_deref(),
+            Some("req_abc-123.4")
+        );
+
+        headers.insert("x-request-id", "unsafe request id".parse().expect("header"));
+        assert_eq!(response_request_id(&headers), None);
+    }
+
+    #[test]
+    fn http_error_detail_keeps_diagnostics_without_echoing_secrets() {
+        let body = r#"{"error":{"code":"rate_limit_exceeded","message":"TPM exhausted for key sk-secret and https://host.test?token=secret"}}"#;
+        let detail = safe_http_error_detail(429, body);
+        assert!(detail.contains("rate or token limit"));
+        assert!(detail.contains("rate_limit_exceeded"));
+        assert!(!detail.contains("sk-secret"));
+        assert!(!detail.contains("token=secret"));
+    }
+
+    #[test]
+    fn stream_error_events_are_classified_and_sanitized() {
+        let error = stream_event_error(
+            "response_stream",
+            &json!({"error": {"message": "TPM exhausted for key sk-secret"}}),
+        );
+        let structured = error
+            .downcast_ref::<ProviderRequestError>()
+            .expect("structured provider error");
+        assert!(structured.retryable);
+        assert!(structured.detail.contains("rate or token limit"));
+        assert!(!structured.detail.contains("sk-secret"));
+
+        let error = stream_event_error(
+            "response_stream",
+            &json!({"error": {"message": "invalid image_url content"}}),
+        );
+        let structured = error
+            .downcast_ref::<ProviderRequestError>()
+            .expect("structured provider error");
+        assert!(!structured.retryable);
+        assert!(structured.detail.contains("image_url"));
     }
 
     #[test]

@@ -362,13 +362,23 @@ export const useConfigStore = defineStore('config', () => {
 
   async function activateProvider(id: string): Promise<boolean> {
     if (usingMock.value) {
-      if (!providers.value.some(provider => provider.id === id)) return false
+      const provider = providers.value.find(item => item.id === id)
+      if (!provider) return false
       activeId.value = id
+      selectModel(id, provider.model || provider.models[0] || '')
       return true
     }
     try {
       await apiSend(`/api/providers/${encodeURIComponent(id)}/activate`, 'POST')
       await fetchProviders()
+      const provider = providers.value.find(item => item.id === id)
+      if (!provider) throw new Error('已激活的提供商未出现在配置列表中')
+      const savedProvider = localStorage.getItem('coomi.providerId')
+      const savedModel = localStorage.getItem('coomi.model')
+      const model = savedProvider === id && provider.models.includes(savedModel ?? '')
+        ? savedModel!
+        : (provider.model || provider.models[0] || '')
+      selectModel(id, model)
       return true
     } catch (e) {
       lastError.value = String(e)

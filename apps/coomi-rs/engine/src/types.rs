@@ -191,6 +191,13 @@ pub struct ToolCall {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct InvalidToolCall {
+    pub id: String,
+    pub name: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ToolSpec {
     pub name: String,
     pub description: String,
@@ -278,9 +285,55 @@ impl TokenUsage {
 pub struct ModelResponse {
     pub content: String,
     pub tool_calls: Vec<ToolCall>,
+    /// Tool calls that were rejected before execution because their arguments
+    /// could not be normalized to a JSON object.
+    pub invalid_tool_calls: Vec<InvalidToolCall>,
     pub usage: TokenUsage,
     pub streamed: bool,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderErrorKind {
+    Http,
+    Timeout,
+    Connect,
+    Request,
+    Stream,
+    Decode,
+}
+
+#[derive(Debug)]
+pub struct ProviderRequestError {
+    pub phase: &'static str,
+    pub kind: ProviderErrorKind,
+    pub status: Option<u16>,
+    pub retry_after_ms: Option<u64>,
+    pub request_id: Option<String>,
+    pub retryable: bool,
+    pub detail: String,
+}
+
+impl std::fmt::Display for ProviderRequestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "provider error [phase={} kind={:?} retryable={}",
+            self.phase, self.kind, self.retryable
+        )?;
+        if let Some(status) = self.status {
+            write!(formatter, " status={status}")?;
+        }
+        if let Some(retry_after_ms) = self.retry_after_ms {
+            write!(formatter, " retry_after_ms={retry_after_ms}")?;
+        }
+        if let Some(request_id) = &self.request_id {
+            write!(formatter, " request_id={request_id}")?;
+        }
+        write!(formatter, "]: {}", self.detail)
+    }
+}
+
+impl std::error::Error for ProviderRequestError {}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolResult {

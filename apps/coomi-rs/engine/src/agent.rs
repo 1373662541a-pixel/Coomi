@@ -7,6 +7,7 @@ use crate::InputQueue;
 use crate::ModelProvider;
 use crate::ModelRequest;
 use crate::ModelStreamObserver;
+use crate::ProviderRequestError;
 use crate::SUMMARIZATION_PROMPT;
 use crate::Session;
 use crate::ToolRuntime;
@@ -50,6 +51,7 @@ pub struct Agent {
     /// 为 false 时（图片降级会话）每个模型请求前都会剥离历史/当轮
     /// 工具消息携带的图片，避免上游拒绝图片导致整会话反复失败。
     vision_replay: bool,
+    vision_fallback: Option<Arc<dyn Fn() + Send + Sync>>,
     reasoning_effort: Option<String>,
     /// 上下文检查点回调：任务执行中的关键节点（用户消息、模型回复、每轮
     /// 工具结果）落盘会话，意外中断/重启后仍能从磁盘恢复完整上下文。
@@ -64,6 +66,7 @@ impl Agent {
             force_compaction: false,
             input_queue: None,
             vision_replay: true,
+            vision_fallback: None,
             reasoning_effort: None,
             checkpoint: None,
         }
@@ -100,6 +103,11 @@ impl Agent {
 
     pub fn with_vision_replay(mut self, vision_replay: bool) -> Self {
         self.vision_replay = vision_replay;
+        self
+    }
+
+    pub fn with_vision_fallback(mut self, fallback: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.vision_fallback = Some(fallback);
         self
     }
 
@@ -297,8 +305,10 @@ impl Agent {
         let tool_specs = tools.specs();
         let capabilities = provider.capabilities();
         let mut compacted_for_provider_error = false;
+        let mut vision_replay = self.vision_replay;
+        let mut invalid_tool_retry_used = false;
 
-        for round in 1..=self.max_tool_rounds {
+        'tool_rounds: for round in 1..=self.max_tool_rounds {
             session.messages = normalize_history(&session.messages);
             session
                 .context
@@ -328,7 +338,7 @@ impl Agent {
             let mut messages = Vec::with_capacity(session.messages.len() + 1);
             messages.push(ChatMessage::system(self.system_prompt.clone()));
             messages.extend(session.messages.iter().cloned());
-            if !self.vision_replay {
+            if !vision_replay {
                 // 图片降级：请求中剥离工具消息携带的图片（base64），避免上游
                 // 拒绝图片导致整会话反复失败。图片本身仍留在会话记录中，
                 // 前端历史展示与 show_image 预览不受影响。
@@ -336,40 +346,63 @@ impl Agent {
                     message.images.clear();
                 }
             }
-            let request = ModelRequest {
+            let mut request = ModelRequest {
                 model: provider.model().to_string(),
                 messages,
                 tools: tool_specs.clone(),
                 reasoning_effort: self.reasoning_effort.clone(),
             };
             let stream_observer = ObserverStream { observer };
-            let response = match provider
-                .complete_stream(request.clone(), &stream_observer)
-                .await
-            {
-                Ok(response) => response,
-                Err(error) if !compacted_for_provider_error && is_context_window_error(&error) => {
-                    compacted_for_provider_error = true;
-                    self.compact(session, provider, &tool_specs, observer, true)
-                        .await?;
-                    self.run_checkpoint(session);
-                    continue;
-                }
-                Err(error) if is_transient_provider_error(&error) => {
-                    observer.on_event(&AgentEvent::StreamReset);
-                    observer.on_event(&AgentEvent::ConnectionRetry {
-                        attempt: 1,
-                        max_attempts: 1,
-                        delay_ms: 2000,
-                        message: "网络或上游服务暂时不可用，正在自动恢复".into(),
-                    });
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    match provider.complete_stream(request, &stream_observer).await {
-                        Ok(response) => response,
-                        Err(retry_error) => return Err(AgentError::Provider(retry_error)),
+            let mut retry_attempt = 0_u8;
+            let mut image_retry_used = false;
+            let response = loop {
+                match provider
+                    .complete_stream(request.clone(), &stream_observer)
+                    .await
+                {
+                    Ok(response) => break response,
+                    Err(error)
+                        if !compacted_for_provider_error && is_context_window_error(&error) =>
+                    {
+                        compacted_for_provider_error = true;
+                        self.compact(session, provider, &tool_specs, observer, true)
+                            .await?;
+                        self.run_checkpoint(session);
+                        continue 'tool_rounds;
                     }
+                    Err(error)
+                        if !image_retry_used
+                            && request_has_images(&request)
+                            && is_image_compatibility_error(&error) =>
+                    {
+                        image_retry_used = true;
+                        vision_replay = false;
+                        strip_request_images(&mut request);
+                        if let Some(fallback) = &self.vision_fallback {
+                            fallback();
+                        }
+                        observer.on_event(&AgentEvent::StreamReset);
+                        observer.on_event(&AgentEvent::ConnectionRetry {
+                            attempt: 1,
+                            max_attempts: 1,
+                            delay_ms: 0,
+                            message: "当前模型拒绝图片内容，正在切换为纯文本恢复".into(),
+                        });
+                    }
+                    Err(error) if retry_attempt < 2 && is_transient_provider_error(&error) => {
+                        retry_attempt += 1;
+                        let delay_ms = retry_delay_ms(&error, retry_attempt);
+                        observer.on_event(&AgentEvent::StreamReset);
+                        observer.on_event(&AgentEvent::ConnectionRetry {
+                            attempt: retry_attempt,
+                            max_attempts: 2,
+                            delay_ms,
+                            message: "网络或上游服务暂时不可用，正在自动恢复".into(),
+                        });
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    }
+                    Err(error) => return Err(AgentError::Provider(error)),
                 }
-                Err(error) => return Err(AgentError::Provider(error)),
             };
 
             session.usage.add(&response.usage);
@@ -380,9 +413,14 @@ impl Agent {
             if !response.streamed && !response.content.is_empty() {
                 observer.on_event(&AgentEvent::Text(response.content.clone()));
             }
+            let recorded_tool_calls = if response.invalid_tool_calls.is_empty() {
+                response.tool_calls.clone()
+            } else {
+                Vec::new()
+            };
             session.messages.push(ChatMessage::assistant(
                 response.content.clone(),
-                response.tool_calls.clone(),
+                recorded_tool_calls,
             ));
             session.context.observe_usage(
                 &response.usage,
@@ -395,6 +433,26 @@ impl Agent {
                 session.context.status(&capabilities),
             ));
             self.run_checkpoint(session);
+
+            if !response.invalid_tool_calls.is_empty() {
+                if invalid_tool_retry_used {
+                    return Err(AgentError::Provider(anyhow::anyhow!(
+                        "provider returned invalid tool arguments after one correction attempt"
+                    )));
+                }
+                invalid_tool_retry_used = true;
+                let problems = response
+                    .invalid_tool_calls
+                    .iter()
+                    .map(|call| format!("{}: {}", call.name, call.reason))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                session.messages.push(ChatMessage::internal_user(format!(
+                    "<tool_call_correction>The previous tool call was not executed because its arguments were invalid. Return the same tool call once more with one valid JSON object matching the tool schema. Do not use Markdown fences or explanatory text. Problems: {problems}</tool_call_correction>"
+                )));
+                self.run_checkpoint(session);
+                continue;
+            }
 
             if response.tool_calls.is_empty() {
                 if self.accept_queued_input(session, observer) {
@@ -452,6 +510,11 @@ impl Agent {
         observer.on_event(&AgentEvent::CompactionStarted { automatic });
         let capabilities = provider.capabilities();
         let mut normalized = normalize_history(&session.messages);
+        // Compaction endpoints are commonly text-only even when normal chat supports
+        // vision. Keep the textual tool result while never replaying image payloads.
+        for message in &mut normalized {
+            message.images.clear();
+        }
         let compaction_limit = capabilities
             .context_window
             .saturating_sub(capabilities.max_output_tokens)
@@ -534,6 +597,9 @@ impl Agent {
 }
 
 fn is_transient_provider_error(error: &anyhow::Error) -> bool {
+    if let Some(error) = error.downcast_ref::<ProviderRequestError>() {
+        return error.retryable;
+    }
     let text = error.to_string().to_ascii_lowercase();
     if ["http 400", "http 401", "http 402", "http 403", "http 404"]
         .iter()
@@ -554,6 +620,52 @@ fn is_transient_provider_error(error: &anyhow::Error) -> bool {
         "504",
         "429",
         "temporarily unavailable",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
+fn retry_delay_ms(error: &anyhow::Error, attempt: u8) -> u64 {
+    if let Some(delay) = error
+        .downcast_ref::<ProviderRequestError>()
+        .and_then(|error| error.retry_after_ms)
+    {
+        return delay.clamp(250, 30_000);
+    }
+    let base = 1_000_u64.saturating_mul(1_u64 << attempt.saturating_sub(1));
+    let jitter = (error
+        .to_string()
+        .bytes()
+        .fold(0_u64, |sum, byte| sum.wrapping_add(u64::from(byte)))
+        % 251)
+        + 50;
+    base.saturating_add(jitter).min(10_000)
+}
+
+fn request_has_images(request: &ModelRequest) -> bool {
+    request
+        .messages
+        .iter()
+        .any(|message| !message.images.is_empty())
+}
+
+fn strip_request_images(request: &mut ModelRequest) {
+    for message in &mut request.messages {
+        message.images.clear();
+    }
+}
+
+fn is_image_compatibility_error(error: &anyhow::Error) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    [
+        "image_url",
+        "input_image",
+        "inline_data",
+        "media_type",
+        "multimodal",
+        "vision is not supported",
+        "image input is not supported",
+        "expected `text`",
     ]
     .iter()
     .any(|needle| text.contains(needle))
@@ -625,9 +737,11 @@ fn is_context_window_error(error: &anyhow::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::InvalidToolCall;
     use crate::ModelCapabilities;
     use crate::ModelResponse;
     use crate::NoopObserver;
+    use crate::ProviderErrorKind;
     use crate::ToolCall;
     use crate::ToolResult;
     use crate::ToolSpec;
@@ -636,6 +750,9 @@ mod tests {
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
 
     struct Approve;
 
@@ -887,6 +1004,216 @@ mod tests {
         assert!(is_transient_provider_error(&anyhow::anyhow!(
             "provider stream failed: connection reset"
         )));
+    }
+
+    struct CountingTool {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ToolRuntime for CountingTool {
+        fn specs(&self) -> Vec<ToolSpec> {
+            EchoTool.specs()
+        }
+
+        async fn call(&self, _call: &ToolCall, _approval: &dyn ApprovalHandler) -> ToolResult {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            ToolResult::success("unexpected")
+        }
+    }
+
+    struct InvalidToolProvider {
+        requests: Mutex<Vec<ModelRequest>>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for InvalidToolProvider {
+        fn provider_id(&self) -> &str {
+            "mock"
+        }
+
+        fn model(&self) -> &str {
+            "invalid-tool"
+        }
+
+        async fn complete(&self, request: ModelRequest) -> Result<ModelResponse> {
+            self.requests.lock().expect("requests").push(request);
+            Ok(ModelResponse {
+                invalid_tool_calls: vec![InvalidToolCall {
+                    id: "call-1".into(),
+                    name: "echo".into(),
+                    reason: "tool arguments are not valid JSON".into(),
+                }],
+                ..Default::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_tool_arguments_get_one_correction_and_never_execute() {
+        let provider = InvalidToolProvider {
+            requests: Mutex::new(Vec::new()),
+        };
+        let tools = CountingTool {
+            calls: AtomicUsize::new(0),
+        };
+        let mut session = Session::new("mock", "invalid-tool", PathBuf::from("."));
+        let error = Agent::new("test")
+            .run_turn(
+                &mut session,
+                "run",
+                &provider,
+                &tools,
+                &Approve,
+                &NoopObserver,
+            )
+            .await
+            .expect_err("second invalid call should terminate");
+        assert!(error.to_string().contains("after one correction attempt"));
+        assert_eq!(tools.calls.load(Ordering::SeqCst), 0);
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].messages.iter().any(|message| {
+            message.internal && message.content.contains("tool_call_correction")
+        }));
+    }
+
+    struct ImageFallbackProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ModelProvider for ImageFallbackProvider {
+        fn provider_id(&self) -> &str {
+            "mock"
+        }
+
+        fn model(&self) -> &str {
+            "image-fallback"
+        }
+
+        async fn complete(&self, request: ModelRequest) -> Result<ModelResponse> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                assert!(request_has_images(&request));
+                return Err(ProviderRequestError {
+                    phase: "response_body",
+                    kind: ProviderErrorKind::Http,
+                    status: Some(400),
+                    retry_after_ms: None,
+                    request_id: None,
+                    retryable: false,
+                    detail: "provider rejected image input (image_url)".into(),
+                }
+                .into());
+            }
+            assert!(!request_has_images(&request));
+            Ok(ModelResponse {
+                content: "recovered".into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn image_protocol_error_retries_same_round_without_images() {
+        let provider = ImageFallbackProvider {
+            calls: AtomicUsize::new(0),
+        };
+        let degraded = Arc::new(AtomicBool::new(false));
+        let mut session = Session::new("mock", "image-fallback", PathBuf::from("."));
+        let mut image_message = ChatMessage::user("inspect this image");
+        image_message.images.push(crate::ImageContent {
+            media_type: "image/png".into(),
+            data: "BASE64".into(),
+        });
+        session.messages.push(image_message);
+        let output = Agent::new("test")
+            .with_vision_fallback({
+                let degraded = Arc::clone(&degraded);
+                Arc::new(move || degraded.store(true, Ordering::SeqCst))
+            })
+            .run_turn(
+                &mut session,
+                "continue",
+                &provider,
+                &EchoTool,
+                &Approve,
+                &NoopObserver,
+            )
+            .await
+            .expect("image fallback turn");
+        assert_eq!(output, "recovered");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+        assert!(degraded.load(Ordering::SeqCst));
+    }
+
+    struct AlwaysTransientProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ModelProvider for AlwaysTransientProvider {
+        fn provider_id(&self) -> &str {
+            "mock"
+        }
+
+        fn model(&self) -> &str {
+            "transient"
+        }
+
+        async fn complete(&self, _request: ModelRequest) -> Result<ModelResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(ProviderRequestError {
+                phase: "response_body",
+                kind: ProviderErrorKind::Http,
+                status: Some(429),
+                retry_after_ms: Some(0),
+                request_id: None,
+                retryable: true,
+                detail: "provider rate or token limit was exceeded".into(),
+            }
+            .into())
+        }
+    }
+
+    #[tokio::test]
+    async fn transient_provider_failure_retries_at_most_twice() {
+        let provider = AlwaysTransientProvider {
+            calls: AtomicUsize::new(0),
+        };
+        let mut session = Session::new("mock", "transient", PathBuf::from("."));
+        Agent::new("test")
+            .run_turn(
+                &mut session,
+                "run",
+                &provider,
+                &EchoTool,
+                &Approve,
+                &NoopObserver,
+            )
+            .await
+            .expect_err("transient failure should stop after retries");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn structured_retry_policy_and_delay_are_bounded() {
+        for (status, retryable) in [(400, false), (404, false), (429, true), (503, true)] {
+            let error = anyhow::Error::new(ProviderRequestError {
+                phase: "response_body",
+                kind: ProviderErrorKind::Http,
+                status: Some(status),
+                retry_after_ms: Some(if status == 429 { 90_000 } else { 0 }),
+                request_id: None,
+                retryable,
+                detail: "classified".into(),
+            });
+            assert_eq!(is_transient_provider_error(&error), retryable);
+            if status == 429 {
+                assert_eq!(retry_delay_ms(&error, 1), 30_000);
+            }
+        }
     }
 
     #[test]

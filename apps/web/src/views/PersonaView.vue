@@ -8,12 +8,13 @@ import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useConfigStore } from '@/stores/config'
 import PageHead from '@/components/PageHead.vue'
+import { goBack } from '@/bridge/navigation'
 
 const router = useRouter()
 const config = useConfigStore()
 
 /** 与后端 CUSTOM_PROMPT_MAX_CHARS 保持一致。 */
-const MAX_CHARS = 2000
+const MAX_CHARS = 20000
 
 const text = ref('')
 const loading = ref(true)
@@ -46,7 +47,7 @@ async function save() {
 
 <template>
   <div class="page">
-    <PageHead title="身份定位" @back="router.push('/settings')" />
+    <PageHead title="身份定位" @back="goBack(router, '/settings')" />
     <main class="body">
       <div class="card">
         <p class="desc">

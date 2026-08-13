@@ -604,7 +604,7 @@ impl CoreTools {
         {
             Ok(client) => client,
             Err(error) => {
-                return ToolResult::error(format!("HTTP client initialization failed: {error}"))
+                return ToolResult::error(format!("HTTP client initialization failed: {error}"));
             }
         };
         // Follow redirects manually so every hop can be re-checked against local/private
@@ -645,10 +645,10 @@ impl CoreTools {
                 match current.join(location) {
                     Ok(next) if matches!(next.scheme(), "http" | "https") => current = next,
                     Ok(_) => {
-                        return ToolResult::error("redirect to a non-http(s) URL is not allowed")
+                        return ToolResult::error("redirect to a non-http(s) URL is not allowed");
                     }
                     Err(error) => {
-                        return ToolResult::error(format!("invalid redirect location: {error}"))
+                        return ToolResult::error(format!("invalid redirect location: {error}"));
                     }
                 }
                 continue;
@@ -812,6 +812,9 @@ impl CoreTools {
         match approval.request_file_transfer(&request).await {
             Some(paths) if !paths.is_empty() => ToolResult::success(
                 serde_json::json!({"operation": operation, "paths": paths}).to_string(),
+            ),
+            _ if operation == "export" => ToolResult::error(
+                "file export failed, was cancelled, or did not respond within 30 seconds",
             ),
             _ => ToolResult::error(format!("file {operation} was cancelled")),
         }
@@ -1045,9 +1048,7 @@ impl CoreTools {
             .get("source_type")
             .and_then(Value::as_str)
             .zip(record.get("source").and_then(Value::as_str))
-            .and_then(|(source_type, source)| {
-                coomi_telemetry::stat_id_for(source_type, source)
-            });
+            .and_then(|(source_type, source)| coomi_telemetry::stat_id_for(source_type, source));
         stat_id.or_else(|| coomi_telemetry::normalize_skill_id(name))
     }
 
@@ -1735,12 +1736,12 @@ impl ToolRuntime for CoreTools {
             },
             ToolSpec {
                 name: "request_user_input".into(),
-                description: "Ask the user one to three short questions and wait for answers.".into(),
+                description: "Ask the user one to five short questions in one batch and wait until the batch is submitted. Each question has three to seven suggested choices; the UI also provides Skip and a custom answer.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "questions": {
-                            "type": "array", "minItems": 1, "maxItems": 3,
+                            "type": "array", "minItems": 1, "maxItems": 5,
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -1748,7 +1749,7 @@ impl ToolRuntime for CoreTools {
                                     "header": {"type": "string"},
                                     "question": {"type": "string"},
                                     "options": {
-                                        "type": "array", "minItems": 2, "maxItems": 3,
+                                        "type": "array", "minItems": 3, "maxItems": 7,
                                         "items": {
                                             "type": "object",
                                             "properties": {
@@ -2128,8 +2129,8 @@ fn u64_arg(value: &Value, key: &str) -> Option<u64> {
 }
 
 fn validate_user_input_request(request: &coomi_engine::UserInputRequest) -> Result<(), String> {
-    if !(1..=3).contains(&request.questions.len()) {
-        return Err("request_user_input requires one to three questions".into());
+    if !(1..=5).contains(&request.questions.len()) {
+        return Err("request_user_input requires one to five questions".into());
     }
     if request
         .auto_resolution_ms
@@ -2148,9 +2149,9 @@ fn validate_user_input_request(request: &coomi_engine::UserInputRequest) -> Resu
         if !ids.insert(question.id.as_str()) {
             return Err(format!("duplicate question id: {}", question.id));
         }
-        if !(2..=3).contains(&question.options.len()) {
+        if !(3..=7).contains(&question.options.len()) {
             return Err(format!(
-                "question `{}` requires two or three options",
+                "question `{}` requires three to seven options",
                 question.id
             ));
         }
@@ -2238,7 +2239,9 @@ async fn is_blocked_url(url: &reqwest::Url) -> bool {
     // Resolve the hostname; a failure to resolve is treated as unreachable/blocked.
     let port = url.port_or_known_default().unwrap_or(80);
     match tokio::net::lookup_host((host, port)).await {
-        Ok(addresses) => addresses.map(|address| address.ip()).any(|ip| ip_is_blocked(&ip)),
+        Ok(addresses) => addresses
+            .map(|address| address.ip())
+            .any(|ip| ip_is_blocked(&ip)),
         Err(_) => true,
     }
 }
@@ -2266,7 +2269,9 @@ fn embedded_ipv4(v6: &std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
     }
     // 6to4: 2002::/16, IPv4 at bytes 2..5.
     if octets[..2] == [0x20, 0x02] {
-        return Some(std::net::Ipv4Addr::new(octets[2], octets[3], octets[4], octets[5]));
+        return Some(std::net::Ipv4Addr::new(
+            octets[2], octets[3], octets[4], octets[5],
+        ));
     }
     None
 }
@@ -2301,10 +2306,7 @@ fn ip_is_blocked(ip: &std::net::IpAddr) -> bool {
                 &octets[12..16],
             ] {
                 let candidate = std::net::Ipv4Addr::new(window[0], window[1], window[2], window[3]);
-                if candidate.is_loopback()
-                    || candidate.is_private()
-                    || candidate.is_link_local()
-                {
+                if candidate.is_loopback() || candidate.is_private() || candidate.is_link_local() {
                     return true;
                 }
             }
@@ -2564,11 +2566,7 @@ mod tests {
             "{}",
             middle.output
         );
-        assert!(
-            middle.output.contains("offset=30005"),
-            "{}",
-            middle.output
-        );
+        assert!(middle.output.contains("offset=30005"), "{}", middle.output);
 
         // offset 恰好超出文件（第 60001 行不存在）：显示“已到末尾”
         let tail = tools.call(&call(Some(60_001)), &Deny).await;
@@ -2602,7 +2600,11 @@ mod tests {
             )
             .await;
         assert!(result.success, "{}", result.output);
-        assert!(result.output.contains("本行共 200000 字符，已截断"), "{}", result.output);
+        assert!(
+            result.output.contains("本行共 200000 字符，已截断"),
+            "{}",
+            result.output
+        );
         assert!(result.output.contains("head"), "{}", result.output);
         assert!(result.output.contains("tail"), "{}", result.output);
     }
@@ -2691,9 +2693,18 @@ mod tests {
         let text = html_to_text(html);
         assert!(text.contains("Hello"));
         assert!(text.contains("world"));
-        assert!(!text.contains("alert"), "script content must be stripped: {text}");
-        assert!(!text.contains("script"), "script tag must be stripped: {text}");
-        assert!(!text.contains("style"), "style tag must be stripped: {text}");
+        assert!(
+            !text.contains("alert"),
+            "script content must be stripped: {text}"
+        );
+        assert!(
+            !text.contains("script"),
+            "script tag must be stripped: {text}"
+        );
+        assert!(
+            !text.contains("style"),
+            "style tag must be stripped: {text}"
+        );
         assert!(!text.contains("&nbsp;"), "entities must be decoded: {text}");
     }
 

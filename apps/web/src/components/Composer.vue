@@ -8,10 +8,12 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { PERMISSION_MODES, useConfigStore } from '@/stores/config'
 import { useSessionStore } from '@/stores/session'
+import { useRouter } from 'vue-router'
 import CoomiIcon from './CoomiIcon.vue'
 
 const session = useSessionStore()
 const config = useConfigStore()
+const router = useRouter()
 
 /** 斜杠指令：点击后填入输入框，可编辑后发送。 */
 const SLASH_COMMANDS = [
@@ -19,7 +21,8 @@ const SLASH_COMMANDS = [
   { name: '/plan', desc: '进入计划模式' },
   { name: '/mcp', desc: '管理 MCP 服务器' },
   { name: '/skills', desc: '查看可用技能' },
-  { name: '/memory', desc: '查看持久记忆' },
+  { name: '/memory', desc: '查看 Coomi 内建持久记忆（非 MCP/Skill）' },
+  { name: '/compact', desc: '立即压缩当前上下文' },
 ]
 
 const text = ref('')
@@ -34,6 +37,11 @@ const canSend = computed(() => text.value.trim().length > 0)
 const isJumpIn = computed(() => session.isBusy && canSend.value)
 const showStop = computed(() => session.isBusy && !canSend.value)
 const modeLabel = computed(() => PERMISSION_MODES.find(m => m.mode === config.permissionMode)?.label ?? '')
+const providerReady = computed(() => config.providers.some(provider => (
+  provider.id === config.activeId
+  && provider.models.length > 0
+  && Boolean(provider.baseUrl)
+)))
 
 function autoGrow() {
   const el = textarea.value
@@ -46,6 +54,13 @@ function autoGrow() {
 
 async function submit() {
   if (!canSend.value) return
+  if (!providerReady.value) {
+    await config.fetchProviders()
+    if (!providerReady.value) {
+      await router.push('/providers')
+      return
+    }
+  }
   session.sendMessage(text.value)
   text.value = ''
   await nextTick()

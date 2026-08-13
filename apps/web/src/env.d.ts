@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 
 interface Window {
+  __coomiHandleSystemBack?: () => boolean
   CoomiAndroid?: {
     openDashboard(): void
     importFiles?(): void

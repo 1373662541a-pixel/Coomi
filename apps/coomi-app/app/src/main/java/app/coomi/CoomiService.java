@@ -8,6 +8,7 @@ import android.system.ErrnoException;
 import android.system.Os;
 import android.system.OsConstants;
 
+import com.termux.BuildConfig;
 import com.termux.shared.logger.Logger;
 import com.termux.shared.termux.TermuxConstants;
 
@@ -411,6 +412,7 @@ public class CoomiService extends Service {
             mEngineProcess = builder.start();
             mEnginePort = port;
             mIsEngineRunning = true;
+            reportDailyActive();
 
             Process process = mEngineProcess;
             new Thread(() -> {
@@ -435,6 +437,27 @@ public class CoomiService extends Service {
         } finally {
             mIsEngineStarting = false;
         }
+    }
+
+    private void reportDailyActive() {
+        new Thread(() -> {
+            HttpURLConnection connection = null;
+            try {
+                connection = (HttpURLConnection) new URL("https://updates.septemc.com/coomi/feedback/api/stats/dau").openConnection();
+                connection.setRequestMethod("POST");
+                connection.setConnectTimeout(4000);
+                connection.setReadTimeout(4000);
+                connection.setDoOutput(true);
+                connection.setRequestProperty("X-Coomi-Version", BuildConfig.VERSION_NAME);
+                connection.setFixedLengthStreamingMode(0);
+                connection.getOutputStream().close();
+                connection.getResponseCode();
+            } catch (Exception e) {
+                Logger.logDebug(LOG_TAG, "DAU report skipped: " + e.getMessage());
+            } finally {
+                if (connection != null) connection.disconnect();
+            }
+        }, "coomi-dau").start();
     }
 
     private synchronized File ensureCurrentWebAssets() throws Exception {
@@ -506,6 +529,28 @@ public class CoomiService extends Service {
 
     public boolean isUpdateInProgress() { return mUpdateInProgress; }
     public int getEnginePort() { return mEnginePort; }
+
+    public void refreshRegistryCache() {
+        mExecutor.execute(() -> {
+            HttpURLConnection connection = null;
+            try {
+                connection = (HttpURLConnection) new URL(
+                    "http://127.0.0.1:" + mEnginePort + "/api/registry/refresh").openConnection();
+                connection.setRequestMethod("POST");
+                connection.setConnectTimeout(2000);
+                connection.setReadTimeout(2000);
+                connection.setRequestProperty("Authorization", "Bearer " + mEngineToken);
+                connection.setDoOutput(true);
+                connection.setFixedLengthStreamingMode(0);
+                connection.getOutputStream().close();
+                connection.getResponseCode();
+            } catch (Exception error) {
+                Logger.logDebug(LOG_TAG, "Registry refresh skipped: " + error.getMessage());
+            } finally {
+                if (connection != null) connection.disconnect();
+            }
+        });
+    }
 
     public static String readEngineLogTail(int count) {
         java.util.List<String> lines = new java.util.ArrayList<>();

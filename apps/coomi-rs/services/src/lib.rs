@@ -30,6 +30,7 @@ pub use mcp::McpRuntime;
 pub use mcp::McpServerStatus;
 pub use memory::Memory;
 pub use memory::MemoryManager;
+pub use memory::MemoryLifecycle;
 pub use memory::MemoryScope;
 pub use memory::MemoryType;
 pub use provider::HttpModelProvider;

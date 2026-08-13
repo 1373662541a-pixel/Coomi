@@ -154,9 +154,14 @@ export async function playDemoRun(ctx: DemoCtx): Promise<void> {
   await ctx.sleep(300)
   ctx.emit({
     event_type: 'user_question_request', call_id: 'q1',
-    question: '状态栏里的缓存命中要显示成哪种？',
-    options: ['⚡ 3（图标 + 次数）', '缓存 3/12（命中 / 总调用）', '仅在 >0 时显示次数'],
-    allow_free_text: true,
+    questions: [{
+      id: 'cache_display', header: '缓存显示', question: '状态栏里的缓存命中要显示成哪种？',
+      options: [
+        { label: '⚡ 3（图标 + 次数）', description: '显示紧凑' },
+        { label: '缓存 3/12（命中 / 总调用）', description: '信息完整' },
+        { label: '仅在 >0 时显示次数', description: '减少干扰' },
+      ],
+    }],
   })
   const answer = await ctx.waitAnswer()
 

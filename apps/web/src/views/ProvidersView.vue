@@ -34,9 +34,9 @@ function backToDashboard() {
 
 <template>
   <div class="page">
-    <PageHead title="供应商" @back="backToDashboard">
+    <PageHead title="提供商配置" @back="backToDashboard">
       <template #right>
-        <button class="icon-btn blue" aria-label="添加供应商" @click="router.push('/providers/new')">
+        <button class="icon-btn blue" aria-label="添加提供商" @click="router.push('/providers/new')">
           <CoomiIcon name="plus" />
         </button>
       </template>

@@ -54,7 +54,7 @@ export class DemoTransport implements Transport {
         this.resolveApproval = null
         break
       case 'answer_question':
-        this.resolveAnswer?.(command.answer)
+        this.resolveAnswer?.(Object.values(command.answers).join('；'))
         this.resolveAnswer = null
         break
       default:

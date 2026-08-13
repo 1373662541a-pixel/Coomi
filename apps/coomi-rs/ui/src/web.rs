@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use axum::Json;
 use axum::Router;
 use axum::extract::Path as AxumPath;
+use axum::extract::DefaultBodyLimit;
 use axum::extract::Query;
 use axum::extract::State;
 use axum::extract::ws::Message;
@@ -18,6 +19,7 @@ use axum::response::IntoResponse;
 use axum::routing::delete;
 use axum::routing::get;
 use axum::routing::post;
+use axum::routing::put;
 use coomi_catalogs::SkillEntry;
 use coomi_engine::Agent;
 use coomi_engine::AgentEvent;
@@ -26,6 +28,9 @@ use coomi_engine::ApprovalHandler;
 use coomi_engine::FileTransferRequest;
 use coomi_engine::InputQueue;
 use coomi_engine::LoopStatus;
+use coomi_engine::ChatMessage;
+use coomi_engine::ModelProvider;
+use coomi_engine::ModelRequest;
 use coomi_engine::PlanStepStatus;
 use coomi_engine::Session;
 use coomi_engine::SessionStore;
@@ -38,6 +43,9 @@ use coomi_security::HookRunner;
 use coomi_security::SecurityPolicy;
 use coomi_services::HttpModelProvider;
 use coomi_services::McpRuntime;
+use coomi_services::MemoryManager;
+use coomi_services::MemoryScope;
+use coomi_services::MemoryType;
 use coomi_services::ProviderDocument;
 use coomi_services::ProviderRegistry;
 use coomi_services::ProviderSettings;
@@ -96,9 +104,6 @@ struct AppState {
     /// 图片发送已降级的会话：请求因图片被上游拒绝后置位，
     /// 该会话后续请求不再重放历史图片，避免「一张图报错→整会话报废」。
     vision_degraded: Arc<StdMutex<HashSet<String>>>,
-    /// 含图片会话的连续请求失败计数：达到阈值（不依赖错误文本关键词）
-    /// 也触发图片降级，兜住上游只回笼统错误（如 Internal server error）的情况。
-    vision_failures: Arc<StdMutex<HashMap<String, u32>>>,
     /// 社区注册表缓存：远端数据（registry/stats）10 分钟内只拉一次，失败降级内置目录。
     registry_cache: Arc<StdMutex<Option<RegistryCache>>>,
 }
@@ -153,7 +158,7 @@ struct SessionTask {
     conn_tx: StdMutex<Option<mpsc::UnboundedSender<Message>>>,
     input_queue: Arc<InputQueue>,
     approvals: StdMutex<HashMap<String, oneshot::Sender<bool>>>,
-    questions: StdMutex<HashMap<String, oneshot::Sender<String>>>,
+    questions: StdMutex<HashMap<String, oneshot::Sender<UserInputResponse>>>,
     file_requests: StdMutex<HashMap<String, oneshot::Sender<Vec<String>>>>,
     pending_events: StdMutex<VecDeque<Value>>,
     terminal_event: StdMutex<Option<Value>>,
@@ -303,6 +308,7 @@ pub async fn serve(
 ) -> Result<()> {
     fs::create_dir_all(home.join("config"))?;
     fs::create_dir_all(home.join("sessions"))?;
+    ensure_provider_document(&home)?;
     anyhow::ensure!(
         static_dir.is_dir(),
         "static directory does not exist: {}",
@@ -337,6 +343,7 @@ pub async fn serve(
     })?;
 
     let permission = Arc::new(RwLock::new(load_permission_mode(&home)));
+    let registry_cache = load_registry_disk_cache(&home);
     let state = AppState {
         home,
         cwd,
@@ -345,9 +352,9 @@ pub async fn serve(
         permission,
         tasks: Arc::new(StdMutex::new(HashMap::new())),
         vision_degraded: Arc::new(StdMutex::new(HashSet::new())),
-        vision_failures: Arc::new(StdMutex::new(HashMap::new())),
-        registry_cache: Arc::new(StdMutex::new(None)),
+        registry_cache: Arc::new(StdMutex::new(registry_cache)),
     };
+    refresh_registry_cache_background(state.clone());
     // 引擎启动时补发上次会话遗留的未上报事件（如进程被系统杀掉前没来得及 flush）。
     Telemetry::new(&state.home).flush_background();
     let index = static_dir.join("index.html");
@@ -363,6 +370,12 @@ pub async fn serve(
             "/api/runtime/custom-prompt",
             get(get_custom_prompt).post(set_custom_prompt),
         )
+        .route("/api/runtime/hooks", get(get_hooks).put(set_hooks))
+        .route("/api/memory", get(list_memory).post(create_memory))
+        .route(
+            "/api/memory/{name}",
+            put(update_memory).delete(delete_memory),
+        )
         .route("/api/providers", get(list_providers).post(upsert_provider))
         .route("/api/providers/{id}", delete(delete_provider))
         .route("/api/providers/{id}/activate", post(activate_provider))
@@ -375,7 +388,9 @@ pub async fn serve(
         .route("/api/sessions", get(list_sessions))
         .route(
             "/api/sessions/{id}",
-            get(get_session).delete(delete_session),
+            get(get_session)
+                .post(update_session_metadata)
+                .delete(delete_session),
         )
         .route("/api/sessions/{id}/cwd", post(set_session_cwd))
         .route("/api/fs/list", get(fs_list))
@@ -403,11 +418,16 @@ pub async fn serve(
             post(set_skill_enabled_catalog),
         )
         .route("/api/registry", get(registry_index))
+        .route("/api/registry/refresh", post(refresh_registry))
         .route(
             "/api/settings/telemetry",
             get(telemetry_get).put(telemetry_set),
         )
         .route("/api/runtime/installed", get(runtime_installed))
+        .route(
+            "/api/tool-failure-analysis",
+            post(analyze_tool_failures).layer(DefaultBodyLimit::max(32 * 1024)),
+        )
         .route("/ws/session/{session_id}", get(websocket_route))
         .fallback_service(files)
         // Local bridge: only allow same-origin browser access (the Android WebView and
@@ -603,7 +623,7 @@ fn configured_max_tool_rounds(home: &Path) -> usize {
 }
 
 /// 定制身份提示词的最大长度（字符）。防止超大文本挤占每次对话的上下文。
-const CUSTOM_PROMPT_MAX_CHARS: usize = 2000;
+const CUSTOM_PROMPT_MAX_CHARS: usize = 20_000;
 
 /// 定制身份提示词：用户设置的专属身份/定位指令，注入到系统提示词。
 pub(crate) fn custom_prompt(home: &Path) -> String {
@@ -690,6 +710,227 @@ async fn runtime_port(State(state): State<AppState>) -> Json<Value> {
     Json(json!({"port": state.port}))
 }
 
+const TOOL_FAILURE_ANALYSIS_PROMPT: &str = r#"
+你是 Coomi 的工具调用可靠性分析器。输入只包含程序生成并经过脱敏的工具调用轨迹，不包含用户对话、文件内容、原始参数值或模型隐藏思维。
+
+你的目标不是统计失败次数，而是形成可直接指导工程迭代的精炼中文报告。必须基于证据分析“失败 -> 调整 -> 后续成功/仍失败”的链路。严格区分【证据确认】与【合理推测】，不得把推测写成事实。总长度控制在 400 至 700 个汉字，不写背景铺垫或重复结论。
+
+按以下结构输出 Markdown：
+1. 失败与恢复链路（合并同类项，突出参数结构变化）
+2. 根因判断（标注证据确认或合理推测）
+3. 优先级最高的 3 至 4 条工程修复建议
+4. 每条建议对应的一句测试与验收标准
+5. 仍缺少的关键证据（没有则省略）
+
+不得输出或猜测用户对话、真实路径、URL、密钥、文件内容、原始参数值和隐藏思维/思维链。可以给出简洁的判断依据。不要只复述错误分类，不要给“检查配置”“稍后重试”一类无法验收的泛化建议。
+"#;
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ToolFailureTraceItem {
+    sequence: u64,
+    tool: String,
+    argument_shape: Value,
+    status: String,
+    category: Option<String>,
+    error_summary: Option<String>,
+    elapsed_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ToolFailureAnalysisRequest {
+    #[serde(default)]
+    provider_id: String,
+    trace: Vec<ToolFailureTraceItem>,
+}
+
+async fn analyze_tool_failures(
+    State(state): State<AppState>,
+    Json(body): Json<ToolFailureAnalysisRequest>,
+) -> Result<Json<Value>, ApiError> {
+    if body.trace.is_empty() {
+        return Err(ApiError::bad_request("tool trace must not be empty"));
+    }
+    if body.trace.len() > 40 {
+        return Err(ApiError::bad_request("tool trace exceeds 40 calls"));
+    }
+
+    let sanitized = body
+        .trace
+        .into_iter()
+        .map(sanitize_tool_failure_item)
+        .collect::<Vec<_>>();
+    let failure_count = sanitized
+        .iter()
+        .filter(|item| item.status == "error")
+        .count();
+    if failure_count < 3 {
+        return Err(ApiError::bad_request(
+            "at least three failed tool calls are required",
+        ));
+    }
+    let trace_json = serde_json::to_string_pretty(&sanitized)
+        .map_err(|error| ApiError::bad_request(format!("invalid tool trace: {error}")))?;
+    if trace_json.len() > 28 * 1024 {
+        return Err(ApiError::bad_request("sanitized tool trace is too large"));
+    }
+
+    let registry = ProviderRegistry::load(&providers_path(&state.home))
+        .map_err(|error| ApiError::bad_request(format!("provider unavailable: {error}")))?;
+    let selector = (!body.provider_id.trim().is_empty()).then_some(body.provider_id.trim());
+    let provider_config = registry
+        .resolve(selector)
+        .map_err(|error| ApiError::bad_request(format!("provider unavailable: {error}")))?;
+    let provider = HttpModelProvider::new(provider_config)
+        .map_err(|error| ApiError::bad_request(format!("provider unavailable: {error}")))?;
+    let request = ModelRequest {
+        model: provider.model().to_owned(),
+        messages: vec![
+            ChatMessage::system(TOOL_FAILURE_ANALYSIS_PROMPT),
+            ChatMessage::user(format!(
+                "请分析以下本轮脱敏工具轨迹（共 {failure_count} 次失败）：\n\n{trace_json}"
+            )),
+        ],
+        tools: Vec::new(),
+        reasoning_effort: Some("low".to_owned()),
+    };
+    let response = tokio::time::timeout(Duration::from_secs(180), provider.complete(request))
+        .await
+        .map_err(|_| ApiError::bad_gateway("tool failure analysis timed out"))?
+        .map_err(|error| ApiError::bad_gateway(format!("tool failure analysis failed: {error:#}")))?;
+    let analysis = sanitize_generated_analysis(&response.content);
+    if analysis.trim().is_empty() {
+        return Err(ApiError::bad_gateway(
+            "tool failure analysis returned an empty report",
+        ));
+    }
+    Ok(Json(json!({ "analysis": analysis })))
+}
+
+fn sanitize_tool_failure_item(mut item: ToolFailureTraceItem) -> ToolFailureTraceItem {
+    item.sequence = item.sequence.min(10_000);
+    item.tool = sanitize_identifier(&item.tool, 80);
+    item.status = match item.status.as_str() {
+        "success" => "success",
+        "error" => "error",
+        _ => "unknown",
+    }
+    .to_owned();
+    item.category = item
+        .category
+        .as_deref()
+        .map(|value| sanitize_identifier(value, 80));
+    item.error_summary = item
+        .error_summary
+        .as_deref()
+        .map(|value| sanitize_diagnostic_string(value, 600));
+    item.elapsed_ms = item.elapsed_ms.map(|value| value.min(3_600_000));
+    item.argument_shape = sanitize_trace_value(item.argument_shape, "", 0);
+    item
+}
+
+fn sanitize_trace_value(value: Value, key: &str, depth: usize) -> Value {
+    if depth > 5 {
+        return json!("[max_depth]");
+    }
+    match value {
+        Value::Object(values) => Value::Object(
+            values
+                .into_iter()
+                .take(30)
+                .map(|(child_key, child)| {
+                    let safe_key = sanitize_identifier(&child_key, 80);
+                    let safe_value = if is_secret_key(&safe_key) {
+                        json!("[redacted_secret]")
+                    } else {
+                        sanitize_trace_value(child, &safe_key, depth + 1)
+                    };
+                    (safe_key, safe_value)
+                })
+                .collect(),
+        ),
+        Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .take(12)
+                .map(|child| sanitize_trace_value(child, key, depth + 1))
+                .collect(),
+        ),
+        Value::String(value) => {
+            if is_secret_key(key) {
+                json!("[redacted_secret]")
+            } else {
+                json!(sanitize_diagnostic_string(&value, 240))
+            }
+        }
+        Value::Number(_) => json!("[number]"),
+        Value::Bool(value) => json!(value),
+        Value::Null => json!("[null]"),
+    }
+}
+
+fn is_secret_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    ["key", "token", "secret", "password", "authorization", "credential"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
+fn sanitize_identifier(value: &str, max_chars: usize) -> String {
+    let value = value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':'))
+        .take(max_chars)
+        .collect::<String>();
+    if value.is_empty() {
+        "unknown".to_owned()
+    } else {
+        value
+    }
+}
+
+fn sanitize_diagnostic_string(value: &str, max_chars: usize) -> String {
+    let truncated = value.chars().take(max_chars).collect::<String>();
+    truncated
+        .split_whitespace()
+        .map(|token| {
+            let lower = token.to_ascii_lowercase();
+            let looks_like_url = lower.starts_with("http://") || lower.starts_with("https://");
+            let looks_like_path = token.starts_with('/')
+                || token.as_bytes().get(1) == Some(&b':')
+                || token.contains("\\")
+                || token.contains("/data/")
+                || token.contains("/storage/");
+            let looks_like_secret = lower.starts_with("sk-")
+                || lower.starts_with("bearer")
+                || (token.len() >= 24 && token.chars().all(|ch| ch.is_ascii_hexdigit()));
+            if looks_like_url {
+                "[redacted_url]"
+            } else if looks_like_path {
+                "[redacted_path]"
+            } else if looks_like_secret {
+                "[redacted_secret]"
+            } else if token.contains('@') && token.contains('.') {
+                "[redacted_email]"
+            } else {
+                token
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn sanitize_generated_analysis(value: &str) -> String {
+    value
+        .chars()
+        .take(24_000)
+        .collect::<String>()
+        .lines()
+        .map(|line| sanitize_diagnostic_string(line, 2_000))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// 引擎磁盘上的会话列表（权威源）。前端以此为唯一事实，localStorage 仅作缓存，
 /// 修复“会话记录消失/串会话”问题。
 async fn list_sessions(State(state): State<AppState>) -> Json<Value> {
@@ -711,6 +952,8 @@ async fn list_sessions(State(state): State<AppState>) -> Json<Value> {
             "updated_at": summary.updated_at,
             "preview": summary.preview,
             "title": summary.title,
+            "title_manually_set": summary.title_manually_set,
+            "pinned": summary.pinned,
             "summary": summary.summary,
             "created_at": full.as_ref().map(|s| s.created_at).unwrap_or(summary.updated_at),
             "usage": full.as_ref().map(|s| json!({
@@ -751,6 +994,40 @@ async fn delete_session(
         .delete(session_id)
         .map_err(|error| ApiError::internal(format!("failed to delete session {id}: {error:#}")))?;
     Ok(Json(json!({ "deleted": deleted })))
+}
+
+#[derive(Deserialize)]
+struct SessionMetadataUpdate {
+    title: Option<String>,
+    pinned: Option<bool>,
+}
+
+async fn update_session_metadata(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(input): Json<SessionMetadataUpdate>,
+) -> Result<Json<Value>, ApiError> {
+    if input.title.is_none() && input.pinned.is_none() {
+        return Err(ApiError::bad_request("title or pinned is required"));
+    }
+    let title = input.title.as_deref().map(str::trim);
+    if title.is_some_and(str::is_empty) {
+        return Err(ApiError::bad_request("session title must not be empty"));
+    }
+    if title.is_some_and(|value| value.chars().count() > 120) {
+        return Err(ApiError::bad_request("session title is too long"));
+    }
+    let session_id =
+        Uuid::parse_str(&id).map_err(|_| ApiError::bad_request("invalid session id"))?;
+    let session = SessionStore::new(&state.home)
+        .update_metadata(session_id, title, input.pinned)
+        .map_err(|error| ApiError::internal(format!("failed to update session {id}: {error:#}")))?;
+    Ok(Json(json!({
+        "id": id,
+        "title": session.title,
+        "title_manually_set": session.title_manually_set,
+        "pinned": session.pinned,
+    })))
 }
 
 /// 已安装 MCP server 名 -> 是否启用（mcp_servers.json）。
@@ -1161,10 +1438,17 @@ async fn registry_index(State(state): State<AppState>) -> Result<Json<Value>, Ap
             Some(payload) => payload,
             None => {
                 let (registry, stats_github, stats_app) = fetch_registry_payload().await;
-                let payload = json!({
+                let mut payload = json!({
                     "registry": registry,
                     "stats": { "github": stats_github, "app": stats_app },
                 });
+                if payload["registry"].is_null()
+                    && let Some(cached) = load_registry_disk_cache(&state.home)
+                {
+                    payload = cached.payload;
+                } else if !payload["registry"].is_null() {
+                    save_registry_disk_cache(&state.home, &payload);
+                }
                 let mut cache = state
                     .registry_cache
                     .lock()
@@ -1188,6 +1472,191 @@ async fn registry_index(State(state): State<AppState>) -> Result<Json<Value>, Ap
         "installed": installed,
     });
     Ok(Json(payload))
+}
+
+fn registry_disk_cache_path(home: &Path) -> PathBuf {
+    home.join("cache").join("registry.json")
+}
+
+fn load_registry_disk_cache(home: &Path) -> Option<RegistryCache> {
+    let payload = fs::read(registry_disk_cache_path(home))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())?;
+    Some(RegistryCache {
+        fetched_at: Instant::now() - Duration::from_secs(REGISTRY_CACHE_SECS),
+        payload,
+    })
+}
+
+fn save_registry_disk_cache(home: &Path, payload: &Value) {
+    let path = registry_disk_cache_path(home);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(bytes) = serde_json::to_vec_pretty(payload) {
+        let _ = fs::write(path, bytes);
+    }
+}
+
+fn refresh_registry_cache_background(state: AppState) {
+    tokio::spawn(async move {
+        let (registry, stats_github, stats_app) = fetch_registry_payload().await;
+        if registry.is_none() {
+            return;
+        }
+        let payload =
+            json!({"registry": registry, "stats": {"github": stats_github, "app": stats_app}});
+        save_registry_disk_cache(&state.home, &payload);
+        *state
+            .registry_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(RegistryCache {
+            fetched_at: Instant::now(),
+            payload,
+        });
+    });
+}
+
+async fn refresh_registry(State(state): State<AppState>) -> Json<Value> {
+    refresh_registry_cache_background(state);
+    Json(json!({"ok": true}))
+}
+
+fn hooks_path(home: &Path) -> PathBuf {
+    home.join("config").join("hooks.json")
+}
+
+async fn get_hooks(State(state): State<AppState>) -> Json<Value> {
+    let value = fs::read(hooks_path(&state.home))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_else(|| json!({"hooks": {}}));
+    Json(value)
+}
+
+async fn set_hooks(
+    State(state): State<AppState>,
+    Json(value): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let hooks = value
+        .get("hooks")
+        .and_then(Value::as_object)
+        .ok_or_else(|| ApiError::bad_request("hooks must be an object"))?;
+    for (event, entries) in hooks {
+        if !matches!(
+            event.as_str(),
+            "session_start" | "turn_start" | "turn_end" | "pre_tool_use" | "post_tool_use"
+        ) {
+            return Err(ApiError::bad_request(format!(
+                "unsupported hook event: {event}"
+            )));
+        }
+        let entries = entries
+            .as_array()
+            .ok_or_else(|| ApiError::bad_request("hook event value must be an array"))?;
+        for entry in entries {
+            let command = entry
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            if command.is_empty() {
+                return Err(ApiError::bad_request("hook command must not be empty"));
+            }
+        }
+    }
+    let path = hooks_path(&state.home);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| ApiError::internal(error.to_string()))?;
+    }
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&value)
+            .map_err(|error| ApiError::bad_request(error.to_string()))?,
+    )
+    .map_err(|error| ApiError::internal(format!("failed to write {}: {error}", path.display())))?;
+    Ok(Json(value))
+}
+
+#[derive(Deserialize)]
+struct MemoryEdit {
+    name: Option<String>,
+    description: String,
+    content: String,
+    scope: MemoryScope,
+    #[serde(rename = "type")]
+    memory_type: MemoryType,
+}
+
+fn memory_json(memory: coomi_services::Memory) -> Value {
+    json!({
+        "name": memory.name,
+        "description": memory.description,
+        "content": memory.content,
+        "scope": memory.scope,
+        "type": memory.memory_type,
+        "lifecycle": memory.lifecycle,
+        "hit_count": memory.hit_count,
+        "last_triggered": memory.last_triggered,
+        "created": memory.created,
+        "updated": memory.updated,
+    })
+}
+
+async fn list_memory(State(state): State<AppState>) -> Json<Value> {
+    let manager = MemoryManager::new(&state.home, &state.cwd);
+    Json(json!({
+        "builtin": true,
+        "memories": manager.list().into_iter().map(memory_json).collect::<Vec<_>>()
+    }))
+}
+
+async fn create_memory(
+    State(state): State<AppState>,
+    Json(body): Json<MemoryEdit>,
+) -> Result<Json<Value>, ApiError> {
+    let name = body
+        .name
+        .as_deref()
+        .ok_or_else(|| ApiError::bad_request("missing memory name"))?;
+    let manager = MemoryManager::new(&state.home, &state.cwd);
+    if manager.get(name).is_some() {
+        return Err(ApiError::bad_request("memory already exists"));
+    }
+    manager
+        .save(body.scope, name, &body.description, body.memory_type, &body.content)
+        .map_err(|error| ApiError::bad_request(format!("failed to save memory: {error:#}")))?;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn update_memory(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+    Json(body): Json<MemoryEdit>,
+) -> Result<Json<Value>, ApiError> {
+    let manager = MemoryManager::new(&state.home, &state.cwd);
+    let existing = manager
+        .get(&name)
+        .ok_or_else(|| ApiError::bad_request("memory not found"))?;
+    if existing.scope != Some(body.scope) {
+        manager
+            .delete(&name)
+            .map_err(|error| ApiError::internal(format!("failed to move memory: {error:#}")))?;
+    }
+    manager
+        .save(body.scope, &name, &body.description, body.memory_type, &body.content)
+        .map_err(|error| ApiError::bad_request(format!("failed to save memory: {error:#}")))?;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn delete_memory(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let deleted = MemoryManager::new(&state.home, &state.cwd)
+        .delete(&name)
+        .map_err(|error| ApiError::bad_request(format!("failed to delete memory: {error:#}")))?;
+    Ok(Json(json!({"ok": true, "deleted": deleted})))
 }
 
 /// 并行拉取 registry.json 与两份统计；每份独立降级，互不影响。
@@ -1354,10 +1823,9 @@ fn sandboxed_path(state: &AppState, path: &str) -> Result<std::path::PathBuf, Ap
     if !raw.starts_with('/') {
         return Err(ApiError::bad_request("path must be absolute"));
     }
-    let root = state
-        .cwd
-        .canonicalize()
-        .unwrap_or_else(|_| state.cwd.clone());
+    // Android's file manager exposes the complete private virtual environment home.
+    // `state.cwd` can be ~/coomi while user-created files commonly live directly in ~.
+    let root = canonicalize_android_path(state.home.parent().unwrap_or(&state.cwd));
     let mut out = std::path::PathBuf::new();
     for component in std::path::Path::new(raw).components() {
         match component {
@@ -1372,13 +1840,64 @@ fn sandboxed_path(state: &AppState, path: &str) -> Result<std::path::PathBuf, Ap
             Component::Prefix(_) => return Err(ApiError::bad_request("invalid path")),
         }
     }
-    if !out.starts_with(&root) {
+    let checked = canonicalize_with_existing_parent(&out)?;
+    if !checked.starts_with(&root) {
         return Err(ApiError::bad_request(format!(
             "path outside allowed area: {}",
-            out.display()
+            checked.display()
         )));
     }
-    Ok(out)
+    Ok(checked)
+}
+
+fn canonicalize_android_path(path: &std::path::Path) -> std::path::PathBuf {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let text = canonical.to_string_lossy();
+    if let Some(rest) = text.strip_prefix("/data/data/") {
+        return std::path::PathBuf::from(format!("/data/user/0/{rest}"));
+    }
+    canonical
+}
+
+fn canonicalize_with_existing_parent(path: &std::path::Path) -> Result<std::path::PathBuf, ApiError> {
+    if path.exists() {
+        return Ok(canonicalize_android_path(path));
+    }
+    let mut parent = path;
+    let mut missing = Vec::new();
+    while !parent.exists() {
+        let name = parent
+            .file_name()
+            .ok_or_else(|| ApiError::bad_request("invalid path"))?;
+        missing.push(name.to_owned());
+        parent = parent
+            .parent()
+            .ok_or_else(|| ApiError::bad_request("invalid path"))?;
+    }
+    let mut resolved = canonicalize_android_path(parent);
+    for name in missing.iter().rev() {
+        resolved.push(name);
+    }
+    Ok(resolved)
+}
+
+fn sandboxed_delete_path(state: &AppState, path: &str) -> Result<std::path::PathBuf, ApiError> {
+    let raw = abs_path(path)?;
+    if raw.is_symlink() {
+        let parent = raw
+            .parent()
+            .ok_or_else(|| ApiError::bad_request("invalid path"))?;
+        let checked_parent = canonicalize_android_path(parent);
+        let root = canonicalize_android_path(state.home.parent().unwrap_or(&state.cwd));
+        if !checked_parent.starts_with(root) {
+            return Err(ApiError::bad_request(format!(
+                "path outside allowed area: {}",
+                raw.display()
+            )));
+        }
+        return Ok(raw);
+    }
+    sandboxed_path(state, path)
 }
 
 /// 列出目录：GET /api/fs/list?path=...
@@ -1498,15 +2017,24 @@ async fn fs_delete(
         .get("path")
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::bad_request("missing path"))?;
-    let target = sandboxed_path(&state, path)?;
+    let target = sandboxed_delete_path(&state, path)?;
     // 禁止删除引擎工作根与配置根本身（防误删整片用户数据）。
-    if target == state.cwd {
+    if target == canonicalize_android_path(&state.cwd) {
         return Err(ApiError::bad_request(
             "cannot delete the engine working root",
         ));
     }
-    if target == state.home {
+    if target == canonicalize_android_path(&state.home) {
         return Err(ApiError::bad_request("cannot delete the config root"));
+    }
+    if state
+        .home
+        .parent()
+        .is_some_and(|root| target == canonicalize_android_path(root))
+    {
+        return Err(ApiError::bad_request(
+            "cannot delete the virtual environment root",
+        ));
     }
     if target.is_dir() {
         std::fs::remove_dir_all(&target).map_err(|e| {
@@ -1662,7 +2190,8 @@ async fn upsert_provider(
             .filter(|value| !value.is_empty())
             .unwrap_or(settings.model);
         if input.get("fastModel").is_some() {
-            settings.fast_model = string_field(&input, "fastModel").filter(|value| !value.is_empty());
+            settings.fast_model =
+                string_field(&input, "fastModel").filter(|value| !value.is_empty());
         }
     }
     if let Some(api_key) = string_field(&input, "apiKey").filter(|value| !value.is_empty()) {
@@ -2010,6 +2539,62 @@ async fn handle_command(
                 context.send_error(envelope_id, "message text is required");
                 return;
             }
+            if prompt.eq_ignore_ascii_case("/memory") {
+                context.send_ack(envelope_id);
+                let report = MemoryManager::new(&state.home, &state.cwd).report();
+                context.send_event(json!({"event_type":"text_chunk","content":report}));
+                context.send_event(json!({"event_type":"turn_end"}));
+                return;
+            }
+            if prompt.eq_ignore_ascii_case("/compact") {
+                let task = Arc::clone(&context.task);
+                if task.running.swap(true, Ordering::SeqCst) {
+                    context.send_error(envelope_id, "a turn is already running");
+                    return;
+                }
+                context.send_ack(envelope_id);
+                let compact_state = state.clone();
+                let compact_session_id = session_id.to_owned();
+                let compact_context = Arc::clone(&context);
+                let compact_task = Arc::clone(&task);
+                let cleanup_state = state.clone();
+                let cleanup_session_id = session_id.to_owned();
+                let spawned = tokio::spawn(async move {
+                    let result = compact_web_session(
+                        &compact_state,
+                        &compact_session_id,
+                        Arc::clone(&compact_context),
+                    )
+                    .await;
+                    if let Err(error) = result {
+                        compact_context.task.push_event(json!({"event_type":"agent_error","message":format!("上下文压缩失败：{error:#}"),"is_fatal":false}));
+                    }
+                    compact_context
+                        .task
+                        .push_event(json!({"event_type":"turn_end"}));
+                    compact_task.running.store(false, Ordering::SeqCst);
+                    compact_task
+                        .abort
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .take();
+                    cleanup_state.remove_task(&cleanup_session_id);
+                });
+                *task
+                    .abort
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(spawned.abort_handle());
+                return;
+            }
+            if ProviderRegistry::load(&providers_path(&state.home)).is_err() {
+                context.send_ack(envelope_id);
+                context.send_event(json!({
+                    "event_type": "configuration_required",
+                    "message": "请先配置并启用一个可用的模型供应商",
+                    "route": "/providers"
+                }));
+                return;
+            }
             let task = Arc::clone(&context.task);
             if task.running.swap(true, Ordering::SeqCst) {
                 context.send_error(envelope_id, "a turn is already running");
@@ -2142,11 +2727,18 @@ async fn handle_command(
                 .get("call_id")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let answer = payload
-                .get("answer")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned();
+            let answers = payload
+                .get("answers")
+                .and_then(Value::as_object)
+                .map(|answers| {
+                    answers
+                        .iter()
+                        .map(|(id, value)| {
+                            (id.clone(), value.as_str().unwrap_or_default().to_owned())
+                        })
+                        .collect::<BTreeMap<_, _>>()
+                })
+                .unwrap_or_default();
             if let Some(sender) = context
                 .task
                 .questions
@@ -2154,7 +2746,7 @@ async fn handle_command(
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .remove(call_id)
             {
-                let _ = sender.send(answer);
+                let _ = sender.send(answers);
             }
             context.send_ack(envelope_id);
         }
@@ -2365,6 +2957,64 @@ async fn retry_turn(
     run_turn(state, session_id, "", true, context, task).await
 }
 
+async fn compact_web_session(
+    state: &AppState,
+    session_id: &str,
+    context: Arc<ConnectionContext>,
+) -> Result<()> {
+    let registry = ProviderRegistry::load(&providers_path(&state.home))?;
+    let selected = context.selected_model.read().await.clone();
+    let provider_config = registry.resolve(selected.as_deref())?;
+    let store = SessionStore::new(&state.home);
+    let id = Uuid::parse_str(session_id)?;
+    let mut session = store
+        .load(id)
+        .context("failed to load session for compaction")?;
+    let cwd = if session.cwd.is_dir() {
+        session.cwd.clone()
+    } else {
+        state.cwd.clone()
+    };
+    let permission = *context.permission.read().await;
+    let policy_mode = match permission {
+        PermissionMode::Ask => AccessMode::WorkspaceWrite,
+        PermissionMode::Auto | PermissionMode::Full => AccessMode::FullAccess,
+    };
+    let policy = SecurityPolicy::new(&cwd, policy_mode)?;
+    let instructions = coomi_engine::discover_project_instructions(&cwd)?;
+    let prompt = system_prompt(
+        &state.home,
+        &cwd,
+        policy_mode,
+        &instructions,
+        global_memory_enabled(&state.home),
+    );
+    let mcp_runtime = Arc::new(McpRuntime::load(&state.home).await);
+    let tools = CoreTools::new(cwd.clone(), policy)
+        .with_skills_directory(state.home.join("skills"))
+        .with_config_home(state.home.clone())
+        .with_session_state(session.plan.clone(), session.loop_state.clone())
+        .with_mcp_runtime(mcp_runtime)
+        .with_memory(Arc::new(MemoryManager::new(&state.home, &cwd)))
+        .with_hooks(Arc::new(HookRunner::load(&state.home)?));
+    let provider = HttpModelProvider::new(provider_config)?;
+    let observer = BrowserObserver::new(
+        Arc::clone(&context.task),
+        state.home.clone(),
+        context.reasoning_effort.read().await.clone(),
+        session.usage.input_tokens,
+        session.usage.cached_input_tokens,
+        session.usage.cache_observed_input_tokens,
+        session.usage.output_tokens,
+        BTreeMap::new(),
+    );
+    Agent::new(prompt)
+        .compact_session(&mut session, &provider, &tools, &observer)
+        .await?;
+    store.save(&session)?;
+    Ok(())
+}
+
 fn is_retryable_error_text(message: &str) -> bool {
     let text = message.to_ascii_lowercase();
     if ["http 400", "http 401", "http 402", "http 403", "http 404"]
@@ -2490,6 +3140,11 @@ async fn run_turn(
         PermissionMode::Auto | PermissionMode::Full => AccessMode::FullAccess,
     };
     let global_memory = global_memory_enabled(&state.home);
+    if global_memory && !recovery && !prompt.trim().is_empty() {
+        if let Err(error) = MemoryManager::new(&state.home, &cwd).observe_user_message(prompt) {
+            eprintln!("[memory] failed to update hit statistics: {error:#}");
+        }
+    }
     let mut policy = SecurityPolicy::new(&cwd, policy_mode)?;
     if !global_memory {
         // 全局会话记忆关闭：会话/配置/记忆目录对工具完全不可见。
@@ -2505,6 +3160,14 @@ async fn run_turn(
         prompt_context.push_str("\n\n");
         prompt_context.push_str(&mcp_inventory);
     }
+    if global_memory {
+        let memory_context = MemoryManager::new(&state.home, &cwd).prompt_context();
+        if !memory_context.is_empty() {
+            prompt_context
+                .push_str("\n\nPersistent memory (core and frequently hit memories first):\n");
+            prompt_context.push_str(&memory_context);
+        }
+    }
     let scheduler = AgentScheduler::new(
         cwd.clone(),
         state.home.clone(),
@@ -2518,6 +3181,7 @@ async fn run_turn(
         .with_config_home(state.home.clone())
         .with_session_state(session.plan.clone(), session.loop_state.clone())
         .with_mcp_runtime(Arc::clone(&mcp_runtime))
+        .with_memory(Arc::new(MemoryManager::new(&state.home, &cwd)))
         .with_hooks(Arc::new(HookRunner::load(&state.home)?))
         .with_agent_scheduler(scheduler, session.messages.clone());
     // Expose the turn's process manager so `cancel` can kill any shell started by tools.
@@ -2561,6 +3225,16 @@ async fn run_turn(
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .contains(session_id),
         )
+        .with_vision_fallback({
+            let degraded = Arc::clone(&state.vision_degraded);
+            let session_id = session_id.to_owned();
+            Arc::new(move || {
+                degraded
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(session_id.clone());
+            })
+        })
         // 上下文检查点：任务执行中（用户消息/模型回复/每轮工具后）落盘会话，
         // 意外中断、进程被杀、断线重连后都能从磁盘恢复完整上下文。
         .with_checkpoint({
@@ -2591,9 +3265,8 @@ async fn run_turn(
             )
             .await
     };
-    // 图片降级检测：请求失败且会话含图片时标记该会话，后续轮次不再重放
-    // 历史图片（会话恢复可用）。命中关键词立即降级；否则连续失败 2 次也降级
-    // （兜住上游只回笼统错误、不包含图片相关措辞的情况）。
+    // 图片降级检测是当轮自动重试之外的兜底：仅在错误明确指向图片协议时
+    // 标记会话。普通网络失败不能推断模型不支持视觉。
     if let Err(error) = &turn_result {
         maybe_degrade_vision(state, session_id, &session, error);
     }
@@ -2618,9 +3291,7 @@ async fn run_turn(
     Ok(())
 }
 
-/// 图片降级：请求失败且会话含图片时，标记该会话后续不再重放图片。
-/// 错误文本命中图片相关关键词立即降级；否则连续失败 2 次也降级，
-/// 兜住上游只回笼统错误（如 Internal server error）不包含图片措辞的情况。
+/// 图片降级：请求失败且会话含图片时，仅在错误明确指向图片协议时标记。
 fn maybe_degrade_vision(
     state: &AppState,
     session_id: &str,
@@ -2642,20 +3313,18 @@ fn maybe_degrade_vision(
         return;
     }
     let error_text = error.to_string().to_ascii_lowercase();
-    let keyword_hit = ["image", "vision", "multimodal", "media_type", "inline_data"]
-        .iter()
-        .any(|needle| error_text.contains(needle));
+    let keyword_hit = [
+        "image_url",
+        "input_image",
+        "inline_data",
+        "media_type",
+        "multimodal",
+        "vision is not supported",
+        "expected `text`",
+    ]
+    .iter()
+    .any(|needle| error_text.contains(needle));
     if keyword_hit {
-        degraded.insert(session_id.to_owned());
-        return;
-    }
-    let mut failures = state
-        .vision_failures
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let count = failures.entry(session_id.to_owned()).or_insert(0);
-    *count += 1;
-    if *count >= 2 {
         degraded.insert(session_id.to_owned());
     }
 }
@@ -2759,22 +3428,24 @@ impl BrowserObserver {
         let mut event = browser_usage_event(state);
         let current_turn = (state.turn_active
             && (state.turn_input_tokens > 0 || state.turn_output_tokens > 0))
-            .then(|| {
-            coomi_engine::TokenUsage {
+            .then(|| coomi_engine::TokenUsage {
                 input_tokens: state.turn_input_tokens,
                 cached_input_tokens: state.turn_cached_input_tokens,
                 cache_observed_input_tokens: state.turn_cache_observed_input_tokens,
                 output_tokens: state.turn_output_tokens,
                 cache_data_available: state.turn_cache_data_available,
-            }
-        });
+            });
         let elapsed = self
             .turn_started
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .elapsed();
-        event["reasoning_efforts"] =
-            load_reasoning_stats_value(&self.home, current_turn.as_ref(), elapsed, &self.reasoning_effort);
+        event["reasoning_efforts"] = load_reasoning_stats_value(
+            &self.home,
+            current_turn.as_ref(),
+            elapsed,
+            &self.reasoning_effort,
+        );
         event["context_categories"] = json!(self.context_categories);
         self.task.push_event(event);
     }
@@ -2858,9 +3529,9 @@ fn save_reasoning_aggregates(
         fs::create_dir_all(parent)?;
     }
     let bytes = serde_json::to_vec_pretty(&ReasoningStatsDocument {
-            schema_version: 2,
-            efforts: aggregates.clone(),
-        })?;
+        schema_version: 2,
+        efforts: aggregates.clone(),
+    })?;
     let temp = path.with_extension(format!("json.tmp-{}", std::process::id()));
     {
         let mut file = fs::File::create(&temp)?;
@@ -3073,9 +3744,8 @@ impl AgentObserver for BrowserObserver {
                     state.cache_observed_input_tokens = total.cache_observed_input_tokens;
                     state.output_tokens = total.output_tokens;
                     state.cache_data_available = total.cache_data_available;
-                    state.turn_input_tokens = state
-                        .turn_input_tokens
-                        .saturating_add(request.input_tokens);
+                    state.turn_input_tokens =
+                        state.turn_input_tokens.saturating_add(request.input_tokens);
                     state.turn_cached_input_tokens = state
                         .turn_cached_input_tokens
                         .saturating_add(request.cached_input_tokens);
@@ -3174,7 +3844,9 @@ impl AgentObserver for BrowserObserver {
                 self.send_usage();
             }
             AgentEvent::ModelStarted { round, .. } => {
-                if *round == 1 && let Ok(mut state) = self.usage.lock() {
+                if *round == 1
+                    && let Ok(mut state) = self.usage.lock()
+                {
                     state.turn_input_tokens = 0;
                     state.turn_cached_input_tokens = 0;
                     state.turn_cache_observed_input_tokens = 0;
@@ -3184,8 +3856,7 @@ impl AgentObserver for BrowserObserver {
                 }
                 self.send_usage();
             }
-            AgentEvent::CompactionStarted { .. }
-            | AgentEvent::QueuedInputAccepted(_) => {}
+            AgentEvent::CompactionStarted { .. } | AgentEvent::QueuedInputAccepted(_) => {}
         }
     }
 }
@@ -3226,7 +3897,9 @@ impl ApprovalHandler for BrowserApproval {
     }
 
     async fn request_user_input(&self, request: &UserInputRequest) -> Option<UserInputResponse> {
-        let question = request.questions.first()?;
+        if request.questions.is_empty() {
+            return None;
+        }
         let call_id = format!("question-{}", Uuid::new_v4());
         let (sender, receiver) = oneshot::channel();
         self.task
@@ -3237,19 +3910,16 @@ impl ApprovalHandler for BrowserApproval {
         self.task.push_event(json!({
             "event_type": "user_question_request",
             "call_id": call_id,
-            "question": question.question,
-            "options": question.options.iter().map(|option| option.label.clone()).collect::<Vec<_>>(),
-            "allow_free_text": true,
+            "questions": request.questions,
         }));
         let timeout_ms = request
             .auto_resolution_ms
             .unwrap_or(300_000)
             .clamp(1_000, 300_000);
-        let answer = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), receiver)
+        tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), receiver)
             .await
             .ok()
-            .and_then(Result::ok)?;
-        Some(BTreeMap::from([(question.id.clone(), answer)]))
+            .and_then(Result::ok)
     }
 
     async fn request_file_transfer(&self, request: &FileTransferRequest) -> Option<Vec<String>> {
@@ -3267,10 +3937,19 @@ impl ApprovalHandler for BrowserApproval {
             "suggested_name": request.suggested_name,
             "multiple": request.multiple,
         }));
-        tokio::time::timeout(std::time::Duration::from_secs(600), receiver)
+        let timeout = if request.operation == "export" { 30 } else { 600 };
+        let result = tokio::time::timeout(std::time::Duration::from_secs(timeout), receiver)
             .await
             .ok()
-            .and_then(Result::ok)
+            .and_then(Result::ok);
+        if result.is_none() {
+            self.task
+                .file_requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&request.request_id);
+        }
+        result
     }
 }
 
@@ -3297,7 +3976,7 @@ fn system_prompt(
         prompt.push_str("\n\n");
     }
     prompt.push_str(
-        "You are Coomi, a pragmatic coding agent running locally on Android. Inspect evidence before editing, keep changes scoped, preserve unrelated work, and verify results. Use request_file_import when the user needs to choose phone files and request_file_export to return local artifacts such as APKs. You may use the web freely: web_search for search, fetch to read pages, and shell / curl / wget for downloads, API calls, and file access. If web_search reports unavailable, report it once and continue with other approaches rather than looping command-line searches.",
+        "You are Coomi, a pragmatic coding agent running locally on Android. Inspect evidence before editing, keep changes scoped, preserve unrelated work, and verify results. When requirements, preferences, or consequential choices are unclear, use request_user_input proactively instead of guessing; group related questions into one batch when practical. Use request_file_import when the user needs to choose phone files and request_file_export to return local artifacts such as APKs. You may use the web freely: web_search for search, fetch to read pages, and shell / curl / wget for downloads, API calls, and file access. If web_search reports unavailable, report it once and continue with other approaches rather than looping command-line searches.",
     );
     match policy {
         AccessMode::ReadOnly => prompt.push_str(
@@ -3308,10 +3987,14 @@ fn system_prompt(
         ),
     }
     prompt.push_str(&format!(
-        "\n\nWorking directory: {}\nAccess policy: {}",
+        "\n\nFilesystem layout:\n- Working directory: {}\n- Coomi home: {}\nAccess policy: {}",
         cwd.display(),
+        home.display(),
         policy.label(),
     ));
+    prompt.push_str(
+        "\nAll file references shown to the user and every path passed to file export must be normalized absolute paths. Never return a relative path for a created, edited, downloaded, referenced, or exported file. Resolve relative tool output against the working directory before presenting it. Use request_file_export only with an absolute path.",
+    );
     if !skills.is_empty() {
         prompt.push_str(&format!("\nInstalled skills: {}", skills.join(", ")));
     }
@@ -3346,6 +4029,16 @@ fn empty_provider_document() -> ProviderDocument {
         providers: BTreeMap::new(),
         extra: BTreeMap::new(),
     }
+}
+
+fn ensure_provider_document(home: &Path) -> Result<()> {
+    let path = providers_path(home);
+    if !path.exists() {
+        empty_provider_document()
+            .save(&path)
+            .context("failed to initialize empty provider configuration")?;
+    }
+    Ok(())
 }
 
 fn provider_json(id: &str, provider: &ProviderSettings, active: bool) -> Value {
@@ -3543,11 +4236,7 @@ fn validate_provider_activation(provider: &ProviderSettings) -> Result<(), ApiEr
 }
 
 #[cfg(test)]
-fn persist_discovered_models(
-    provider: &mut ProviderSettings,
-    models: &[String],
-    persist: bool,
-) {
+fn persist_discovered_models(provider: &mut ProviderSettings, models: &[String], persist: bool) {
     if persist {
         replace_provider_models(provider, models);
     }
@@ -3674,6 +4363,22 @@ mod tests {
     }
 
     #[test]
+    fn missing_provider_document_is_initialized_once() {
+        let home = tempfile::tempdir().expect("temporary home");
+        ensure_provider_document(home.path()).expect("initialize provider document");
+        let document = read_provider_document(home.path()).expect("read initialized document");
+        assert!(document.active.is_empty());
+        assert!(document.providers.is_empty());
+
+        let path = providers_path(home.path());
+        std::fs::write(&path, r#"{"active":"","providers":{},"sentinel":true}"#)
+            .expect("write sentinel document");
+        ensure_provider_document(home.path()).expect("preserve existing document");
+        let raw = std::fs::read_to_string(path).expect("read sentinel document");
+        assert!(raw.contains("sentinel"));
+    }
+
+    #[test]
     fn model_array_is_normalized_and_replaces_existing_models() {
         let input = json!({"models": [" new-a ", "", "new-a", "new-b"]});
         let models = parse_model_array(&input)
@@ -3730,18 +4435,24 @@ mod tests {
         validate_provider_activation(&provider).expect("declared model can be activated");
 
         provider.api_key.clear();
-        assert!(validate_provider_activation(&provider)
-            .expect_err("activation needs an API key")
-            .message
-            .contains("API key"));
+        assert!(
+            validate_provider_activation(&provider)
+                .expect_err("activation needs an API key")
+                .message
+                .contains("API key")
+        );
 
         provider.api_key = "secret".into();
         provider.model = "missing".into();
-        provider.extra.insert("models".into(), json!(["main", "fast"]));
-        assert!(validate_provider_activation(&provider)
-            .expect_err("activation needs a declared model")
-            .message
-            .contains("declared"));
+        provider
+            .extra
+            .insert("models".into(), json!(["main", "fast"]));
+        assert!(
+            validate_provider_activation(&provider)
+                .expect_err("activation needs a declared model")
+                .message
+                .contains("declared")
+        );
     }
 
     #[test]
@@ -3853,6 +4564,44 @@ mod tests {
     }
 
     #[test]
+    fn tool_failure_trace_is_redacted_again_on_the_server() {
+        let item = sanitize_tool_failure_item(ToolFailureTraceItem {
+            sequence: 1,
+            tool: "read_file<script>".into(),
+            argument_shape: json!({
+                "path": "/data/user/0/com.coomi.android/files/private.md",
+                "api_key": "sk-super-secret-value",
+                "mode": "metadata"
+            }),
+            status: "error".into(),
+            category: Some("not_found".into()),
+            error_summary: Some(
+                "failed at /storage/emulated/0/private.md using https://private.example".into(),
+            ),
+            elapsed_ms: Some(123),
+        });
+        let serialized = serde_json::to_string(&item).expect("serialize sanitized trace");
+        assert_eq!(item.tool, "read_filescript");
+        assert_eq!(item.argument_shape["api_key"], "[redacted_secret]");
+        assert!(!serialized.contains("com.coomi.android"));
+        assert!(!serialized.contains("super-secret"));
+        assert!(!serialized.contains("private.example"));
+        assert!(serialized.contains("[redacted_path]"));
+        assert!(serialized.contains("[redacted_url]"));
+    }
+
+    #[test]
+    fn generated_analysis_keeps_markdown_lines_while_removing_sensitive_tokens() {
+        let report = sanitize_generated_analysis(
+            "## 根因\n- 路径 /data/user/0/private.md\n- 上游 https://private.example/api",
+        );
+        assert!(report.starts_with("## 根因\n- 路径 [redacted_path]"));
+        assert!(report.contains("\n- 上游 [redacted_url]"));
+        assert!(!report.contains("private.md"));
+        assert!(!report.contains("private.example"));
+    }
+
+    #[test]
     fn web_prompt_does_not_include_shared_persistent_memory() {
         let home = tempfile::tempdir().expect("temporary home");
         let project = tempfile::tempdir().expect("temporary project");
@@ -3875,6 +4624,9 @@ mod tests {
         );
         assert!(!prompt.contains("CROSS_SESSION_SENTINEL"));
         assert!(!prompt.contains("Persistent memory:"));
+        assert!(prompt.contains(&format!("Working directory: {}", project.path().display())));
+        assert!(prompt.contains(&format!("Coomi home: {}", home.path().display())));
+        assert!(prompt.contains("normalized absolute paths"));
         // 全局会话记忆关闭时，系统提示必须包含隐私禁令。
         let locked = system_prompt(
             home.path(),
@@ -3925,12 +4677,14 @@ mod tests {
             permission: Arc::new(RwLock::new(PermissionMode::Auto)),
             tasks: Arc::new(StdMutex::new(HashMap::new())),
             vision_degraded: Arc::new(StdMutex::new(HashSet::new())),
-            vision_failures: Arc::new(StdMutex::new(HashMap::new())),
             registry_cache: Arc::new(StdMutex::new(None)),
         };
 
         let store = SessionStore::new(&home);
-        let running_session = Session::new("provider", "model", cwd.clone());
+        let mut running_session = Session::new("provider", "model", cwd.clone());
+        running_session.title = "Pinned title".into();
+        running_session.title_manually_set = true;
+        running_session.pinned = true;
         let idle_session = Session::new("provider", "model", cwd.clone());
         store.save(&running_session).expect("save running session");
         store.save(&idle_session).expect("save idle session");
@@ -3951,6 +4705,9 @@ mod tests {
                 "session should expose summary"
             );
             if id == running_session.id.to_string() {
+                assert_eq!(session["title"], "Pinned title");
+                assert_eq!(session["title_manually_set"], true);
+                assert_eq!(session["pinned"], true);
                 assert_eq!(
                     session["running"],
                     json!(true),

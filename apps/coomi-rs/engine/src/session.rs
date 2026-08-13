@@ -13,7 +13,11 @@ use std::cmp::Reverse;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 use uuid::Uuid;
+
+static SESSION_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Session {
@@ -28,6 +32,12 @@ pub struct Session {
     /// 会话标题：首条用户消息的本地推导，供会话列表/检索使用。
     #[serde(default)]
     pub title: String,
+    /// 用户手动修改过标题；检查点保存不能用运行中内存里的旧标题覆盖它。
+    #[serde(default)]
+    pub title_manually_set: bool,
+    /// 会话置顶状态，必须随会话文件持久化，不能只依赖 WebView localStorage。
+    #[serde(default)]
+    pub pinned: bool,
     /// 会话一句话摘要：本地规则推导（首条 user + 末尾 assistant），供检索匹配。
     #[serde(default)]
     pub summary: String,
@@ -54,6 +64,8 @@ impl Session {
             messages: Vec::new(),
             usage: TokenUsage::default(),
             title: String::new(),
+            title_manually_set: false,
+            pinned: false,
             summary: String::new(),
             context: ContextState::default(),
             plan: None,
@@ -95,6 +107,8 @@ pub struct SessionSummary {
     pub preview: String,
     /// 会话标题：持久化的 Session.title，缺省时惰性推导。
     pub title: String,
+    pub title_manually_set: bool,
+    pub pinned: bool,
     /// 会话摘要：持久化的 Session.summary，缺省时惰性推导。
     pub summary: String,
 }
@@ -111,6 +125,10 @@ impl SessionStore {
     }
 
     pub fn save(&self, session: &Session) -> Result<()> {
+        let _guard = SESSION_WRITE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         fs::create_dir_all(&self.directory).with_context(|| {
             format!(
                 "failed to create session directory {}",
@@ -118,7 +136,19 @@ impl SessionStore {
             )
         })?;
         let path = self.path(session.id);
-        let bytes = serde_json::to_vec_pretty(session)?;
+        let mut persisted = session.clone();
+        // 用户可能在 agent 运行期间改名/置顶。运行中的 Session 是较早快照，
+        // 每次 checkpoint 都必须保留磁盘上更新后的用户元数据。
+        if let Ok(bytes) = fs::read(&path)
+            && let Ok(existing) = serde_json::from_slice::<Session>(&bytes)
+        {
+            if existing.title_manually_set {
+                persisted.title = existing.title;
+                persisted.title_manually_set = true;
+            }
+            persisted.pinned = existing.pinned;
+        }
+        let bytes = serde_json::to_vec_pretty(&persisted)?;
         // 原子写：先写临时文件再 rename，避免崩溃/断电留下截断的 JSON，
         // 防止会话记录“莫名消失”（损坏文件此前会被 load 失败后静默丢弃）。
         let tmp = self.directory.join(format!("{}.json.tmp", session.id));
@@ -150,6 +180,36 @@ impl SessionStore {
         fs::remove_file(&path)
             .with_context(|| format!("failed to delete session {}", path.display()))?;
         Ok(true)
+    }
+
+    pub fn update_metadata(
+        &self,
+        id: Uuid,
+        title: Option<&str>,
+        pinned: Option<bool>,
+    ) -> Result<Session> {
+        let _guard = SESSION_WRITE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let path = self.path(id);
+        let bytes = fs::read(&path)
+            .with_context(|| format!("failed to read session {}", path.display()))?;
+        let mut session: Session = serde_json::from_slice(&bytes)
+            .with_context(|| format!("invalid session file {}", path.display()))?;
+        if let Some(title) = title {
+            session.title = title.to_owned();
+            session.title_manually_set = true;
+        }
+        if let Some(pinned) = pinned {
+            session.pinned = pinned;
+        }
+        let tmp = self.directory.join(format!("{}.json.tmp", session.id));
+        fs::write(&tmp, serde_json::to_vec_pretty(&session)?)
+            .with_context(|| format!("failed to write session {}", tmp.display()))?;
+        fs::rename(&tmp, &path)
+            .with_context(|| format!("failed to commit session metadata {}", session.id))?;
+        Ok(session)
     }
 
     /// Whether a session file exists on disk for this id.
@@ -212,6 +272,8 @@ impl SessionStore {
                 updated_at: session.updated_at,
                 preview,
                 title,
+                title_manually_set: session.title_manually_set,
+                pinned: session.pinned,
                 summary,
             });
         }
@@ -327,8 +389,7 @@ fn derive_summary(messages: &[ChatMessage]) -> String {
     // 尾部关键词不被硬截断（与「尾部关键词不漏检」的目标一致）。
     let first = rendered.first().cloned().unwrap_or_default();
     let last = rendered.last().cloned().unwrap_or_default();
-    let mut budget = SUMMARY_MAX_CHARS
-        .saturating_sub(first.chars().count() + last.chars().count());
+    let mut budget = SUMMARY_MAX_CHARS.saturating_sub(first.chars().count() + last.chars().count());
     let mut middle: Vec<String> = Vec::new();
     for round in &rounds[1..rounds.len() - 1] {
         let user: String = round.user.chars().take(24).collect();
@@ -387,10 +448,41 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].preview, "inspect this project");
         assert_eq!(listed[0].title, "inspect this project");
-        assert_eq!(listed[0].summary, "inspect this project → the build is green");
+        assert_eq!(
+            listed[0].summary,
+            "inspect this project → the build is green"
+        );
         assert_eq!(store.load(session.id).expect("load session").model, "model");
         assert!(store.delete(session.id).expect("delete session"));
         assert!(!store.delete(session.id).expect("delete missing session"));
+    }
+
+    #[test]
+    fn metadata_survives_restart_and_stale_checkpoint_save() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let store = SessionStore::new(home.path());
+        let mut stale = Session::new("provider", "model", home.path().to_path_buf());
+        stale.messages.push(ChatMessage::user("original title"));
+        store.save(&stale).expect("save initial session");
+
+        store
+            .update_metadata(stale.id, Some("用户标题"), Some(true))
+            .expect("persist metadata");
+        stale
+            .messages
+            .push(ChatMessage::assistant("done", Vec::new()));
+        store.save(&stale).expect("save stale checkpoint");
+
+        let loaded = SessionStore::new(home.path())
+            .load(stale.id)
+            .expect("load after restart");
+        assert_eq!(loaded.title, "用户标题");
+        assert!(loaded.title_manually_set);
+        assert!(loaded.pinned);
+        assert_eq!(loaded.messages.len(), 2);
+        let listed = store.list(None).expect("list sessions");
+        assert!(listed[0].pinned);
+        assert!(listed[0].title_manually_set);
     }
 
     #[test]
@@ -422,11 +514,24 @@ mod tests {
             .as_object_mut()
             .expect("session object")
             .remove("summary");
-        std::fs::write(&path, serde_json::to_vec_pretty(&value).expect("pretty json"))
-            .expect("write old-style json");
+        value
+            .as_object_mut()
+            .expect("session object")
+            .remove("title_manually_set");
+        value
+            .as_object_mut()
+            .expect("session object")
+            .remove("pinned");
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&value).expect("pretty json"),
+        )
+        .expect("write old-style json");
         let loaded = store.load(session.id).expect("load old-style session");
         assert!(loaded.title.is_empty());
         assert!(loaded.summary.is_empty());
+        assert!(!loaded.title_manually_set);
+        assert!(!loaded.pinned);
 
         let listed = store.list(Some(home.path())).expect("list sessions");
         assert_eq!(listed.len(), 1);
@@ -487,7 +592,10 @@ mod tests {
             summary.contains("击穿"),
             "末轮 user 问题应进摘要，实际: {summary:?}"
         );
-        assert!(summary.contains("布隆过滤器"), "首轮 assistant 结论应进摘要");
+        assert!(
+            summary.contains("布隆过滤器"),
+            "首轮 assistant 结论应进摘要"
+        );
     }
 
     #[test]
@@ -542,7 +650,9 @@ mod tests {
     #[test]
     fn derive_summary_captures_tail_keywords_of_long_reply() {
         // 长回复：关键信息（多进程）只出现在尾部，只取开头会漏掉。
-        let mut long = String::from("GIL 全称 Global Interpreter Lock，它让 CPython 同一时刻只有一个线程执行字节码。");
+        let mut long = String::from(
+            "GIL 全称 Global Interpreter Lock，它让 CPython 同一时刻只有一个线程执行字节码。",
+        );
         long.push_str(&"a".repeat(2000));
         long.push_str("需要的话我可以帮你写一个对比 GIL 影响、或用多进程/NumPy 加速的具体示例。");
         let messages = vec![
@@ -550,7 +660,10 @@ mod tests {
             ChatMessage::assistant(&long, Vec::new()),
         ];
         let summary = derive_summary(&messages);
-        assert!(summary.contains("多进程"), "摘要应包含尾部关键词，实际: {summary:?}");
+        assert!(
+            summary.contains("多进程"),
+            "摘要应包含尾部关键词，实际: {summary:?}"
+        );
         // 短回复双侧不重复、不截断过多。
         let short = vec![
             ChatMessage::user("hi"),

@@ -299,6 +299,13 @@
         <item name="android:paddingEnd">@dimen/coomi_space_l</item>
     </style>
 
+    <style name="Coomi.Button.Pill.Warning" parent="Coomi.Button.Pill">
+        <item name="android:background">@drawable/coomi_bg_pill_warning</item>
+        <item name="android:textColor">@color/coomi_warn</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:minWidth">144dp</item>
+    </style>
+
     <!-- 文字按钮 -->
     <style name="Coomi.Button.Text">
         <item name="android:background">@drawable/coomi_bg_ghost</item>

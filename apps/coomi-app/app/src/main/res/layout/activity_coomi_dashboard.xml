@@ -416,6 +416,32 @@
                 </LinearLayout>
                 <View style="@style/Coomi.Divider"/>
                 <LinearLayout
+                    android:id="@+id/btn_web_hooks"
+                    style="@style/Coomi.Row"
+                    android:clickable="true"
+                    android:focusable="true">
+                    <ImageView android:layout_width="@dimen/coomi_icon_m" android:layout_height="@dimen/coomi_icon_m" android:src="@drawable/coomi_ic_hook" android:tint="?attr/coomiText2" android:contentDescription="@null"/>
+                    <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:layout_marginStart="@dimen/coomi_space_m" android:orientation="vertical">
+                        <TextView style="@style/Coomi.Text.Body" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/coomi_dash_hooks"/>
+                        <TextView style="@style/Coomi.Text.Caption" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="2dp" android:text="@string/coomi_dash_hooks_desc"/>
+                    </LinearLayout>
+                    <ImageView android:layout_width="@dimen/coomi_icon_s" android:layout_height="@dimen/coomi_icon_s" android:src="@drawable/coomi_ic_chevron_right" android:tint="?attr/coomiText3" android:contentDescription="@null"/>
+                </LinearLayout>
+                <View style="@style/Coomi.Divider"/>
+                <LinearLayout
+                    android:id="@+id/btn_web_memory"
+                    style="@style/Coomi.Row"
+                    android:clickable="true"
+                    android:focusable="true">
+                    <ImageView android:layout_width="@dimen/coomi_icon_m" android:layout_height="@dimen/coomi_icon_m" android:src="@drawable/coomi_ic_memory" android:tint="?attr/coomiText2" android:contentDescription="@null"/>
+                    <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:layout_marginStart="@dimen/coomi_space_m" android:orientation="vertical">
+                        <TextView style="@style/Coomi.Text.Body" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/coomi_dash_memory"/>
+                        <TextView style="@style/Coomi.Text.Caption" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="2dp" android:text="@string/coomi_dash_memory_desc"/>
+                    </LinearLayout>
+                    <ImageView android:layout_width="@dimen/coomi_icon_s" android:layout_height="@dimen/coomi_icon_s" android:src="@drawable/coomi_ic_chevron_right" android:tint="?attr/coomiText3" android:contentDescription="@null"/>
+                </LinearLayout>
+                <View style="@style/Coomi.Divider"/>
+                <LinearLayout
                     android:id="@+id/btn_web_runtime"
                     style="@style/Coomi.Row"
                     android:clickable="true"

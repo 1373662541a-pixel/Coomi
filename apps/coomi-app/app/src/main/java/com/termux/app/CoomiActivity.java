@@ -98,6 +98,13 @@ public class CoomiActivity extends Activity {
     private String mPendingExportName;
     private String mPendingImportRequestId;
     private String mPendingExportRequestId;
+    private final Runnable mExportTimeout = () -> {
+        if (mPendingExportRequestId == null) return;
+        String requestId = mPendingExportRequestId;
+        clearPendingExport();
+        emitTransferProgress("导出失败：系统导出窗口 30 秒未响应", 0);
+        emitFileExported(requestId, null);
+    };
     private String mAppliedThemeMode;
 
     private final ServiceConnection mConnection = new ServiceConnection() {
@@ -637,6 +644,11 @@ public class CoomiActivity extends Activity {
                 File source = new File(path);
                 if (!source.isFile()) {
                     emitTransferProgress("导出失败：文件不存在", 0);
+                    if (mPendingExportRequestId != null) {
+                        String requestId = mPendingExportRequestId;
+                        clearPendingExport();
+                        emitFileExported(requestId, null);
+                    }
                     return;
                 }
                 mPendingExportPath = source.getAbsolutePath();
@@ -645,7 +657,18 @@ public class CoomiActivity extends Activity {
                 intent.addCategory(Intent.CATEGORY_OPENABLE);
                 intent.setType("application/octet-stream");
                 intent.putExtra(Intent.EXTRA_TITLE, mPendingExportName);
-                startActivityForResult(intent, REQUEST_EXPORT_FILE);
+                try {
+                    startActivityForResult(intent, REQUEST_EXPORT_FILE);
+                    if (mPendingExportRequestId != null) {
+                        mHandler.removeCallbacks(mExportTimeout);
+                        mHandler.postDelayed(mExportTimeout, 30_000L);
+                    }
+                } catch (Exception error) {
+                    String requestId = mPendingExportRequestId;
+                    clearPendingExport();
+                    emitTransferProgress("导出失败：" + error.getMessage(), 0);
+                    emitFileExported(requestId, null);
+                }
             });
         }
     }
@@ -666,8 +689,9 @@ public class CoomiActivity extends Activity {
                 emitFilesImported(new JSONArray(), mPendingImportRequestId);
                 mPendingImportRequestId = null;
             } else if (requestCode == REQUEST_EXPORT_FILE && mPendingExportRequestId != null) {
-                emitFileExported(mPendingExportRequestId, null);
-                mPendingExportRequestId = null;
+                String requestId = mPendingExportRequestId;
+                clearPendingExport();
+                emitFileExported(requestId, null);
             }
             return;
         }
@@ -684,6 +708,8 @@ public class CoomiActivity extends Activity {
         } else if (requestCode == REQUEST_AUTHORIZE_TREE && data.getData() != null) {
             authorizeTree(data.getData(), data.getFlags());
         } else if (requestCode == REQUEST_EXPORT_FILE && data.getData() != null) {
+            mHandler.removeCallbacks(mExportTimeout);
+            if (mPendingExportPath == null) return;
             Uri target = data.getData();
             new Thread(() -> exportToUri(target), "coomi-file-export").start();
         } else if (requestCode == REQUEST_SAVE_IMAGE && data.getData() != null) {
@@ -759,6 +785,7 @@ public class CoomiActivity extends Activity {
     }
 
     private void exportToUri(Uri target) {
+        mHandler.removeCallbacks(mExportTimeout);
         File source = new File(mPendingExportPath == null ? "" : mPendingExportPath);
         try (InputStream input = new FileInputStream(source);
              OutputStream output = getContentResolver().openOutputStream(target, "w")) {
@@ -772,10 +799,15 @@ public class CoomiActivity extends Activity {
             emitTransferProgress("导出失败：" + error.getMessage(), 0);
             emitFileExported(mPendingExportRequestId, null);
         } finally {
-            mPendingExportPath = null;
-            mPendingExportName = null;
-            mPendingExportRequestId = null;
+            clearPendingExport();
         }
+    }
+
+    private void clearPendingExport() {
+        mHandler.removeCallbacks(mExportTimeout);
+        mPendingExportPath = null;
+        mPendingExportName = null;
+        mPendingExportRequestId = null;
     }
 
     private static void copyStream(InputStream input, OutputStream output) throws Exception {
@@ -856,8 +888,15 @@ public class CoomiActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        // 需求：对话界面返回 → 控制台界面；控制台再返回才是退出 app。
-        openDashboard();
+        if (mWebView == null || !mPageLoaded) {
+            openDashboard();
+            return;
+        }
+        mWebView.evaluateJavascript(
+            "typeof window.__coomiHandleSystemBack==='function' && window.__coomiHandleSystemBack()",
+            value -> {
+                if (!"true".equals(value)) openDashboard();
+            });
     }
 
     @Override

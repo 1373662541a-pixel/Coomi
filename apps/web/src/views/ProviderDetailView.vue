@@ -37,6 +37,7 @@ const original = ref<ProviderDraft | null>(null)
 const isNew = computed(() => route.name === 'provider-new')
 const idLocked = ref(false)
 const saving = ref(false)
+const activating = ref(false)
 const discovering = ref(false)
 const showingKey = ref(false)
 const showPicker = ref(false)
@@ -252,6 +253,21 @@ async function saveModels() {
   return saveProvider('模型列表已保存')
 }
 
+async function activateCurrentProvider() {
+  if (!draft.value || isNew.value || activating.value || isCurrent.value) return
+  error.value = ''
+  message.value = ''
+  if (dirty.value && !(await saveProvider('配置已保存'))) return
+  activating.value = true
+  const ok = await config.activateProvider(draft.value.id)
+  activating.value = false
+  if (!ok) {
+    error.value = config.lastError || '设为当前提供商失败'
+    return
+  }
+  message.value = '已设为当前提供商'
+}
+
 async function revealKey() {
   if (!draft.value || isNew.value || showingKey.value) {
     showingKey.value = !showingKey.value
@@ -352,7 +368,7 @@ function openModelConfig() {
 
 <template>
   <div class="page">
-    <PageHead :title="draft?.name || (isNew ? '新建供应商' : '供应商详情')" @back="back">
+    <PageHead :title="draft?.name || (isNew ? '新建提供商' : '提供商详情')" @back="back">
       <template #right>
         <button v-if="tab === 'config'" class="head-save" :disabled="!canSave || saving" @click="saveConfigAndBack">保存</button>
       </template>
@@ -366,6 +382,19 @@ function openModelConfig() {
 
       <p v-if="message" class="notice ok">{{ message }}</p>
       <p v-if="error" class="notice err">{{ error }}</p>
+
+      <div v-if="!isNew && provider" class="activate-area">
+        <button
+          type="button"
+          class="btn wide activate-btn"
+          :class="isCurrent ? 'is-current' : 'btn-primary'"
+          :disabled="isCurrent || activating || saving"
+          @click="activateCurrentProvider"
+        >
+          <CoomiIcon v-if="isCurrent" name="check" :size="16" />
+          {{ isCurrent ? '当前提供商' : activating ? '正在设为当前...' : '设为当前' }}
+        </button>
+      </div>
 
       <form v-if="tab === 'config'" class="form" @submit.prevent="saveConfig">
         <label class="field">
@@ -494,6 +523,9 @@ function openModelConfig() {
 .notice { margin: 0 0 10px; padding: 9px 11px; border-radius: var(--r-md); font-size: 12.5px; line-height: 1.55; }
 .notice.ok { color: var(--ok); background: var(--ok-soft); }
 .notice.err { color: var(--danger); background: var(--danger-soft); }
+.activate-area { margin-bottom: 12px; }
+.activate-btn { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 42px; }
+.activate-btn.is-current { border: 1px solid var(--ok); background: var(--ok-soft); color: var(--ok); opacity: 1; }
 .form { display: flex; flex-direction: column; gap: 12px; }
 .field { display: flex; flex-direction: column; gap: 5px; }
 .field > span:first-child { padding-left: 3px; color: var(--text-2); font-size: 12.5px; }

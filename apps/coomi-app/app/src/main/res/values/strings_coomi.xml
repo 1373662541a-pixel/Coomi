@@ -12,7 +12,7 @@
     <string name="coomi_dash_section_settings">设置</string>
     <string name="coomi_dash_permission_settings">运行权限</string>
     <string name="coomi_dash_permission_settings_desc">通知、电池与增强权限</string>
-    <string name="coomi_dash_provider_settings">Provider 配置</string>
+    <string name="coomi_dash_provider_settings">提供商配置</string>
     <string name="coomi_dash_provider_settings_desc">密钥、模型与服务地址</string>
     <string name="coomi_dash_storage_settings">手机存储访问</string>
     <string name="coomi_dash_storage_settings_desc">允许 Agent 读取真实手机目录</string>
@@ -57,12 +57,12 @@
 
     <!-- ===== 步骤二：模型配置 ===== -->
     <string name="coomi_auth_title">连接模型</string>
-    <string name="coomi_auth_subtitle">在统一的 Provider 管理页面中配置服务商、API Key 和模型。</string>
+    <string name="coomi_auth_subtitle">在统一的提供商配置页面中配置服务商、API Key 和模型。</string>
     <string name="coomi_auth_section_provider">服务商</string>
-    <string name="coomi_auth_provider_hint">新的 Provider 页面支持内置服务商、自定义服务商和模型管理。</string>
-    <string name="coomi_auth_open_providers">打开 Provider 配置</string>
-    <string name="coomi_auth_provider_required">请先打开 Provider 配置并完成一个服务商配置。</string>
-    <string name="coomi_auth_provider_ready">Provider 已配置，可以继续。</string>
+    <string name="coomi_auth_provider_hint">提供商配置页面支持内置服务商、自定义服务商和模型管理。</string>
+    <string name="coomi_auth_open_providers">打开提供商配置</string>
+    <string name="coomi_auth_provider_required">请先打开提供商配置并完成一个服务商配置。</string>
+    <string name="coomi_auth_provider_ready">提供商已配置，可以继续。</string>
     <string name="coomi_auth_section_key">凭据</string>
     <string name="coomi_auth_key_label">API Key</string>
     <string name="coomi_auth_key_hint">粘贴你的 API Key</string>
@@ -108,6 +108,10 @@
     <string name="coomi_dash_browser_desc">用系统浏览器访问本机引擎</string>
     <string name="coomi_dash_catalog">拓展管理</string>
     <string name="coomi_dash_catalog_desc">安装与管理 Skills 和 MCP Server</string>
+    <string name="coomi_dash_hooks">自定义钩子</string>
+    <string name="coomi_dash_hooks_desc">在会话和工具调用前后执行自定义命令</string>
+    <string name="coomi_dash_memory">持久记忆</string>
+    <string name="coomi_dash_memory_desc">编辑 Coomi 内建记忆、范围和命中信息</string>
     <string name="coomi_dash_files">文件管理</string>
     <string name="coomi_dash_files_desc">浏览独立环境，管理项目文件</string>
     <string name="coomi_dash_env_settings">内置环境</string>
@@ -160,10 +164,10 @@
     <string name="coomi_backup_title">备份与导入</string>
     <string name="coomi_backup_back">返回</string>
     <string name="coomi_backup_action">备份数据</string>
-    <string name="coomi_backup_action_desc">将会话、永久统计、完整 MCP/SKILL 文件与配置保存到下载目录</string>
+    <string name="coomi_backup_action_desc">导出数据文件、Coomi 配置、完整 MCP 与 Skill；不包含运行环境和缓存</string>
     <string name="coomi_backup_import">导入备份</string>
     <string name="coomi_backup_import_desc">选择备份压缩包（.zip），恢复完整 Coomi 数据与拓展文件</string>
-    <string name="coomi_backup_hint">提示：备份包含 Provider 配置和本地拓展实现，可能含敏感数据，请妥善保管备份文件。</string>
+    <string name="coomi_backup_hint">提示：备份包含提供商配置和本地拓展实现，可能含敏感数据，请妥善保管备份文件。</string>
     <string name="coomi_backup_importing">正在导入备份…</string>
     <string name="coomi_backup_import_done">导入完成</string>
     <string name="coomi_backup_import_failed">导入失败：%1$s</string>
@@ -208,4 +212,9 @@
     <string name="coomi_appearance_title">外观</string>
     <string name="coomi_appearance_book_desc">书卷纸底色与墨绿色强调</string>
     <string name="coomi_appearance_orange_desc">白色底面与橙色强调</string>
+    <string name="coomi_terms_consent">同意《用户协议》和《用户隐私政策》</string>
+    <string name="coomi_user_agreement_title">用户协议</string>
+    <string name="coomi_user_agreement_body">使用 Coomi 即表示您授权其按您的指令在本机执行操作。请审慎确认高风险操作并遵守适用法律。软件按现状提供，重要数据请自行备份。</string>
+    <string name="coomi_privacy_policy_title">用户隐私政策</string>
+    <string name="coomi_privacy_policy_body">对话、文件和密钥默认保存在您的设备。模型请求会发送给您配置的服务商。匿名日活仅按 IP 每日去重，不上传对话或文件；错误反馈仅在您确认后上传脱敏诊断。</string>
 </resources>

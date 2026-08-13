@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { isDemoMode } from '@/bridge/demoMode'
-import { authedFetch } from '@/bridge/http'
+import { apiSend, authedFetch } from '@/bridge/http'
 import type { Timelineitem } from './viewModel'
 
 /**
@@ -245,19 +245,53 @@ export const useSessionsStore = defineStore('sessions', () => {
     persistMeta()
   }
 
-  function rename(id: string, title: string) {
+  async function rename(id: string, title: string): Promise<boolean> {
     const m = find(id)
-    if (!m) return
-    m.title = title.trim() || m.title
+    if (!m) return false
+    const next = title.trim()
+    if (!next || next === m.title) return true
+    const previous = { title: m.title, renamed: m.renamed }
+    m.title = next
     m.renamed = true
     persist()
+    try {
+      const saved = await apiSend<{ title: string; title_manually_set: boolean }>(
+        `/api/sessions/${encodeURIComponent(id)}`,
+        'POST',
+        { title: next },
+      )
+      m.title = saved.title
+      m.renamed = saved.title_manually_set
+      persist()
+      return true
+    } catch {
+      m.title = previous.title
+      m.renamed = previous.renamed
+      persist()
+      return false
+    }
   }
 
-  function togglePin(id: string) {
+  async function togglePin(id: string): Promise<boolean> {
     const m = find(id)
-    if (!m) return
-    m.pinned = !m.pinned
+    if (!m) return false
+    const previous = m.pinned
+    m.pinned = !previous
     persist()
+    try {
+      const saved = await apiSend<{ pinned: boolean }>(
+        `/api/sessions/${encodeURIComponent(id)}`,
+        'POST',
+        { pinned: m.pinned },
+      )
+      m.pinned = saved.pinned
+      persist()
+      return true
+    } catch {
+      m.pinned = previous
+      persist()
+      return false
+    }
   }
 
   function remove(id: string) {
@@ -363,25 +397,38 @@ export const useSessionsStore = defineStore('sessions', () => {
         title: string
         summary: string
         created_at: string
+        title_manually_set: boolean
+        pinned: boolean
       }>
       const localById = new Map(metas.value.map(m => [m.id, m]))
+      const legacyMigrations: Array<Promise<unknown>> = []
       const merged: SessionMeta[] = remote.map(r => {
         const local = localById.get(r.id)
         const updatedAt = Date.parse(r.updated_at) || Date.now()
         const createdAt = local?.createdAt ?? (Date.parse(r.created_at) || updatedAt)
+        const legacyTitle = !r.title_manually_set && local?.renamed ? local.title : undefined
+        const legacyPinned = !r.pinned && local?.pinned ? true : undefined
+        if (legacyTitle !== undefined || legacyPinned !== undefined) {
+          legacyMigrations.push(apiSend(
+            `/api/sessions/${encodeURIComponent(r.id)}`,
+            'POST',
+            { ...(legacyTitle !== undefined ? { title: legacyTitle } : {}), ...(legacyPinned !== undefined ? { pinned: true } : {}) },
+          ))
+        }
         return {
           id: r.id,
-          // 用户重命名过（renamed）则保留用户标题；否则引擎 title 优先，本地推导兜底。
-          title: local?.renamed ? local.title : (r.title || local?.title || (r.preview ? deriveTitle(r.preview) : '新对话')),
+          title: r.title_manually_set
+            ? r.title
+            : (legacyTitle || r.title || local?.title || (r.preview ? deriveTitle(r.preview) : '新对话')),
           createdAt,
           updatedAt,
           turns: local?.turns ?? 0,
-          pinned: local?.pinned ?? false,
+          pinned: r.pinned || Boolean(legacyPinned),
           cwd: r.cwd || local?.cwd,
           summary: r.summary || local?.summary,
           preview: r.preview || local?.preview,
           model: r.model || local?.model,
-          renamed: local?.renamed,
+          renamed: r.title_manually_set || Boolean(legacyTitle),
         }
       })
       // 本地有而引擎暂无的（旧迁移 ID 等）保留，避免吞掉用户数据
@@ -391,6 +438,7 @@ export const useSessionsStore = defineStore('sessions', () => {
       }
       metas.value = merged
       persist()
+      if (legacyMigrations.length > 0) void Promise.allSettled(legacyMigrations)
       return true
     } catch {
       return false

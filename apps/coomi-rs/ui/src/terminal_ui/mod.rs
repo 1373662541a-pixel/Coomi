@@ -3492,6 +3492,8 @@ mod tests {
                     updated_at: chrono::Utc::now(),
                     preview: session["preview"].as_str().expect("preview").to_string(),
                     title: session["title"].as_str().expect("title").to_string(),
+                    title_manually_set: false,
+                    pinned: false,
                     summary: session["summary"].as_str().expect("summary").to_string(),
                 };
                 let got = session_search_score(&summary, query);

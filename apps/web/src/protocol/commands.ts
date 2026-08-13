@@ -8,7 +8,7 @@ export interface SendMessageCommand { command: 'send_message'; text: string }
 export interface CancelCommand { command: 'cancel' }
 export interface JumpInCommand { command: 'jump_in'; text: string }
 export interface ApproveToolCommand { command: 'approve_tool'; call_id: string; decision: ApprovalDecision }
-export interface AnswerQuestionCommand { command: 'answer_question'; call_id: string; answer: string }
+export interface AnswerQuestionCommand { command: 'answer_question'; call_id: string; answers: Record<string, string> }
 export interface SetPermissionModeCommand { command: 'set_permission_mode'; mode: PermissionMode }
 export interface EnterPlanModeCommand { command: 'enter_plan_mode' }
 export interface ExitPlanModeCommand { command: 'exit_plan_mode' }

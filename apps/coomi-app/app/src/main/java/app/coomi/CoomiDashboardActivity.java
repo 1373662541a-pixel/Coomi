@@ -69,6 +69,8 @@ public class CoomiDashboardActivity extends Activity {
     private View mOpenWebUiButton;
     private View mWebUiButtonContainer;
     private View mCatalogButton;
+    private View mHooksButton;
+    private View mMemoryButton;
     private View mFilesButton;
     private View mProvidersButton;
     private View mRuntimeButton;
@@ -87,6 +89,7 @@ public class CoomiDashboardActivity extends Activity {
 
     private CoomiService mCoomiService;
     private boolean mBound = false;
+    private boolean mRegistryRefreshRequested;
     private Handler mHandler = new Handler(Looper.getMainLooper());
     private Runnable mStatusRunnable;
 
@@ -126,6 +129,8 @@ public class CoomiDashboardActivity extends Activity {
         mOpenWebUiButton = findViewById(R.id.btn_open_webui);
         mWebUiButtonContainer = findViewById(R.id.webui_button_container);
         mCatalogButton = findViewById(R.id.btn_web_catalog);
+        mHooksButton = findViewById(R.id.btn_web_hooks);
+        mMemoryButton = findViewById(R.id.btn_web_memory);
         mFilesButton = findViewById(R.id.btn_web_files);
         mCheckUpdateButton = findViewById(R.id.btn_check_update);
         mCheckUpdateDesc = findViewById(R.id.txt_check_update_desc);
@@ -146,6 +151,8 @@ public class CoomiDashboardActivity extends Activity {
         mOpenTerminalButton.setOnClickListener(v -> openTerminal());
         mOpenWebUiButton.setOnClickListener(v -> openWebUi());
         mCatalogButton.setOnClickListener(v -> openCatalog());
+        mHooksButton.setOnClickListener(v -> openCoomiRoute("#/hooks"));
+        mMemoryButton.setOnClickListener(v -> openCoomiRoute("#/memory"));
         mFilesButton.setOnClickListener(v -> openFiles());
         mProvidersButton = findViewById(R.id.btn_web_providers);
         mRuntimeButton = findViewById(R.id.btn_web_runtime);
@@ -243,6 +250,10 @@ public class CoomiDashboardActivity extends Activity {
                 if (mWebUiButtonContainer != null) {
                     mWebUiButtonContainer.setVisibility(running ? View.VISIBLE : View.GONE);
                 }
+                if (running && !mRegistryRefreshRequested) {
+                    mRegistryRefreshRequested = true;
+                    mCoomiService.refreshRegistryCache();
+                }
             });
         });
     }
@@ -256,6 +267,7 @@ public class CoomiDashboardActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        mRegistryRefreshRequested = false;
         String currentMode = CoomiTheme.getMode(this);
         if (mAppliedThemeMode != null && !mAppliedThemeMode.equals(currentMode)) {
             recreate();

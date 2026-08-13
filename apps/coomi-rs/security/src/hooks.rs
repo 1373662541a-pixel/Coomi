@@ -47,6 +47,8 @@ pub struct HookOutcome {
 
 #[derive(Clone, Debug, Deserialize)]
 struct HookConfig {
+    #[serde(default = "default_true")]
+    enabled: bool,
     #[serde(default = "default_matcher")]
     matcher: String,
     command: String,
@@ -106,6 +108,9 @@ impl HookRunner {
             return Ok(aggregate);
         };
         for hook in hooks {
+            if !hook.enabled {
+                continue;
+            }
             if !matches_subject(&hook.matcher, subject) {
                 continue;
             }

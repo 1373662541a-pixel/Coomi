@@ -12,6 +12,8 @@ export const router = createRouter({
     { path: '/providers/:id', name: 'provider-detail', component: () => import('@/views/ProviderDetailView.vue') },
     { path: '/runtime', name: 'runtime', component: () => import('@/views/RuntimeView.vue') },
     { path: '/catalog', name: 'catalog', component: () => import('@/views/CatalogView.vue') },
+    { path: '/hooks', name: 'hooks', component: () => import('@/views/HooksView.vue') },
+    { path: '/memory', name: 'memory', component: () => import('@/views/MemoryView.vue') },
     { path: '/files', name: 'files', component: () => import('@/views/FileManagerView.vue') },
   ],
 })

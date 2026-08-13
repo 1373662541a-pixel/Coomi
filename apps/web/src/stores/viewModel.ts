@@ -1,4 +1,4 @@
-import type { ToolAccess } from '@/protocol/events'
+import type { ToolAccess, UserQuestion } from '@/protocol/events'
 
 export type ToolCardStatus = 'starting' | 'running' | 'success' | 'error' | 'awaiting_approval' | 'cache_hit' | 'cancelled'
 
@@ -25,11 +25,32 @@ export interface UserMessage { kind: 'user'; id: string; content: string }
 export interface ReasoningBlock { kind: 'reasoning'; id: string; content: string; expanded: boolean }
 
 export interface QuestionCard {
-  kind: 'question'; callId: string; question: string
-  options?: string[]; allowFreeText: boolean; answered: boolean; answer?: string
+  kind: 'question'; callId: string; questions: UserQuestion[]
+  answered: boolean; answers?: Record<string, string>
 }
 
-export interface NoticeItem { kind: 'notice'; id: string; tone: 'info' | 'warn' | 'error' | 'success'; text: string; detail?: string }
+export interface NoticeItem {
+  kind: 'notice'
+  id: string
+  tone: 'info' | 'warn' | 'error' | 'success'
+  text: string
+  detail?: string
+  feedbackEligible?: boolean
+  analysisStatus?: 'consent' | 'analyzing' | 'ready' | 'uploading' | 'complete' | 'failed'
+  analysisTrace?: ToolDiagnosticTrace[]
+  failureCount?: number
+}
+
+export interface ToolDiagnosticTrace {
+  callId?: string
+  sequence: number
+  tool: string
+  argumentShape: unknown
+  status: 'running' | 'error' | 'success'
+  category?: string
+  errorSummary?: string
+  elapsedMs?: number
+}
 
 export type Timelineitem = UserMessage | AssistantMessage | ReasoningBlock | ToolCard | QuestionCard | NoticeItem
 

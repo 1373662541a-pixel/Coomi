@@ -368,10 +368,14 @@ confirmation, authorization, or compliance with any regulations.",
         ),
     }
     prompt.push_str(&format!(
-        "\n\nWorking directory: {}\nAccess policy: {}",
+        "\n\nFilesystem layout:\n- Working directory: {}\n- Coomi home: {}\nAccess policy: {}",
         cwd.display(),
+        home.display(),
         policy.label()
     ));
+    prompt.push_str(
+        "\nAll file references shown to the user and every path passed to file export must be normalized absolute paths. Never return a relative path for a created, edited, downloaded, referenced, or exported file. Resolve relative tool output against the working directory before presenting it.",
+    );
     prompt.push_str(
         "\nWhen the user asks to install, configure, or repair an MCP server or Skill, use the dedicated configure_mcp or install_skill tool. Diagnose failing commands first, then update the smallest configuration necessary; do not ask the user to edit Coomi JSON manually.",
     );

@@ -11,7 +11,8 @@ import { nextId } from '@/bridge/envelope'
 import { useConnectionStore } from './connection'
 import { useConfigStore } from './config'
 import { useSessionsStore } from './sessions'
-import type { AssistantMessage, LoopProgress, QuestionCard, ReasoningBlock, RunState, Timelineitem, ToolCard } from './viewModel'
+import { router } from '@/router'
+import type { AssistantMessage, LoopProgress, QuestionCard, ReasoningBlock, RunState, Timelineitem, ToolCard, ToolDiagnosticTrace } from './viewModel'
 
 export const useSessionStore = defineStore('session', () => {
   const connection = useConnectionStore()
@@ -37,6 +38,7 @@ export const useSessionStore = defineStore('session', () => {
   let currentAssistant: AssistantMessage | null = null
   let connectedSessionId = ''
   let persistTimer: ReturnType<typeof setTimeout> | null = null
+  let turnToolTrace: ToolDiagnosticTrace[] = []
   const transport = shallowRef<Transport | null>(null)
 
   const isBusy = computed(() => runState.value !== 'idle')
@@ -141,6 +143,13 @@ export const useSessionStore = defineStore('session', () => {
       case 'tool_start':
         endAssistantStream()
         timeline.value.push({ kind: 'tool', callId: ev.call_id, toolName: ev.tool_name, arguments: ev.arguments, status: 'starting', expanded: ev.tool_name === 'show_image' })
+        turnToolTrace.push({
+          callId: ev.call_id,
+          sequence: turnToolTrace.length + 1,
+          tool: sanitizeToolName(ev.tool_name),
+          argumentShape: summarizeArguments(ev.arguments),
+          status: 'running',
+        })
         runState.value = 'executing'
         break
       case 'tool_running': patchTool(ev.call_id, c => c.status = 'running'); runState.value = 'executing'; break
@@ -156,8 +165,25 @@ export const useSessionStore = defineStore('session', () => {
         // 工具跑完不等于一轮结束 —— 模型接着想下一步。回 idle 只认 turn_end /
         // 取消 / 致命错误，否则输入区会在循环中途闪回「下达任务」和发送箭头。
         runState.value = 'thinking'
+        {
+          const trace = turnToolTrace.find(item => item.callId === ev.call_id)
+          if (trace) {
+            trace.status = ev.is_error ? 'error' : 'success'
+            trace.elapsedMs = Math.max(0, Math.round(ev.elapsed * 1000))
+            if (ev.is_error) {
+              trace.category = classifyToolError(ev.result_preview)
+              trace.errorSummary = sanitizeDiagnosticText(ev.result_preview)
+            }
+          }
+        }
         break
-      case 'tool_cache_hit': patchTool(ev.call_id, c => c.status = 'cache_hit'); break
+      case 'tool_cache_hit':
+        patchTool(ev.call_id, c => c.status = 'cache_hit')
+        {
+          const trace = turnToolTrace.find(item => item.callId === ev.call_id)
+          if (trace) trace.status = 'success'
+        }
+        break
       case 'tool_approval_request':
         endAssistantStream()
         if (!patchTool(ev.call_id, c => { c.status = 'awaiting_approval'; c.access = ev.access; c.riskSummary = ev.risk_summary; c.expanded = true })) {
@@ -167,7 +193,7 @@ export const useSessionStore = defineStore('session', () => {
         break
       case 'user_question_request':
         endAssistantStream()
-        timeline.value.push({ kind: 'question', callId: ev.call_id, question: ev.question, options: ev.options, allowFreeText: ev.allow_free_text ?? true, answered: false })
+        timeline.value.push({ kind: 'question', callId: ev.call_id, questions: ev.questions, answered: false })
         runState.value = 'awaiting_question'
         break
       case 'file_transfer_request':
@@ -216,6 +242,7 @@ export const useSessionStore = defineStore('session', () => {
         retryConfirmation.value = ev.message
         break
       case 'agent_error': endAssistantStream(); pushNotice('error', ev.message); if (ev.is_fatal) runState.value = 'idle'; persistSoon(); break
+      case 'configuration_required': endAssistantStream(); runState.value = 'idle'; pushNotice('warn', ev.message); void router.push(ev.route); break
       case 'agent_cancelled': endAssistantStream(); cancelRunningTools(); pushNotice('warn', '已停止本轮执行'); break
       case 'bg_task_detached': pushNotice('info', `↪ 已转入后台任务 #${ev.task_id}（${ev.tool_name}）`); break
       case 'bg_task_completed': pushNotice(ev.is_error ? 'error' : 'success', `${ev.is_error ? '✕' : '✓'} 后台任务 #${ev.task_id} ${ev.is_error ? '失败' : '完成'}`); break
@@ -225,7 +252,24 @@ export const useSessionStore = defineStore('session', () => {
       case 'loop_step_start':
         loop.value = { ...loop.value, active: true, totalSteps: ev.total_steps, currentStep: ev.step_index, currentDescription: ev.step_description }
         break
-      case 'turn_end': endAssistantStream(); cancelRunningTools(); connection.setRetry(null); runState.value = 'idle'; persistSoon(); break
+      case 'turn_end':
+        endAssistantStream(); cancelRunningTools(); connection.setRetry(null); runState.value = 'idle'
+        {
+          const failures = turnToolTrace.filter(item => item.status === 'error').length
+          if (failures >= 3) {
+            const trace = turnToolTrace.map(item => ({ ...item, callId: undefined }))
+            const noticeId = nextId()
+            timeline.value.push({
+              kind: 'notice', id: noticeId, tone: 'warn', analysisStatus: 'consent', feedbackEligible: true,
+              text: `本轮任务中工具调用失败 ${failures} 次，建议反馈错误记录。注意此信息不是报错。本次反馈需额外轻量调用一次当前模型 API 进行脱敏整理。`,
+              analysisTrace: trace,
+              failureCount: failures,
+            })
+          }
+        }
+        turnToolTrace = []
+        persistSoon()
+        break
       case 'session_state': {
         // 重连后引擎告知本会话是否仍在后台执行（切走会话后任务继续跑）。
         sessions.refreshRunning()
@@ -305,6 +349,7 @@ export const useSessionStore = defineStore('session', () => {
       persistSoon()
       return
     }
+    turnToolTrace = []
     timeline.value.push({ kind: 'user', id: nextId(), content: trimmed })
     runState.value = 'thinking'
     transport.value?.send({ command: 'send_message', text: trimmed })
@@ -317,9 +362,9 @@ export const useSessionStore = defineStore('session', () => {
     transport.value?.send({ command: 'approve_tool', call_id: callId, decision })
     if (runState.value === 'awaiting_approval') runState.value = 'executing'
   }
-  function answerQuestion(callId: string, answer: string) {
-    patchQuestion(callId, q => { q.answered = true; q.answer = answer })
-    transport.value?.send({ command: 'answer_question', call_id: callId, answer })
+  function answerQuestion(callId: string, answers: Record<string, string>) {
+    patchQuestion(callId, q => { q.answered = true; q.answers = answers })
+    transport.value?.send({ command: 'answer_question', call_id: callId, answers })
     if (runState.value === 'awaiting_question') runState.value = 'thinking'
   }
   function setPermissionMode(mode: 'ask' | 'auto' | 'full') { config.setPermissionMode(mode); transport.value?.send({ command: 'set_permission_mode', mode }) }
@@ -507,10 +552,132 @@ export const useSessionStore = defineStore('session', () => {
   }
   function pushNotice(tone: 'info' | 'warn' | 'error' | 'success', text: string) { timeline.value.push({ kind: 'notice', id: nextId(), tone, text }) }
 
-  return { sessionId, timeline, runState, usage, retryConfirmation, cwd, loop, isBusy, pendingApproval, pendingQuestion, connect, disconnect, flushPersistence, sendMessage, cancel, approve, answerQuestion, setPermissionMode, setReasoningEffort, setMaxToolRounds, togglePlanMode, selectModel, retryInterruptedTurn, dismissRetry, completeFileTransfer, newSession, openSession, deleteSession, setSessionCwd, sendGuide }
+  async function consentToolFailureFeedback(noticeId: string): Promise<boolean> {
+    const notice = timeline.value.find(item => item.kind === 'notice' && item.id === noticeId)
+    if (notice?.kind !== 'notice' || !notice.analysisTrace?.length) return false
+    if (!['consent', 'failed'].includes(notice.analysisStatus ?? '')) return false
+    const trace = notice.analysisTrace
+    const failureCount = notice.failureCount ?? trace.filter(item => item.status === 'error').length
+    updateAnalysisNotice(noticeId, {
+      analysisStatus: 'analyzing', feedbackEligible: false, detail: undefined,
+      text: '正在后台轻量整理工具调用错误，完成后将自动上传。您可以继续对话。',
+    })
+    persistSoon()
+    try {
+      const response = await authedFetch('/api/tool-failure-analysis', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider_id: config.currentProviderId,
+          trace: trace.map(({ callId: _callId, ...item }) => item),
+        }),
+      })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const data = await response.json()
+      const analysis = typeof data.analysis === 'string' ? data.analysis.trim() : ''
+      if (!analysis) throw new Error('empty analysis')
+      updateAnalysisNotice(noticeId, {
+        analysisStatus: 'ready', feedbackEligible: false,
+        text: `已完成 ${failureCount} 次工具失败的脱敏整理，正在自动上传。`,
+        detail: `${analysis}\n\n${buildLocalEvidence(trace)}`,
+      })
+      persistSoon()
+      return true
+    } catch (error) {
+      updateAnalysisNotice(noticeId, {
+        analysisStatus: 'failed', feedbackEligible: true, detail: undefined,
+        text: `反馈整理失败，未上传任何内容：${error instanceof Error ? error.message : String(error)}。可点击重试。`,
+      })
+      persistSoon()
+      return false
+    }
+  }
+
+  function finishToolFailureFeedback(noticeId: string, ok: boolean, reason = '') {
+    updateAnalysisNotice(noticeId, ok ? {
+      analysisStatus: 'complete', feedbackEligible: false,
+      text: '工具调用错误记录已完成脱敏整理并自动上传，感谢您的反馈。',
+      analysisTrace: undefined,
+    } : {
+      analysisStatus: 'ready', feedbackEligible: true,
+      text: `整理已完成，但自动上传失败${reason ? `：${reason}` : ''}。可直接重试上传，无需再次调用模型。`,
+    })
+    persistSoon()
+  }
+
+  function updateAnalysisNotice(id: string, patch: Partial<Extract<Timelineitem, { kind: 'notice' }>>) {
+    const notice = timeline.value.find(item => item.kind === 'notice' && item.id === id)
+    if (notice?.kind === 'notice') Object.assign(notice, patch)
+  }
+
+  return { sessionId, timeline, runState, usage, retryConfirmation, cwd, loop, isBusy, pendingApproval, pendingQuestion, connect, disconnect, flushPersistence, sendMessage, cancel, approve, answerQuestion, setPermissionMode, setReasoningEffort, setMaxToolRounds, togglePlanMode, selectModel, retryInterruptedTurn, dismissRetry, completeFileTransfer, newSession, openSession, deleteSession, setSessionCwd, sendGuide, consentToolFailureFeedback, finishToolFailureFeedback }
 })
 
 function fmtTokens(n: number): string { return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n) }
+
+function sanitizeToolName(name: string): string {
+  return name.replace(/[^a-zA-Z0-9_.:-]/g, '').slice(0, 80) || 'unknown_tool'
+}
+
+function classifyToolError(message: string): string {
+  const text = message.toLowerCase()
+  if (/permission|denied|allowed area/.test(text)) return 'permission_or_sandbox'
+  if (/timeout|timed out/.test(text)) return 'timeout'
+  if (/not found|enoent/.test(text)) return 'not_found'
+  if (/invalid|schema|argument|parse/.test(text)) return 'invalid_arguments'
+  if (/network|connect|dns|http/.test(text)) return 'network_or_upstream'
+  return 'execution_error'
+}
+
+function summarizeArguments(value: unknown, key = '', depth = 0): unknown {
+  if (depth > 4) return '[max_depth]'
+  if (value === null) return '[null]'
+  if (Array.isArray(value)) return value.slice(0, 12).map(item => summarizeArguments(item, key, depth + 1))
+  if (typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).slice(0, 30).map(([childKey, child]) => [
+      childKey.replace(/[^a-zA-Z0-9_.:-]/g, '').slice(0, 80) || 'field',
+      summarizeArguments(child, childKey, depth + 1),
+    ]))
+  }
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') return '[number]'
+  if (typeof value !== 'string') return `[${typeof value}]`
+  const text = value.trim()
+  const lowerKey = key.toLowerCase()
+  if (/key|token|secret|password|authorization|credential/.test(lowerKey)) return '[redacted_secret]'
+  if (/path|file|dir|cwd|destination|source/.test(lowerKey) || /^(?:\/|[a-z]:\\)/i.test(text)) {
+    const extension = text.match(/\.([a-zA-Z0-9]{1,8})$/)?.[1]?.toLowerCase()
+    return `[${/^(?:\/|[a-z]:\\)/i.test(text) ? 'absolute' : 'relative'}_path${extension ? ` ext=.${extension}` : ''}]`
+  }
+  if (/command|cmd|script/.test(lowerKey) || /[\s;&|><]/.test(text)) {
+    const tokens = text.split(/\s+/).filter(Boolean)
+    const executable = tokens[0]?.split(/[\\/]/).pop()?.replace(/[^a-zA-Z0-9_.+-]/g, '') || 'unknown'
+    const flags = tokens.slice(1).filter(token => /^--?[a-zA-Z0-9_-]+$/.test(token)).slice(0, 12)
+    return { kind: 'command_shape', executable, flags, token_count: tokens.length, has_shell_operators: /[;&|><]/.test(text) }
+  }
+  if (/^https?:\/\//i.test(text)) return '[url_redacted]'
+  if (/^[a-zA-Z][a-zA-Z0-9_.:-]{0,31}$/.test(text)) return text
+  return `[string length=${text.length}]`
+}
+
+function sanitizeDiagnosticText(message: string): string {
+  return message
+    .slice(0, 1200)
+    .replace(/\b(?:sk-|Bearer\s+)[a-zA-Z0-9._-]{8,}\b/gi, '[redacted_secret]')
+    .replace(/https?:\/\/[^\s"']+/gi, '[redacted_url]')
+    .replace(/(?:[a-zA-Z]:\\|\/data\/|\/storage\/|\/sdcard\/|\/home\/)[^\s"']+/g, '[redacted_path]')
+    .replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, '[redacted_email]')
+    .replace(/\b[0-9a-f]{24,}\b/gi, '[redacted_identifier]')
+    .replace(/(["'])(?:(?!\1).){41,}\1/g, '[redacted_text]')
+}
+
+function buildLocalEvidence(items: ToolDiagnosticTrace[]): string {
+  return [
+    '【程序采集的脱敏证据】',
+    '不含用户消息、原始参数值、文件内容、真实路径、URL、密钥或模型隐藏思维。',
+    ...items.map(item => `#${item.sequence} ${item.tool} | ${item.status}${item.category ? ` | ${item.category}` : ''}${item.elapsedMs !== undefined ? ` | ${item.elapsedMs}ms` : ''}\n参数结构: ${JSON.stringify(item.argumentShape)}${item.errorSummary ? `\n错误摘要: ${item.errorSummary}` : ''}`),
+  ].join('\n')
+}
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const ACTIVE_SESSION_KEY = 'coomi.activeSessionId.v1'

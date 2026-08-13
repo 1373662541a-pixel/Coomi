@@ -44,9 +44,11 @@ import com.termux.shared.termux.TermuxConstants;
 public class CoomiBackupActivity extends Activity {
 
     private static final int REQ_IMPORT = 4001;
+    private static final int REQ_EXPORT = 4002;
 
     private TextView mStatusText;
     private String mAppliedThemeMode;
+    private File mPendingBackup;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -80,6 +82,21 @@ public class CoomiBackupActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQ_IMPORT && resultCode == RESULT_OK && data != null && data.getData() != null) {
             importBackup(data.getData());
+        } else if (requestCode == REQ_EXPORT && resultCode == RESULT_OK && data != null && data.getData() != null && mPendingBackup != null) {
+            final File source = mPendingBackup;
+            final Uri destination = data.getData();
+            new Thread(() -> {
+                try (InputStream in = new FileInputStream(source); OutputStream out = getContentResolver().openOutputStream(destination)) {
+                    if (out == null) throw new Exception("无法打开保存位置");
+                    copyStream(in, out);
+                    runOnUiThread(() -> Toast.makeText(this, R.string.coomi_dash_backup_done, Toast.LENGTH_LONG).show());
+                } catch (Exception e) {
+                    runOnUiThread(() -> Toast.makeText(this, getString(R.string.coomi_dash_backup_failed, e.getMessage()), Toast.LENGTH_LONG).show());
+                } finally {
+                    source.delete();
+                    mPendingBackup = null;
+                }
+            }).start();
         }
     }
 
@@ -91,29 +108,26 @@ public class CoomiBackupActivity extends Activity {
         new Thread(() -> {
             try {
                 File home = new File(CoomiConstants.COOMI_CONFIG_DIR);
-                File sessionsDir = new File(home, "sessions");
+                File virtualHome = new File(TermuxConstants.TERMUX_HOME_DIR_PATH);
                 File configDir = new File(home, "config");
-                File skillsDir = new File(home, "skills");
 
                 File zip = File.createTempFile("coomi-backup-", ".zip", getCacheDir());
                 try (ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(zip))) {
+                    // Back up Coomi data/configuration and user-created HOME files, but not
+                    // package caches, language runtimes, virtual environments, or shell state.
                     addDirRecursive(zos, home, "coomi-home");
+                    addUserDataRecursive(zos, virtualHome, "user-data", true);
                     addMcpImplementationFiles(zos, new File(configDir, "mcp_servers.json"));
-                    addTextEntry(zos, "env-inventory.txt", buildEnvInventory(configDir, skillsDir));
-                    addTextEntry(zos, "env-inventory.json", buildEnvInventoryJson(configDir, skillsDir));
                 }
 
                 String stamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date());
-                String savedPath = saveToDownloads(zip, "coomi-backup-" + stamp + ".zip");
                 runOnUiThread(() -> {
-                    if (savedPath != null) {
-                        Toast.makeText(this,
-                            getString(R.string.coomi_dash_backup_done, savedPath), Toast.LENGTH_LONG).show();
-                    } else {
-                        Toast.makeText(this,
-                            getString(R.string.coomi_dash_backup_failed, "无法写入下载目录，请检查存储权限"),
-                            Toast.LENGTH_LONG).show();
-                    }
+                    mPendingBackup = zip;
+                    Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                    intent.addCategory(Intent.CATEGORY_OPENABLE);
+                    intent.setType("application/zip");
+                    intent.putExtra(Intent.EXTRA_TITLE, "coomi-backup-" + stamp + ".zip");
+                    startActivityForResult(intent, REQ_EXPORT);
                 });
             } catch (Exception e) {
                 runOnUiThread(() -> Toast.makeText(this,
@@ -161,6 +175,28 @@ public class CoomiBackupActivity extends Activity {
                 zos.closeEntry();
             }
         }
+    }
+
+    private void addUserDataRecursive(ZipOutputStream zos, File dir, String prefix, boolean root) throws Exception {
+        File[] children = dir.listFiles();
+        if (children == null) return;
+        for (File child : children) {
+            String name = child.getName();
+            if ((root && ".coomi".equals(name)) || isEnvironmentEntry(name)) continue;
+            String entryName = prefix + "/" + name;
+            if (child.isDirectory()) addUserDataRecursive(zos, child, entryName, false);
+            else addFileEntry(zos, entryName, child);
+        }
+    }
+
+    private static boolean isEnvironmentEntry(String name) {
+        String lower = name.toLowerCase(Locale.US);
+        return lower.equals(".cache") || lower.equals(".npm") || lower.equals(".pnpm-store")
+            || lower.equals(".cargo") || lower.equals(".rustup") || lower.equals(".gradle")
+            || lower.equals("node_modules") || lower.equals("venv") || lower.equals(".venv")
+            || lower.equals("env") || lower.equals("__pycache__") || lower.equals("tmp")
+            || lower.equals(".tmp") || lower.equals(".bash_history") || lower.equals(".zsh_history")
+            || lower.equals(".bashrc") || lower.equals(".zshrc") || lower.equals(".profile");
     }
 
     @Override
@@ -290,6 +326,14 @@ public class CoomiBackupActivity extends Activity {
         File completeHome = new File(tmp, "coomi-home");
         if (completeHome.isDirectory()) {
             try { copyRecursive(completeHome, home); } catch (Exception ignored) { }
+        }
+        File completeVirtualHome = new File(tmp, "virtual-home");
+        if (completeVirtualHome.isDirectory()) {
+            try { copyRecursive(completeVirtualHome, new File(TermuxConstants.TERMUX_HOME_DIR_PATH)); } catch (Exception ignored) { }
+        }
+        File userData = new File(tmp, "user-data");
+        if (userData.isDirectory()) {
+            try { copyRecursive(userData, new File(TermuxConstants.TERMUX_HOME_DIR_PATH)); } catch (Exception ignored) { }
         }
 
         // 1) 会话历史

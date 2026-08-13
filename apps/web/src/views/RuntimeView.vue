@@ -102,7 +102,7 @@ function goDashboard() {
       </div>
 
       <button v-if="health && health.status !== 'ok'" class="btn btn-soft wide" @click="router.push('/providers')">
-        去配置 Provider
+        去配置提供商
       </button>
 
       <p class="note">
@@ -146,4 +146,3 @@ function goDashboard() {
 .note { margin-top: 16px; padding: 0 4px; font-size: 12px; line-height: 1.75; color: var(--text-3); }
 .note code { font-family: var(--font-mono); font-size: 11.2px; }
 </style>
-

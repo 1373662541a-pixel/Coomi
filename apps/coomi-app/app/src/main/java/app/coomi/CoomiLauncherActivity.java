@@ -13,7 +13,13 @@ import android.os.PowerManager;
 import android.provider.Settings;
 import android.view.View;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.TextView;
+import android.text.SpannableString;
+import android.text.Spanned;
+import android.text.method.LinkMovementMethod;
+import android.text.style.ClickableSpan;
+import android.text.style.ForegroundColorSpan;
 
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationManagerCompat;
@@ -63,6 +69,7 @@ public class CoomiLauncherActivity extends Activity {
     private Button mRootButton;
     private Button mShizukuButton;
     private Button mContinueButton;
+    private CheckBox mTermsCheck;
 
     private Handler mHandler = new Handler(Looper.getMainLooper());
     private RootAccessController mRootAccessController;
@@ -87,6 +94,8 @@ public class CoomiLauncherActivity extends Activity {
         mRootButton = findViewById(R.id.btn_root_permission);
         mShizukuButton = findViewById(R.id.btn_shizuku_permission);
         mContinueButton = findViewById(R.id.btn_continue);
+        mTermsCheck = findViewById(R.id.check_terms);
+        configureTermsConsent();
         mRootAccessController = new RootAccessController();
         mShizukuAccessController = new ShizukuAccessController();
         mShizukuAccessController.setStateListener(this::updateShizukuButton);
@@ -101,6 +110,7 @@ public class CoomiLauncherActivity extends Activity {
         mRootButton.setOnClickListener(v -> checkRootPermission());
         mShizukuButton.setOnClickListener(v -> requestShizukuPermission());
         mContinueButton.setOnClickListener(v -> {
+            if (!mTermsCheck.isChecked()) return;
             mPermissionsDone = true;
             getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
                 .edit().putBoolean(PREF_CONTINUE, true).apply();
@@ -292,7 +302,30 @@ public class CoomiLauncherActivity extends Activity {
         }
 
         // 演示包不为权限拦人：这两个开关只影响引擎常驻，而演示包没有引擎。
-        mContinueButton.setEnabled(true);
+        mContinueButton.setEnabled(mTermsCheck.isChecked());
+    }
+
+    private void configureTermsConsent() {
+        String text = getString(R.string.coomi_terms_consent);
+        SpannableString content = new SpannableString(text);
+        bindPolicyLink(content, text, "《用户协议》", R.string.coomi_user_agreement_title, R.string.coomi_user_agreement_body);
+        bindPolicyLink(content, text, "《用户隐私政策》", R.string.coomi_privacy_policy_title, R.string.coomi_privacy_policy_body);
+        mTermsCheck.setText(content);
+        mTermsCheck.setMovementMethod(LinkMovementMethod.getInstance());
+        mTermsCheck.setOnCheckedChangeListener((button, checked) -> mContinueButton.setEnabled(checked));
+    }
+
+    private void bindPolicyLink(SpannableString content, String full, String label, int title, int body) {
+        int start = full.indexOf(label);
+        if (start < 0) return;
+        int end = start + label.length();
+        content.setSpan(new ForegroundColorSpan(getColor(R.color.coomi_blue)), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        content.setSpan(new ClickableSpan() {
+            @Override public void onClick(View widget) {
+                new android.app.AlertDialog.Builder(CoomiLauncherActivity.this)
+                    .setTitle(title).setMessage(body).setPositiveButton(android.R.string.ok, null).show();
+            }
+        }, start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
     }
 
     @Override

@@ -59,16 +59,15 @@ async function beginRename() {
   el?.select()
 }
 
-function commitRename() {
+async function commitRename() {
   if (!renamingId.value) return
-  sessions.rename(renamingId.value, renameText.value)
-  renamingId.value = ''
+  const id = renamingId.value
+  if (await sessions.rename(id, renameText.value)) renamingId.value = ''
 }
 
-function doPin() {
+async function doPin() {
   if (!menuFor.value) return
-  sessions.togglePin(menuFor.value.id)
-  closeMenu()
+  if (await sessions.togglePin(menuFor.value.id)) closeMenu()
 }
 
 function doDelete() {

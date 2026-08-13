@@ -1,18 +1,56 @@
 <script setup lang="ts">
-/**
- * 提问弹层（AskUserQuestion）。选项优先，自由输入兜底。
- */
-import { ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import type { QuestionCard } from '@/stores/viewModel'
 import CoomiIcon from './CoomiIcon.vue'
 
-defineProps<{ card: QuestionCard }>()
-const emit = defineEmits<{ answer: [text: string] }>()
+const props = defineProps<{ card: QuestionCard }>()
+const emit = defineEmits<{ answer: [answers: Record<string, string>] }>()
 
-const custom = ref('')
-function submitCustom() {
-  const t = custom.value.trim()
-  if (t) emit('answer', t)
+const index = ref(0)
+const answers = reactive<Record<string, string>>({})
+const custom = reactive<Record<string, string>>({})
+const customMode = ref(false)
+const current = computed(() => props.card.questions[index.value])
+const isLast = computed(() => index.value === props.card.questions.length - 1)
+
+watch(() => props.card.callId, () => {
+  index.value = 0
+  customMode.value = false
+  for (const key of Object.keys(answers)) delete answers[key]
+  for (const key of Object.keys(custom)) delete custom[key]
+})
+
+function choose(value: string) {
+  const question = current.value
+  if (!question) return
+  answers[question.id] = value
+  customMode.value = false
+  if (!isLast.value) index.value += 1
+}
+
+function chooseCustom() {
+  customMode.value = true
+}
+
+function saveCustom() {
+  const question = current.value
+  const value = question ? (custom[question.id] ?? '').trim() : ''
+  if (question && value) choose(value)
+}
+
+function previous() {
+  if (index.value > 0) index.value -= 1
+  customMode.value = false
+}
+
+function next() {
+  if (!isLast.value) index.value += 1
+}
+
+function submit() {
+  const result: Record<string, string> = {}
+  for (const question of props.card.questions) result[question.id] = answers[question.id] ?? ''
+  emit('answer', result)
 }
 </script>
 
@@ -20,103 +58,64 @@ function submitCustom() {
   <div class="scrim">
     <div class="sheet">
       <div class="grip" />
-
-      <div class="qhead">
-        <p class="question">{{ card.question }}</p>
-        <button class="skip" @click="emit('answer', '')">跳过</button>
+      <div v-if="current" class="progress">
+        <span>{{ current.header }}</span>
+        <span>{{ index + 1 }}/{{ card.questions.length }}</span>
       </div>
+      <p v-if="current" class="question">{{ current.question }}</p>
 
-      <div v-if="card.options?.length" class="options">
+      <div v-if="current" class="options">
         <button
-          v-for="(opt, i) in card.options"
-          :key="opt"
-          class="opt cascade"
-          :style="{ animationDelay: 30 * i + 'ms' }"
-          @click="emit('answer', opt)"
+          v-for="option in current.options"
+          :key="option.label"
+          class="opt"
+          :class="{ selected: answers[current.id] === option.label }"
+          @click="choose(option.label)"
         >
-          <span>{{ opt }}</span>
-          <CoomiIcon name="chevronRight" :size="14" />
+          <span><b>{{ option.label }}</b><small>{{ option.description }}</small></span>
+          <CoomiIcon v-if="answers[current.id] === option.label" name="check" :size="16" />
+        </button>
+        <button class="opt" :class="{ selected: customMode }" @click="chooseCustom">
+          <span><b>自定义</b><small>填写其他答案</small></span>
+          <CoomiIcon name="edit" :size="16" />
         </button>
       </div>
 
-      <div v-if="card.allowFreeText" class="free">
-        <input
-          v-model="custom"
-          class="finput"
-          :placeholder="card.options?.length ? '或者自己写一个答案…' : '输入你的回答…'"
-          enterkeyhint="send"
-          @keydown.enter="submitCustom"
-        />
-        <button class="send" :disabled="!custom.trim()" aria-label="发送" @click="submitCustom">
-          <CoomiIcon name="arrowUp" :size="18" />
+      <div v-if="current && customMode" class="free">
+        <input v-model="custom[current.id]" class="finput" placeholder="输入自定义答案" @keydown.enter="saveCustom" />
+        <button class="send" :disabled="!(custom[current.id] ?? '').trim()" @click="saveCustom">
+          <CoomiIcon name="check" :size="18" />
         </button>
+      </div>
+
+      <div class="actions">
+        <button class="nav ghost" :disabled="index === 0" @click="previous">上一题</button>
+        <button v-if="current" class="nav ghost" @click="choose('')">跳过</button>
+        <button v-if="!isLast" class="nav primary" @click="next">下一题</button>
+        <button v-else class="nav primary" @click="submit">提交全部</button>
       </div>
     </div>
   </div>
 </template>
 
 <style scoped>
-.scrim {
-  position: fixed; inset: 0; z-index: 70;
-  display: flex; align-items: flex-end;
-  background: rgba(17, 22, 31, .36);
-  animation: fade .18s ease-out;
-}
-@keyframes fade { from { opacity: 0; } }
-
-.sheet {
-  width: 100%; padding: 6px 16px calc(var(--safe-bottom) + 16px);
-  border-radius: 22px 22px 0 0; background: var(--bg);
-  box-shadow: var(--shadow-sheet);
-  animation: rise .26s cubic-bezier(.2, .8, .2, 1);
-}
-@keyframes rise { from { transform: translateY(100%); } }
-
+.scrim { position: fixed; inset: 0; z-index: 70; display: flex; align-items: flex-end; background: rgba(17, 22, 31, .36); }
+.sheet { width: 100%; max-height: 88vh; overflow-y: auto; padding: 6px 16px calc(var(--safe-bottom) + 16px); border-radius: 20px 20px 0 0; background: var(--bg); box-shadow: var(--shadow-sheet); }
 .grip { width: 38px; height: 4px; margin: 4px auto 14px; border-radius: 2px; background: var(--border-strong); }
-
-.qhead { display: flex; align-items: center; gap: 10px; }
-.question { flex: 1; min-width: 0; word-break: break-word; font-size: 15.5px; font-weight: 600; line-height: 1.5; color: var(--text); }
-.skip {
-  flex-shrink: 0; padding: 5px 12px;
-  border: 1px solid var(--border); border-radius: var(--r-pill);
-  background: var(--fill); font-size: 12.5px; color: var(--text-3);
-  transition: background .14s, color .14s, border-color .14s;
-}
-.skip:active { background: var(--danger-soft); border-color: var(--danger-border); color: var(--danger); }
-
+.progress { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; font-weight: 650; color: var(--blue); }
+.question { margin: 8px 0 0; font-size: 15.5px; font-weight: 600; line-height: 1.55; color: var(--text); word-break: break-word; }
 .options { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
-.opt {
-  display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  width: 100%; min-height: 48px; padding: 11px 13px;
-  border: 1px solid var(--border); border-radius: var(--r-md);
-  background: var(--fill); text-align: left;
-  font-size: 14px; line-height: 1.5; color: var(--text);
-  transition: transform .06s, background .14s, border-color .14s;
-}
-.opt :deep(svg) { flex-shrink: 0; color: var(--text-3); }
-.opt:active {
-  background: var(--blue-soft); border-color: var(--blue-border);
-  color: var(--blue); transform: scale(.99);
-}
-.opt:active :deep(svg) { color: var(--blue); }
-
-.free { display: flex; align-items: flex-end; gap: 8px; margin-top: 12px; }
-.finput {
-  flex: 1; min-width: 0; min-height: 46px; padding: 0 15px;
-  border: 1.5px solid var(--border); border-radius: var(--r-pill);
-  background: var(--fill); font-size: 14.5px; color: var(--text);
-  transition: background .14s, border-color .14s;
-}
-.finput::placeholder { color: var(--text-3); }
-.finput:focus { background: var(--bg); border-color: var(--blue-border); outline: none; }
-
-.send {
-  display: grid; place-items: center; flex-shrink: 0;
-  width: 46px; height: 46px; border: 0; border-radius: 50%;
-  background: var(--blue); color: #fff;
-  transition: transform .06s, background .14s;
-}
-.send:disabled { background: var(--fill-strong); color: var(--text-3); pointer-events: none; }
-.send:active { background: var(--blue-press); transform: scale(.94); }
+.opt { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; min-height: 50px; padding: 9px 12px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--fill); text-align: left; color: var(--text); }
+.opt.selected { border-color: var(--blue-border); background: var(--blue-soft); color: var(--blue); }
+.opt span { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.opt b { font-size: 14px; font-weight: 600; }
+.opt small { font-size: 11.5px; line-height: 1.4; color: var(--text-3); }
+.free { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.finput { flex: 1; min-width: 0; height: 44px; padding: 0 13px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg); color: var(--text); }
+.send { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%; background: var(--blue); color: #fff; }
+.send:disabled, .nav:disabled { opacity: .45; }
+.actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 16px; }
+.nav { min-height: 42px; border-radius: var(--r-md); font-size: 13.5px; font-weight: 600; }
+.nav.ghost { background: var(--fill-strong); color: var(--text-2); }
+.nav.primary { background: var(--blue); color: #fff; }
 </style>
-

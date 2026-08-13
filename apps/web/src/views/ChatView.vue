@@ -124,7 +124,9 @@ if (isUnattended()) {
     if (!id) return
     setTimeout(() => {
       const q = session.pendingQuestion
-      if (q?.callId === id) session.answerQuestion(id, q.options?.[0] ?? '你定就行')
+      if (q?.callId === id) {
+        session.answerQuestion(id, Object.fromEntries(q.questions.map(question => [question.id, question.options[0]?.label ?? ''])))
+      }
     }, AUTOPILOT_DELAY)
   })
 }
@@ -133,7 +135,7 @@ if (isUnattended()) {
 watch(() => session.timeline.length, () => nextTick(follow))
 
 function onDecide(callId: string, decision: ApprovalDecision) { session.approve(callId, decision) }
-function onAnswer(callId: string, text: string) { session.answerQuestion(callId, text) }
+function onAnswer(callId: string, answers: Record<string, string>) { session.answerQuestion(callId, answers) }
 </script>
 
 <template>
@@ -162,7 +164,7 @@ function onAnswer(callId: string, text: string) { session.answerQuestion(callId,
                 v-else-if="b.item.kind === 'question' && b.item.answered"
                 class="q-answered cascade"
               >
-                <span class="q-label">已回答</span> {{ b.item.answer }}
+                <span class="q-label">已回答</span> {{ Object.values(b.item.answers ?? {}).filter(Boolean).join('；') || '已跳过' }}
               </div>
             </template>
           </template>
@@ -197,7 +199,7 @@ function onAnswer(callId: string, text: string) { session.answerQuestion(callId,
     <QuestionSheet
       v-else-if="session.pendingQuestion"
       :card="session.pendingQuestion"
-      @answer="(t: string) => onAnswer(session.pendingQuestion!.callId, t)"
+      @answer="(answers: Record<string, string>) => onAnswer(session.pendingQuestion!.callId, answers)"
     />
   </div>
 </template>

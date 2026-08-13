@@ -2,11 +2,13 @@
 import { computed, ref } from 'vue'
 import type { NoticeItem } from '@/stores/viewModel'
 import { useConfigStore } from '@/stores/config'
+import { useSessionStore } from '@/stores/session'
 import CoomiIcon from './CoomiIcon.vue'
 
 const props = defineProps<{ notice: NoticeItem }>()
 
 const config = useConfigStore()
+const session = useSessionStore()
 const open = ref(false)
 const confirm = ref(false)
 const sending = ref(false)
@@ -26,8 +28,12 @@ function toggle() { if (props.notice.detail) open.value = !open.value }
 
 /** 原生桥上传回调注册表（callbackId -> resolve）。 */
 type FeedbackCb = (result: { ok: boolean; error?: string; detail?: string }) => void
-const feedbackCbs = new Map<string, FeedbackCb>()
-let feedbackSeq = 0
+type FeedbackWindow = Window & typeof globalThis & {
+  __coomiFeedbackCallbacks?: Map<string, FeedbackCb>
+  __coomiFeedbackResult?: (id: string, resultJson: string) => void
+}
+const feedbackWindow = window as FeedbackWindow
+const feedbackCbs = feedbackWindow.__coomiFeedbackCallbacks ??= new Map<string, FeedbackCb>()
 
 /**
  * 上报报错：仅上传报错日志 + 设备诊断，不含任何对话内容。
@@ -37,7 +43,7 @@ function sendViaBridge(payload: object): Promise<{ ok: boolean; error?: string; 
   const native = window.CoomiAndroid
   if (!native?.sendFeedback) return Promise.resolve({ ok: false, error: 'no bridge' })
   return new Promise((resolve) => {
-    const id = `fb${++feedbackSeq}_${Date.now()}`
+    const id = `fb_${Date.now()}_${crypto.randomUUID()}`
     feedbackCbs.set(id, resolve)
     // 超时兜底：8s 无回调按失败处理。
     setTimeout(() => {
@@ -51,8 +57,7 @@ function sendViaBridge(payload: object): Promise<{ ok: boolean; error?: string; 
     }  })
 }
 // 原生桥完成后回调（在 JS 全局注册一次）。
-;(window as unknown as { __coomiFeedbackResult?: (id: string, resultJson: string) => void }).__coomiFeedbackResult =
-  (id: string, resultJson: string) => {
+feedbackWindow.__coomiFeedbackResult ??= (id: string, resultJson: string) => {
     const cb = feedbackCbs.get(id)
     if (!cb) return
     feedbackCbs.delete(id)
@@ -67,8 +72,8 @@ function sendViaBridge(payload: object): Promise<{ ok: boolean; error?: string; 
  * 上报报错：仅上传报错日志 + 设备诊断，不含任何对话内容。
  * 双通道：自建端点（国内可达）优先，随后尝试 GitHub issue（失败静默）。
  */
-async function sendFeedback() {
-  if (sending.value) return
+async function sendFeedback(automatic = false): Promise<{ ok: boolean; reason: string }> {
+  if (sending.value) return { ok: false, reason: 'busy' }
   sending.value = true
   sent.value = null
   failReason.value = ''
@@ -79,6 +84,8 @@ async function sendFeedback() {
     if (raw) diagnostics = raw
   } catch { /* 原生桥不可用时忽略 */ }
   const payload = {
+    feedback_type: props.notice.analysisStatus ? 'tool_failure_analysis' : 'runtime_error',
+    analysis_status: props.notice.analysisStatus ?? 'not_applicable',
     message: props.notice.text,
     detail: props.notice.detail ?? '',
     diagnostics,
@@ -114,12 +121,27 @@ async function sendFeedback() {
   sent.value = ok ? 'ok' : 'fail'
   failReason.value = reason
   // 已发送提示停留片刻后自动收起
-  if (ok) setTimeout(() => { sent.value = null; confirm.value = false }, 2600)
+  if (ok && !automatic) setTimeout(() => { sent.value = null; confirm.value = false }, 2600)
+  return { ok, reason }
+}
+
+async function consentAndSend() {
+  if (sending.value || props.notice.analysisStatus === 'analyzing') return
+  const analyzed = await session.consentToolFailureFeedback(props.notice.id)
+  if (!analyzed) return
+  const result = await sendFeedback(true)
+  session.finishToolFailureFeedback(props.notice.id, result.ok, result.reason)
+}
+
+async function retryUpload() {
+  if (sending.value || props.notice.analysisStatus !== 'ready') return
+  const result = await sendFeedback(true)
+  session.finishToolFailureFeedback(props.notice.id, result.ok, result.reason)
 }
 </script>
 
 <template>
-  <div class="notice cascade" :class="notice.tone" @click="toggle">
+  <div class="notice cascade" :class="[notice.tone, { analysis: notice.analysisStatus }]" @click="toggle">
     <CoomiIcon v-if="icon" :name="icon" :size="14" />
     <span>{{ notice.text }}</span>
     <CoomiIcon v-if="notice.detail" name="chevronRight" :size="14" class="chev" :class="{ open }" />
@@ -128,7 +150,26 @@ async function sendFeedback() {
     <pre>{{ notice.detail }}</pre>
   </div>
 
-  <div v-if="notice.tone === 'error'" class="fb">
+  <div v-if="notice.analysisStatus === 'consent'" class="feedback-consent">
+    <span>点击同意后才会执行。本次仅发送脱敏工具轨迹，并额外轻量调用一次当前模型 API 进行精炼整理；不包含用户对话、文件内容、真实路径、原始参数或密钥。</span>
+    <button class="fb-btn consent-btn" @click.stop="consentAndSend">
+      <CoomiIcon name="send" :size="13" />
+      同意反馈
+    </button>
+  </div>
+  <div v-else-if="notice.analysisStatus === 'analyzing'" class="analysis-hint">
+    后台整理与上传不会写入会话历史，您可以继续对话。
+  </div>
+  <div v-else-if="notice.analysisStatus === 'ready'" class="analysis-hint failed">
+    <button v-if="notice.feedbackEligible" class="fb-btn" :disabled="sending" @click.stop="retryUpload">
+      {{ sending ? '上传中...' : '重新上传' }}
+    </button>
+  </div>
+  <div v-else-if="notice.analysisStatus === 'failed'" class="analysis-hint failed">
+    <button class="fb-btn" @click.stop="consentAndSend">重新反馈</button>
+  </div>
+
+  <div v-if="notice.tone === 'error' && !notice.analysisStatus" class="fb">
     <template v-if="!confirm">
       <button class="fb-btn" @click.stop="confirm = true">
         <CoomiIcon name="send" :size="13" />
@@ -162,6 +203,7 @@ async function sendFeedback() {
 }
 .notice span { min-width: 0; max-width: 100%; overflow-wrap: anywhere; word-break: break-word; }
 .notice.warn { background: var(--orange-soft); color: var(--orange); }
+.notice.analysis { background: var(--orange-soft); color: var(--orange); }
 .notice.success { background: var(--ok-soft); color: var(--ok); }
 /* 报错：红字、无背景底框、无圆角——只保留文字颜色区分。 */
 .notice.error {
@@ -173,6 +215,17 @@ async function sendFeedback() {
 .notice.error :deep(svg) { flex-shrink: 0; margin-top: 1px; color: var(--danger); }
 .chev { flex-shrink: 0; transition: transform .18s; }
 .chev.open { transform: rotate(90deg); }
+.analysis-hint {
+  align-self: center; width: 100%; max-width: 92%; margin-top: -4px;
+  color: var(--text-3); font-size: 11.8px; line-height: 1.5;
+}
+.analysis-hint.failed { color: var(--orange); }
+.feedback-consent {
+  align-self: center; width: 100%; max-width: 92%; margin-top: -2px;
+  padding: 9px 12px; border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--bg); color: var(--text-2); font-size: 12px; line-height: 1.55;
+}
+.consent-btn { margin-top: 8px; color: var(--orange); border-color: var(--orange); }
 
 .notice-detail {
   align-self: center; width: 100%; max-width: 92%;
