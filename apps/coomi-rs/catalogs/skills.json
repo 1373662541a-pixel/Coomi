@@ -69,9 +69,9 @@
       "id": "shizuku",
       "name": "Shizuku",
       "description": "Check Shizuku authorization before privileged Android operations.",
-      "repository": "github19155/Coomi-Android",
-      "ref": "codex/feat/shizuku-permission",
-      "subdir": "apps/coomi-rs/skills/shizuku"
+      "repository": "github19155/shizuku-skill",
+      "ref": "main",
+      "subdir": "."
     }
   ]
 }
