@@ -255,7 +255,6 @@ impl CatalogInstaller {
                 entry.git_ref.replace('/', "-")
             ),
         ];
-        let subdir_prefix = format!("{}/", entry.subdir);
         for index in 0..archive.len() {
             let mut file = archive
                 .by_index(index)
@@ -267,7 +266,7 @@ impl CatalogInstaller {
             else {
                 continue;
             };
-            if rest != entry.subdir && !rest.starts_with(&subdir_prefix) {
+            if !matches_skill_subdir(rest, &entry.subdir) {
                 continue;
             }
             // zip-slip 防护：拒绝任何越界片段。
@@ -438,4 +437,21 @@ mod tests {
         assert!(installer.uninstall_skill("frontend-design").is_ok());
         assert!(home.path().join("skills").is_dir() || !home.path().join("skills").exists());
     }
+
+    #[test]
+    fn root_subdir_accepts_skill_files_at_repository_root() {
+        assert!(matches_skill_subdir("shizuku-skill-main/SKILL.md", "."));
+        assert!(matches_skill_subdir("shizuku-skill-main/agents/openai.yaml", "."));
+        assert!(!matches_skill_subdir("shizuku-skill-main/other/SKILL.md", "agents"));
+    }
+}
+
+fn matches_skill_subdir(path: &str, subdir: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    if subdir == "." {
+        return true;
+    }
+    path == subdir || path.starts_with(&format!("{subdir}/"))
 }
