@@ -133,8 +133,7 @@ public class CoomiService extends Service {
     }
 
     public static boolean isDeployComplete() {
-        return new File(CoomiConstants.INSTALL_MARKER_PATH).isFile()
-            && new File(prefix() + "/bin/coomi").isFile();
+        return new File(CoomiConstants.INSTALL_MARKER_PATH).isFile();
     }
 
     private File nativeBinary() {
@@ -366,17 +365,17 @@ public class CoomiService extends Service {
     private CommandResult startEngineSync() {
         mIsEngineStarting = true;
         try {
+            if (!engineMatchesApk()) {
+                Logger.logInfo(LOG_TAG, "Engine binary changed (APK updated), stopping stale engine");
+                stopEngineSync();
+            }
             if (mEngineProcess != null && mEngineProcess.isAlive()) {
                 if (checkHealth(mEnginePort)) {
                     // 引擎进程活着且健康，但 APK 更新后引擎二进制可能已换新：
                     // 旧进程加载的还是旧代码（新旧 API 不匹配，前端会 404）。
                     // 对比引擎自身写入的二进制指纹，不一致则重启。
-                    if (engineMatchesApk()) {
-                        mIsEngineStarting = false;
-                        return new CommandResult(true, "already running", "", 0);
-                    }
-                    Logger.logInfo(LOG_TAG, "Engine binary changed (APK updated), restarting engine");
-                    stopEngineSync();
+                    mIsEngineStarting = false;
+                    return new CommandResult(true, "already running", "", 0);
                 } else {
                     // 进程活着但健康检查失败（假死/端口错乱）：先清理旧进程再重启，
                     // 避免双引擎并发写同一会话目录。
