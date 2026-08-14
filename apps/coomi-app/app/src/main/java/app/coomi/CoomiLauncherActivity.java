@@ -214,10 +214,6 @@ public class CoomiLauncherActivity extends Activity {
         refreshRootStatus();
     }
 
-    static boolean shouldRefreshRootStatus(boolean rootGrantedHint, boolean rootRequestedThisSession) {
-        return rootGrantedHint || rootRequestedThisSession;
-    }
-
     private void refreshRootStatus() {
         if (mRootCheckInFlight || mRootAccessController == null) return;
         mRootCheckInFlight = true;
@@ -325,7 +321,7 @@ public class CoomiLauncherActivity extends Activity {
         // 演示包不为权限拦人：这两个开关只影响引擎常驻，而演示包没有引擎。
         boolean rootGrantedHint = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
             .getBoolean(PREF_ROOT_GRANTED_HINT, false);
-        if (shouldRefreshRootStatus(rootGrantedHint, mRootRequestedThisSession)) {
+        if (rootGrantedHint || mRootRequestedThisSession) {
             refreshRootStatus();
         }
 
