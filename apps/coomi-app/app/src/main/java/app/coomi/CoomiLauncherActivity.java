@@ -50,7 +50,8 @@ public class CoomiLauncherActivity extends Activity {
     private static final String PREFS_NAME = "coomi_launcher";
     private static final String PREF_CONTINUE = "onboarding_continue";
     private static final String PREF_SETUP_COMPLETED = "setup_completed";
-    private static final String PREF_ROOT_GRANTED_HINT = "root_granted_hint";
+    // Keep the existing key so installs that already confirmed Root continue checking it.
+    private static final String PREF_ROOT_CHECK_ENABLED = "root_granted_hint";
 
     public static void markSetupCompleted(Context context) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -76,7 +77,6 @@ public class CoomiLauncherActivity extends Activity {
     private RootAccessController mRootAccessController;
     private ShizukuAccessController mShizukuAccessController;
     private boolean mRootCheckInFlight = false;
-    private boolean mRootRequestedThisSession = false;
     private boolean mShizukuCheckInFlight = false;
     private boolean mPermissionsDone = false;
     private boolean mContinuePersisted = false;
@@ -210,7 +210,8 @@ public class CoomiLauncherActivity extends Activity {
 
     /** Root is an optional capability check and never gates bootstrap installation. */
     private void checkRootPermission() {
-        mRootRequestedThisSession = true;
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .edit().putBoolean(PREF_ROOT_CHECK_ENABLED, true).apply();
         refreshRootStatus();
     }
 
@@ -232,15 +233,11 @@ public class CoomiLauncherActivity extends Activity {
         mRootCheckInFlight = false;
         switch (result.status) {
             case GRANTED:
-                getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-                    .edit().putBoolean(PREF_ROOT_GRANTED_HINT, true).apply();
                 mRootButton.setText(R.string.coomi_authorized);
                 mRootButton.setEnabled(false);
                 break;
             case DENIED:
             case UNAVAILABLE:
-                getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-                    .edit().putBoolean(PREF_ROOT_GRANTED_HINT, false).apply();
                 mRootButton.setText(result.status == RootAccessController.Status.DENIED
                     ? R.string.coomi_root_retry
                     : R.string.coomi_root_unavailable);
@@ -319,9 +316,9 @@ public class CoomiLauncherActivity extends Activity {
         }
 
         // 演示包不为权限拦人：这两个开关只影响引擎常驻，而演示包没有引擎。
-        boolean rootGrantedHint = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-            .getBoolean(PREF_ROOT_GRANTED_HINT, false);
-        if (rootGrantedHint || mRootRequestedThisSession) {
+        boolean rootCheckEnabled = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .getBoolean(PREF_ROOT_CHECK_ENABLED, false);
+        if (rootCheckEnabled) {
             refreshRootStatus();
         }
 
