@@ -215,7 +215,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:textStyle="bold"
-                        android:textColor="@color/coomi_warn"
+                        android:textColor="@color/coomi_danger"
                         android:text="@string/coomi_root_title"/>
 
                     <TextView
@@ -223,15 +223,17 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="3dp"
-                        android:textColor="@color/coomi_warn"
+                        android:textColor="@color/coomi_danger"
                         android:text="@string/coomi_root_desc"/>
 
                     <Button
                         android:id="@+id/btn_root_permission"
-                        style="@style/Coomi.Button.Pill.Warning"
+                        style="@style/Coomi.Button.Pill"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="6dp"
+                        android:background="@drawable/coomi_bg_pill_outline_danger"
+                        android:textColor="@color/coomi_danger"
                         android:text="@string/coomi_root_grant"/>
                 </LinearLayout>
 
@@ -247,7 +249,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:textStyle="bold"
-                        android:textColor="@color/coomi_warn"
+                        android:textColor="?attr/coomiBlue"
                         android:text="@string/coomi_shizuku_title"/>
 
                     <TextView
@@ -255,15 +257,17 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="3dp"
-                        android:textColor="@color/coomi_warn"
+                        android:textColor="?attr/coomiBlue"
                         android:text="@string/coomi_shizuku_desc"/>
 
                     <Button
                         android:id="@+id/btn_shizuku_permission"
-                        style="@style/Coomi.Button.Pill.Warning"
+                        style="@style/Coomi.Button.Pill"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="6dp"
+                        android:background="@drawable/coomi_bg_pill_outline"
+                        android:textColor="?attr/coomiBlue"
                         android:text="@string/coomi_shizuku_grant"/>
                 </LinearLayout>
 

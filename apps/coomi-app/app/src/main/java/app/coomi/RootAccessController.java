@@ -16,10 +16,10 @@ import java.io.InputStreamReader;
  */
 public final class RootAccessController {
 
-    private static final long TIMEOUT_MILLIS = 10_000L;
+    private static final long TIMEOUT_MILLIS = 30_000L;
     private static final String[] SU_CANDIDATES = {
-        "/system_ext/bin/su",
         "su",
+        "/system_ext/bin/su",
         "/system/bin/su",
         "/system/xbin/su",
         "/sbin/su"
