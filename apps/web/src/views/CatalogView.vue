@@ -9,6 +9,7 @@ import { useRouter } from 'vue-router'
 import PageHead from '@/components/PageHead.vue'
 import CoomiIcon from '@/components/CoomiIcon.vue'
 import { authedFetch } from '@/bridge/http'
+import { filterMarketItems } from '@/utils/marketSearch'
 
 const router = useRouter()
 
@@ -54,6 +55,21 @@ const marketWorkflows = ref<MarketItem[]>([])
 const marketStats = ref<{ github?: any; app?: any }>({})
 const marketUpdatedAt = ref('')
 const marketLoading = ref(false)
+const marketQuery = ref('')
+const filteredMarketSkills = computed(() => filterMarketItems(marketSkills.value, marketQuery.value))
+const filteredMarketMcps = computed(() => filterMarketItems(marketMcps.value, marketQuery.value))
+const filteredMarketWorkflows = computed(() => filterMarketItems(marketWorkflows.value, marketQuery.value))
+const activeMarketResults = computed(() => {
+  if (tab.value === 'skills') return filteredMarketSkills.value
+  if (tab.value === 'workflow') return filteredMarketWorkflows.value
+  return filteredMarketMcps.value
+})
+const marketKindLabel = computed(() => {
+  if (tab.value === 'skills') return 'Skills'
+  if (tab.value === 'workflow') return 'Workflow'
+  return 'MCP'
+})
+const marketSearchPlaceholder = computed(() => `搜索 ${marketKindLabel.value}`)
 const loading = ref(true)
 const error = ref('')
 const busy = ref<string | null>(null)
@@ -392,6 +408,19 @@ function goDashboard() {
         </button>
       </div>
 
+      <label v-if="scope === 'market'" class="market-search">
+        <CoomiIcon name="search" :size="16" />
+        <input
+          v-model="marketQuery"
+          :placeholder="marketSearchPlaceholder"
+          :aria-label="marketSearchPlaceholder"
+          autocomplete="off"
+        />
+        <button v-if="marketQuery" type="button" aria-label="清空搜索" @click="marketQuery = ''">
+          <CoomiIcon name="close" :size="14" />
+        </button>
+      </label>
+
       <a
         v-if="scope === 'market'"
         class="submit-extension"
@@ -496,12 +525,15 @@ function goDashboard() {
           <p v-else-if="tab === 'workflow' && marketWorkflows.length === 0" class="hint">
             广场里还没有 Workflow。提交后在此展示，安装支持将在后续版本提供。
           </p>
+          <p v-else-if="marketQuery.trim() && activeMarketResults.length === 0" class="hint">
+            没有找到“{{ marketQuery.trim() }}”相关的 {{ marketKindLabel }}。
+          </p>
           <p v-else-if="tab === 'skills' && marketSkills.length > 0" class="hint sub">
             社区注册表 · 更新于 {{ marketUpdatedAt || '—' }} · 内容托管在贡献者自己的仓库
           </p>
 
-          <div v-if="tab === 'skills' && marketSkills.length > 0" class="cards">
-            <div v-for="item in marketSkills" :key="item.id" class="card">
+          <div v-if="tab === 'skills' && filteredMarketSkills.length > 0" class="cards">
+            <div v-for="item in filteredMarketSkills" :key="item.id" class="card">
               <button class="card-head" @click.stop="toggleExpanded(item.id)">
                 <span class="tile" :class="{ on: item.installed }">
                   <CoomiIcon name="wrench" :size="18" />
@@ -539,8 +571,8 @@ function goDashboard() {
           </div>
 
           <!-- MCP / Workflow：收录展示，先看仓库（安装支持 v2） -->
-          <div v-if="tab === 'mcp' && marketMcps.length > 0" class="cards">
-            <div v-for="item in marketMcps" :key="item.id" class="card">
+          <div v-if="tab === 'mcp' && filteredMarketMcps.length > 0" class="cards">
+            <div v-for="item in filteredMarketMcps" :key="item.id" class="card">
               <button class="card-head" @click.stop="toggleExpanded(item.id)">
                 <span class="tile"><CoomiIcon name="plug" :size="18" /></span>
                 <span class="cname">{{ item.name }}</span>
@@ -559,8 +591,8 @@ function goDashboard() {
             </div>
           </div>
 
-          <div v-if="tab === 'workflow' && marketWorkflows.length > 0" class="cards">
-            <div v-for="item in marketWorkflows" :key="item.id" class="card">
+          <div v-if="tab === 'workflow' && filteredMarketWorkflows.length > 0" class="cards">
+            <div v-for="item in filteredMarketWorkflows" :key="item.id" class="card">
               <button class="card-head" @click.stop="toggleExpanded(item.id)">
                 <span class="tile"><CoomiIcon name="target" :size="18" /></span>
                 <span class="cname">{{ item.name }}</span>
@@ -675,6 +707,22 @@ function goDashboard() {
   -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain;
 }
 .tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+.market-search {
+  display: flex; align-items: center; gap: 8px;
+  height: 42px; margin: -2px 0 12px; padding: 0 12px;
+  border-radius: var(--r-card); background: var(--bg); color: var(--text-3);
+  box-shadow: var(--shadow-1);
+}
+.market-search input {
+  flex: 1; min-width: 0; border: 0; outline: 0;
+  background: none; color: var(--text); font-size: 14px;
+}
+.market-search input::placeholder { color: var(--text-3); }
+.market-search button {
+  display: grid; place-items: center; flex-shrink: 0;
+  width: 24px; height: 24px; border-radius: 50%;
+  background: var(--fill-strong); color: var(--text-2);
+}
 .submit-extension {
   display: flex; align-items: center; justify-content: space-between;
   min-height: 44px; margin: -2px 0 14px; padding: 0 13px;
