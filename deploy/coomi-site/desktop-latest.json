@@ -1,12 +1,10 @@
-{
-  "version": "0.1.0",
-  "platform": "windows",
-  "arch": "x64",
-  "minWindows": "10",
-  "file": "Coomi-Setup-0.1.0.exe",
-  "size": 256049792,
-  "sha256": "3a998795b3cf3c183a7a28c0d3ef05c23511b601a1801ebd5482208e9cd49278",
-  "publishedAt": "2026-08-16T12:00:00Z",
-  "label": "下载 Windows 版",
-  "notes": "v0.1.0 发布说明【测试】：\n- Windows 桌面客户端正式发布，内置本地 Agent 服务，开箱即用\n- 全面 Coomi 品牌化：蓝白主题、Coomi 图标、安装包视觉统一\n- 本地 Agent 工作流：会话持久化、工作区管理、模型提供方配置\n- 内置工具链：文件、搜索、Shell 执行与技能系统\n- 数据本地化：会话与配置默认保存在本机用户目录\n- 安全默认：仅监听本机回环地址，权限审批逐次确认"
+﻿{
+    "size":  256050040,
+    "version":  "0.1.0",
+    "arch":  "x64",
+    "file":  "Coomi-Setup-0.1.0.exe",
+    "publishedAt":  "2026-08-16T23:30:00Z",
+    "platform":  "windows",
+    "minWindows":  "10",
+    "sha256":  "3534a8bedfca2930f6ddcb430ce0d68ffbc837392f6bd8efafbc9225adb0cc25"
 }
