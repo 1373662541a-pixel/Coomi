@@ -543,6 +543,58 @@
       display: block;
     }
 
+    /* 平台显隐统一由 body[data-platform-view] 驱动。
+       hidden 属性会被 .button / .compatibility-grid 等带 display 的类样式
+       覆盖，因此所有按平台切换的元素一律用 data 属性选择器控制，避免
+       移动端与桌面端内容同时渲染造成布局杂糅。 */
+    [data-hero-copy] {
+      display: none;
+    }
+
+    body[data-platform-view="android"] [data-hero-copy="android"],
+    body[data-platform-view="desktop"] [data-hero-copy="desktop"] {
+      display: block;
+    }
+
+    [data-download-button] {
+      display: none !important;
+    }
+
+    body[data-platform-view="android"] [data-download-button="android"],
+    body[data-platform-view="desktop"] [data-download-button="desktop"] {
+      display: inline-flex !important;
+    }
+
+    [data-platform-panel] {
+      display: none;
+    }
+
+    body[data-platform-view="android"] [data-platform-panel="android"],
+    body[data-platform-view="desktop"] [data-platform-panel="desktop"] {
+      display: grid;
+    }
+
+    /* 平台化区块内的标题带平台徽章，强化版本区分 */
+    .platform-panel .changelog-platform-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .changelog-platform-tag .tag {
+      display: inline-block;
+      padding: 2px 10px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--blue) 10%, transparent);
+      border: 1px solid color-mix(in srgb, var(--blue) 30%, transparent);
+      color: var(--blue);
+      font-size: 12px;
+      font-weight: 650;
+      line-height: 20px;
+      vertical-align: middle;
+    }
+
     .stat-label {
       font-size: 12px;
       color: var(--quiet);
@@ -550,7 +602,7 @@
     }
   </style>
 </head>
-<body>
+<body data-platform-view="android">
   <header class="site-header">
     <nav class="container nav" aria-label="主导航">
       <a class="brand" href="/" aria-label="Coomi 首页">
@@ -572,13 +624,13 @@
         <div id="releaseBadge" class="release-badge" data-release-badge>Android 1.3.0</div>
         <h1 id="hero-title">Coomi Agent</h1>
         <p class="hero-copy" data-hero-copy="android">把完整的智能体工作环境装进 Android。原生 Rust 引擎、本地终端与对话界面协同运行，让移动设备也能承载完整的 Agent 工作流。</p>
-        <p class="hero-copy" data-hero-copy="desktop" hidden>把完整的智能体工作环境装进 Windows 桌面。内置本地 Agent 服务、对话界面与蓝白主题，开箱即用，数据默认保存在本机。</p>
+        <p class="hero-copy" data-hero-copy="desktop">把完整的智能体工作环境装进 Windows 桌面。内置本地 Agent 服务、对话界面与蓝白主题，开箱即用，数据默认保存在本机。</p>
         <div class="actions">
           <a id="downloadButtonAndroid" class="button button-primary" href="https://updates.septemc.com/coomi/android/Coomi-Android-arm64-v1.3.0.apk" data-stat-action="download" data-download-button="android">
             <span class="download-arrow" aria-hidden="true">↓</span>
             <span data-download-label="android">下载 APK</span>
           </a>
-          <a id="downloadButtonDesktop" class="button button-primary" href="https://updates.septemc.com/coomi/desktop/Coomi-Setup-0.1.0.exe" data-stat-action="download" data-download-button="desktop" hidden>
+          <a id="downloadButtonDesktop" class="button button-primary" href="https://updates.septemc.com/coomi/desktop/Coomi-Setup-0.1.0.exe" data-stat-action="download" data-download-button="desktop">
             <span class="download-arrow" aria-hidden="true">↓</span>
             <span data-download-label="desktop">下载 Windows 版</span>
           </a>
@@ -602,7 +654,7 @@
           <span id="versionValue" class="compatibility-value">1.3.0</span>
         </div>
       </div>
-      <div class="container compatibility-grid" data-platform-panel="desktop" hidden>
+      <div class="container compatibility-grid" data-platform-panel="desktop">
         <div class="compatibility-item">
           <span class="compatibility-label">架构</span>
           <span class="compatibility-value">x64</span>
@@ -621,6 +673,7 @@
     <section class="changelog" aria-label="更新说明">
       <div class="platform-panel" data-platform="android">
       <div class="container">
+        <div class="changelog-platform-tag"><span class="tag">移动端</span></div>
         <h2 class="changelog-title">v1.3.0 更新说明【重要更新】</h2>
         <p class="changelog-sub">2026-08-14 发布</p>
         <ul class="changelog-list">
@@ -761,6 +814,7 @@
       </div><!-- /platform-panel android -->
       <div class="platform-panel" data-platform="desktop">
       <div class="container">
+        <div class="changelog-platform-tag"><span class="tag">桌面端</span></div>
         <h2 class="changelog-title">v0.1.0 发布说明【测试】</h2>
         <p class="changelog-sub">2026-08-16 发布</p>
         <ul class="changelog-list">
@@ -789,8 +843,7 @@
         </div>
         <div class="stats" aria-label="站点统计" aria-live="polite">
           <span class="stat">浏览<strong id="viewCount">--</strong></span>
-          <span class="stat">移动端下载<strong id="downloadCountAndroid">--</strong></span>
-          <span class="stat">桌面端下载<strong id="downloadCountDesktop">--</strong></span>
+          <span class="stat"><span id="downloadStatLabel">移动端下载</span><strong id="downloadCount">--</strong></span>
         </div>
       </div>
       <div class="footer-divider"></div>
@@ -809,8 +862,8 @@
         desktop: "https://updates.septemc.com/coomi/desktop/"
       };
       const viewCount = document.getElementById("viewCount");
-      const downloadCountAndroid = document.getElementById("downloadCountAndroid");
-      const downloadCountDesktop = document.getElementById("downloadCountDesktop");
+      const downloadCount = document.getElementById("downloadCount");
+      const downloadStatLabel = document.getElementById("downloadStatLabel");
       const downloadButtons = {
         android: document.getElementById("downloadButtonAndroid"),
         desktop: document.getElementById("downloadButtonDesktop")
@@ -826,21 +879,22 @@
       };
       const formatter = new Intl.NumberFormat("zh-CN");
       const platformTabs = Array.from(document.querySelectorAll("[data-platform-tab]"));
-      const heroCopies = Array.from(document.querySelectorAll("[data-hero-copy]"));
-      const platformPanels = Array.from(document.querySelectorAll("[data-platform-panel]"));
       let currentPlatform = "android";
+      const stats = { downloads: null, desktopDownloads: null };
 
       function setPlatform(platform) {
         currentPlatform = platform;
+        // 平台元素的显隐完全由 CSS [data-platform-view] 规则驱动，JS 只切换状态。
         document.body.dataset.platformView = platform;
         platformTabs.forEach(tab => {
           tab.setAttribute("aria-selected", String(tab.dataset.platform === platform));
         });
-        heroCopies.forEach(copy => { copy.hidden = copy.dataset.heroCopy !== platform; });
-        platformPanels.forEach(panel => { panel.hidden = panel.dataset.platformPanel !== platform; });
-        Object.entries(downloadButtons).forEach(([key, button]) => { button.hidden = key !== platform; });
         const version = versionValues[platform].textContent;
         releaseBadge.textContent = platform === "desktop" ? `Windows ${version}` : `Android ${version}`;
+        // 下载统计跟随当前平台显示
+        downloadStatLabel.textContent = platform === "desktop" ? "桌面端下载" : "移动端下载";
+        const value = platform === "desktop" ? stats.desktopDownloads : stats.downloads;
+        if (value !== null) downloadCount.textContent = formatter.format(value);
       }
 
       function eventId(prefix) {
@@ -851,8 +905,10 @@
       function renderStats(data) {
         if (!data || typeof data !== "object") return;
         if (Number.isFinite(data.totalViews)) viewCount.textContent = formatter.format(data.totalViews);
-        if (Number.isFinite(data.downloads)) downloadCountAndroid.textContent = formatter.format(data.downloads);
-        if (Number.isFinite(data.desktopDownloads)) downloadCountDesktop.textContent = formatter.format(data.desktopDownloads);
+        if (Number.isFinite(data.downloads)) stats.downloads = data.downloads;
+        if (Number.isFinite(data.desktopDownloads)) stats.desktopDownloads = data.desktopDownloads;
+        const value = currentPlatform === "desktop" ? stats.desktopDownloads : stats.downloads;
+        if (value !== null) downloadCount.textContent = formatter.format(value);
       }
 
       async function statsRequest(path, payload) {
