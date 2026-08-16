@@ -19,9 +19,15 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 IP_HASH_SALT = os.environ["IP_HASH_SALT"]
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
+# Platform axis for download counters. The legacy `downloads` column keeps
+# meaning "mobile (Android) downloads" so historical numbers stay intact;
+# desktop downloads live in `desktop_downloads`.
+PLATFORMS = ("android", "desktop")
+
 
 class EventPayload(BaseModel):
     eventId: str = Field(min_length=8, max_length=128, pattern=EVENT_ID_PATTERN.pattern)
+    platform: str = Field(default="android", pattern="^(android|desktop)$")
 
 
 class StatsStore:
@@ -44,6 +50,11 @@ class StatsStore:
                     downloads BIGINT NOT NULL DEFAULT 0 CHECK (downloads >= 0)
                 )
                 """
+            )
+            # Mobile-vs-desktop download split; idempotent for pre-existing rows.
+            cursor.execute(
+                "ALTER TABLE counters ADD COLUMN IF NOT EXISTS desktop_downloads "
+                "BIGINT NOT NULL DEFAULT 0 CHECK (desktop_downloads >= 0)"
             )
             cursor.execute(
                 """
@@ -92,8 +103,10 @@ class StatsStore:
 
     @staticmethod
     def summary(cursor: psycopg.Cursor[Any]) -> dict[str, int]:
-        cursor.execute("SELECT total_views, downloads FROM counters WHERE id = 1")
-        total_views, downloads = cursor.fetchone()
+        cursor.execute(
+            "SELECT total_views, downloads, desktop_downloads FROM counters WHERE id = 1"
+        )
+        total_views, downloads, desktop_downloads = cursor.fetchone()
         cursor.execute(
             """
             SELECT COUNT(*)
@@ -107,6 +120,7 @@ class StatsStore:
             "totalViews": int(total_views),
             "views24h": int(views_24h),
             "downloads": int(downloads),
+            "desktopDownloads": int(desktop_downloads),
         }
 
     def get_stats(self) -> dict[str, Any]:
@@ -140,8 +154,10 @@ class StatsStore:
             )
             return result
 
-    def record(self, event_type: str, event_id: str) -> dict[str, int]:
-        counter_column = "total_views" if event_type == "view" else "downloads"
+    def record(self, event_type: str, event_id: str, platform: str = "android") -> dict[str, int]:
+        counter_column = "total_views" if event_type == "view" else (
+            "desktop_downloads" if platform == "desktop" else "downloads"
+        )
         with self.connect() as connection, connection.cursor() as cursor:
             self.prune(cursor)
             cursor.execute(
@@ -218,4 +234,4 @@ def record_view(payload: EventPayload) -> dict[str, int]:
 
 @app.post("/api/stats/download")
 def record_download(payload: EventPayload) -> dict[str, int]:
-    return store.record("download", payload.eventId)
+    return store.record("download", payload.eventId, payload.platform)
