@@ -18,12 +18,13 @@ export interface SendGuideCommand { command: 'send_guide'; key: string }
 export interface RetryTurnCommand { command: 'retry_turn' }
 export interface SetReasoningEffortCommand { command: 'set_reasoning_effort'; effort: ReasoningEffort }
 export interface SetMaxToolRoundsCommand { command: 'set_max_tool_rounds'; rounds: number }
+export interface AckEventCommand { command: 'ack_event'; event_seq: number }
 
 export type AgentCommand =
   | SendMessageCommand | CancelCommand | JumpInCommand | ApproveToolCommand
   | AnswerQuestionCommand | SetPermissionModeCommand | EnterPlanModeCommand
   | ExitPlanModeCommand | SelectModelCommand | FileTransferResultCommand
-  | SendGuideCommand | RetryTurnCommand | SetReasoningEffortCommand | SetMaxToolRoundsCommand
+  | SendGuideCommand | RetryTurnCommand | SetReasoningEffortCommand | SetMaxToolRoundsCommand | AckEventCommand
 
 export const PROTOCOL_VERSION = 1
 export type EnvelopeType = 'event' | 'command' | 'ack' | 'error'

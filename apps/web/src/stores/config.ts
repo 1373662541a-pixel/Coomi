@@ -19,6 +19,20 @@ export interface ProviderConfig {
 export type ProviderProtocol = 'openai_compatible' | 'openai_responses' | 'anthropic_messages' | 'gemini_native'
 export type ProviderStatus = 'unconfigured' | 'configured' | 'current'
 
+export interface ConnectionSettings {
+  providerRetryCount: number
+  wsRetryCount: number
+  reconnectInitialDelayMs: number
+  reconnectMaxDelayMs: number
+}
+
+export const DEFAULT_CONNECTION_SETTINGS: ConnectionSettings = {
+  providerRetryCount: 2,
+  wsRetryCount: 10,
+  reconnectInitialDelayMs: 500,
+  reconnectMaxDelayMs: 10_000,
+}
+
 export interface ProviderPreset {
   id: string
   name: string
@@ -140,6 +154,12 @@ export const useConfigStore = defineStore('config', () => {
   const reasoningEffort = ref<ReasoningEffort>(REASONING_EFFORTS.some(item => item.value === savedEffort) ? savedEffort! : 'auto')
   const savedRounds = Number(localStorage.getItem('coomi.maxToolRounds'))
   const maxToolRounds = ref([192, 256, 512].includes(savedRounds) ? savedRounds : 192)
+  const connectionSettings = ref<ConnectionSettings>({
+    providerRetryCount: readStoredInt('coomi.providerRetryCount', 0, 10, DEFAULT_CONNECTION_SETTINGS.providerRetryCount),
+    wsRetryCount: readStoredInt('coomi.wsRetryCount', 0, 30, DEFAULT_CONNECTION_SETTINGS.wsRetryCount),
+    reconnectInitialDelayMs: readStoredInt('coomi.reconnectInitialDelayMs', 500, 60_000, DEFAULT_CONNECTION_SETTINGS.reconnectInitialDelayMs),
+    reconnectMaxDelayMs: readStoredInt('coomi.reconnectMaxDelayMs', 1_000, 120_000, DEFAULT_CONNECTION_SETTINGS.reconnectMaxDelayMs),
+  })
 
   const providers = ref<ProviderConfig[]>([])
   const activeId = ref('')
@@ -204,6 +224,45 @@ export const useConfigStore = defineStore('config', () => {
     localStorage.setItem('coomi.maxToolRounds', String(maxToolRounds.value))
   }
 
+  function cacheConnectionSettings(value: ConnectionSettings) {
+    connectionSettings.value = { ...value }
+    localStorage.setItem('coomi.providerRetryCount', String(value.providerRetryCount))
+    localStorage.setItem('coomi.wsRetryCount', String(value.wsRetryCount))
+    localStorage.setItem('coomi.reconnectInitialDelayMs', String(value.reconnectInitialDelayMs))
+    localStorage.setItem('coomi.reconnectMaxDelayMs', String(value.reconnectMaxDelayMs))
+  }
+
+  async function fetchConnectionSettings(): Promise<boolean> {
+    try {
+      const value = await apiGet<ConnectionSettings>('/api/settings/connection')
+      cacheConnectionSettings(value)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  async function saveConnectionSettings(value: ConnectionSettings): Promise<boolean> {
+    const normalized: ConnectionSettings = {
+      providerRetryCount: Math.trunc(value.providerRetryCount),
+      wsRetryCount: Math.trunc(value.wsRetryCount),
+      reconnectInitialDelayMs: Math.trunc(value.reconnectInitialDelayMs),
+      reconnectMaxDelayMs: Math.trunc(value.reconnectMaxDelayMs),
+    }
+    if (normalized.providerRetryCount < 0 || normalized.providerRetryCount > 10
+      || normalized.wsRetryCount < 0 || normalized.wsRetryCount > 30
+      || normalized.reconnectInitialDelayMs < 500 || normalized.reconnectInitialDelayMs > 60_000
+      || normalized.reconnectMaxDelayMs < 1_000 || normalized.reconnectMaxDelayMs > 120_000
+      || normalized.reconnectMaxDelayMs < normalized.reconnectInitialDelayMs) return false
+    try {
+      const saved = await apiSend<ConnectionSettings>('/api/settings/connection', 'PUT', normalized)
+      cacheConnectionSettings(saved)
+      return true
+    } catch {
+      return false
+    }
+  }
+
   /**
    * 三档主题。应用后：
    * - 写入 <html data-theme>（前端样式即时切换）；
@@ -211,6 +270,7 @@ export const useConfigStore = defineStore('config', () => {
    *   颜色并重新注入 data-theme；桌面浏览器直接由 applyTheme 生效。
    */
   function setThemeMode(mode: ThemeMode) {
+    if (document.documentElement.dataset.customAppearance === 'true') return
     themeMode.value = mode
     localStorage.setItem('coomi.themeMode', mode)
     applyTheme(mode)
@@ -425,10 +485,15 @@ export const useConfigStore = defineStore('config', () => {
   }
 
   return {
-    permissionMode, planMode, themeMode, reasoningEffort, maxToolRounds, globalMemory, customPrompt, providers, activeId, loading, usingMock, lastError,
+    permissionMode, planMode, themeMode, reasoningEffort, maxToolRounds, connectionSettings, globalMemory, customPrompt, providers, activeId, loading, usingMock, lastError,
     currentProviderId, currentModel, currentProvider, mergedProviders,
-    fetchProviders, selectModel, setPermissionMode, setThemeMode, setReasoningEffort, setMaxToolRounds, cyclePermissionMode, togglePlanMode,
+    fetchProviders, selectModel, setPermissionMode, setThemeMode, setReasoningEffort, setMaxToolRounds, fetchConnectionSettings, saveConnectionSettings, cyclePermissionMode, togglePlanMode,
     toggleGlobalMemory, syncGlobalMemoryFromEngine, fetchCustomPrompt, saveCustomPrompt,
     upsertProvider, deleteProvider, activateProvider, copyProvider, revealProviderKey, discoverModels,
   }
 })
+
+function readStoredInt(key: string, min: number, max: number, fallback: number): number {
+  const value = Number(localStorage.getItem(key))
+  return Number.isInteger(value) && value >= min && value <= max ? value : fallback
+}

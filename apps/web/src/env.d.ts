@@ -2,6 +2,7 @@
 
 interface Window {
   __coomiHandleSystemBack?: () => boolean
+  __coomiApplyAppearance?: (config: AppearanceConfig) => void
   CoomiAndroid?: {
     openDashboard(): void
     importFiles?(): void
@@ -18,7 +19,18 @@ interface Window {
     getDiagnostics?(): string
     /** 原生上报报错反馈（绕过 WebView CORS）：json 为反馈体，callbackId 用于异步回调。 */
     sendFeedback?(json: string, callbackId: string): void
+    getThemeMode?(): string
+    setThemeMode?(mode: string): void
+    getAppearanceConfig?(): string
   }
+}
+
+interface AppearanceConfig {
+  customEnabled?: boolean
+  colors?: Record<string, string>
+  chatBackground?: boolean
+  chatMask?: number
+  revision?: number
 }
 
 declare module '*.vue' {

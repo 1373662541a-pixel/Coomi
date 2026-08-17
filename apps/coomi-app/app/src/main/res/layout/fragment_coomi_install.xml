@@ -41,6 +41,7 @@
             style="@style/Coomi.Card"
             android:layout_marginTop="@dimen/coomi_space_xl"
             android:background="@drawable/coomi_bg_card_outlined"
+            android:tag="coomi:card-outlined"
             android:paddingTop="@dimen/coomi_space_xs"
             android:paddingBottom="@dimen/coomi_space_xs">
 

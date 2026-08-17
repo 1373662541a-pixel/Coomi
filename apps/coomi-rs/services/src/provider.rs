@@ -700,16 +700,39 @@ async fn send_request(builder: RequestBuilder, phase: &'static str) -> Result<Re
 }
 
 fn transport_error(phase: &'static str, error: reqwest::Error) -> anyhow::Error {
-    let kind = if error.is_timeout() {
+    let chain = format!("{error:#}").to_ascii_lowercase();
+    let kind = if error.is_builder() {
+        ProviderErrorKind::RequestBuild
+    } else if error.is_body() {
+        ProviderErrorKind::RequestBody
+    } else if error.is_redirect() {
+        ProviderErrorKind::Redirect
+    } else if error.is_timeout() {
         ProviderErrorKind::Timeout
     } else if error.is_connect() {
-        ProviderErrorKind::Connect
+        if chain.contains("dns")
+            || chain.contains("name resolution")
+            || chain.contains("lookup address")
+        {
+            ProviderErrorKind::Dns
+        } else if chain.contains("tls")
+            || chain.contains("certificate")
+            || chain.contains("handshake")
+        {
+            ProviderErrorKind::Tls
+        } else if chain.contains("proxy") {
+            ProviderErrorKind::Proxy
+        } else {
+            ProviderErrorKind::Connect
+        }
+    } else if chain.contains("i/o") || chain.contains("io error") {
+        ProviderErrorKind::LocalIo
     } else {
         ProviderErrorKind::Request
     };
     let retryable = matches!(
         kind,
-        ProviderErrorKind::Timeout | ProviderErrorKind::Connect
+        ProviderErrorKind::Timeout | ProviderErrorKind::Connect | ProviderErrorKind::Dns
     );
     let detail = error.without_url().to_string();
     ProviderRequestError {

@@ -23,6 +23,7 @@ public class CoomiHomeSettingActivity extends Activity {
         CoomiTheme.applyTheme(this);
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_coomi_home_setting);
+        CoomiTheme.applyPageSystemBars(this);
 
         findViewById(R.id.btn_home_back).setOnClickListener(v -> finish());
 

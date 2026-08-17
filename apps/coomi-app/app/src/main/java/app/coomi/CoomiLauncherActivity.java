@@ -85,6 +85,7 @@ public class CoomiLauncherActivity extends Activity {
         CoomiTheme.applyTheme(this);
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_coomi_launcher);
+        CoomiTheme.applyPageSystemBars(this);
 
         mWelcomeContainer = findViewById(R.id.welcome_container);
         mLoadingContainer = findViewById(R.id.loading_container);
@@ -129,6 +130,7 @@ public class CoomiLauncherActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        CoomiTheme.applyPageSystemBars(this);
         if (mSettingsMode) {
             showWelcomePhase();
             updatePermissionStatus();

@@ -5,6 +5,7 @@
     btn_open_terminal / btn_open_tui / btn_open_webui / webui_button_container銆?-->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/coomi_dashboard_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"

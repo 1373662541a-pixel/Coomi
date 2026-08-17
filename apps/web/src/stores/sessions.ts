@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { isDemoMode } from '@/bridge/demoMode'
-import { apiSend, authedFetch } from '@/bridge/http'
+import { apiGet, apiSend, authedFetch } from '@/bridge/http'
 import type { Timelineitem } from './viewModel'
 
 /**
@@ -45,6 +45,16 @@ export interface SessionGroup {
   items: SessionMeta[]
 }
 
+export interface TaskInfo {
+  task_id: string
+  session_id: string
+  session_title: string
+  status: 'queued' | 'running' | 'awaiting_approval' | 'awaiting_input' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
+  running: boolean
+  started_at: number
+  current_tool?: string | null
+}
+
 function readMetas(): SessionMeta[] {
   try {
     const raw = localStorage.getItem(META_KEY)
@@ -79,6 +89,32 @@ export const useSessionsStore = defineStore('sessions', () => {
   const currentCwd = ref('')
   /** 引擎侧正在后台执行的会话 id 集合（/api/sessions 的 running 字段）。 */
   const runningIds = ref<Set<string>>(new Set())
+  const tasks = ref<TaskInfo[]>([])
+  const taskConcurrencyLimit = ref(2)
+
+  async function refreshTasks() {
+    try {
+      const data = await apiGet<{ tasks: TaskInfo[]; running_count: number; concurrency_limit: number }>('/api/tasks')
+      tasks.value = data.tasks ?? []
+      taskConcurrencyLimit.value = data.concurrency_limit || 2
+      runningIds.value = new Set(tasks.value.filter(task => task.running).map(task => task.session_id))
+      window.CoomiAndroid?.updateTaskStatus?.(
+        data.running_count > 0 ? `running:${data.running_count}` : 'done',
+      )
+    } catch {
+      /* Keep the last engine-authoritative snapshot while reconnecting. */
+    }
+  }
+
+  async function cancelTask(sessionId: string): Promise<boolean> {
+    try {
+      await apiSend<{ cancelled: boolean }>(`/api/tasks/${encodeURIComponent(sessionId)}`, 'DELETE')
+      await refreshTasks()
+      return true
+    } catch {
+      return false
+    }
+  }
 
   /** 从引擎刷新各会话的 running 状态 + 合并「最后执行时间」（列表排序依据）；引擎不可用时保持原状。 */
   async function refreshRunning() {
@@ -104,6 +140,7 @@ export const useSessionsStore = defineStore('sessions', () => {
         }
       }
       if (changed) persistMeta()
+      await refreshTasks()
     } catch {
       /* 引擎未就绪：静默保持上次状态 */
     }
@@ -447,6 +484,7 @@ export const useSessionsStore = defineStore('sessions', () => {
 
   return {
     metas, query, sorted, filtered, groups, currentCwd, setCurrentCwd,
+    tasks, runningIds, taskConcurrencyLimit, refreshTasks, cancelTask,
     syncFromEngine,
     ensure, touch, rename, togglePin, remove, find, deriveTitle,
     saveTranscript, loadTranscript, migrateId, clearAll,

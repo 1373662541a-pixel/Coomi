@@ -99,6 +99,7 @@ public class InstallFragment extends Fragment implements CoomiSetupActivity.Step
             startDeploy();
         });
         if (CoomiDemo.isEnabled()) showDemoSkipped();
+        CoomiTheme.applyCustomColors(requireContext(), view);
         return view;
     }
 

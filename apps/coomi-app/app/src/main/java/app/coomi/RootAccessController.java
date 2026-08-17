@@ -5,6 +5,7 @@ import android.os.Looper;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.File;
 
 /**
  * Performs an explicit, short-lived Root capability check.
@@ -17,6 +18,7 @@ import java.io.InputStreamReader;
 public final class RootAccessController {
 
     private static final long TIMEOUT_MILLIS = 10_000L;
+    private static final long FAILURE_COOLDOWN_MILLIS = 30_000L;
     private static final String[] SU_CANDIDATES = {
         "/system_ext/bin/su",
         "su",
@@ -29,6 +31,10 @@ public final class RootAccessController {
     private final Object lock = new Object();
     private Process activeProcess;
     private boolean checking;
+    private static volatile Result cachedGranted;
+    private static volatile Result cachedFailure;
+    private static volatile long failureCooldownUntil;
+    private static volatile String resolvedCandidate;
 
     public enum Status {
         GRANTED,
@@ -64,6 +70,16 @@ public final class RootAccessController {
 
     /** Starts one user-requested check. A second check is ignored while active. */
     public void check(Callback callback) {
+        Result granted = cachedGranted;
+        if (granted != null) {
+            if (callback != null) mainHandler.post(() -> callback.onComplete(granted));
+            return;
+        }
+        if (System.currentTimeMillis() < failureCooldownUntil && cachedFailure != null) {
+            Result failure = cachedFailure;
+            if (callback != null) mainHandler.post(() -> callback.onComplete(failure));
+            return;
+        }
         synchronized (lock) {
             if (checking) return;
             checking = true;
@@ -71,6 +87,14 @@ public final class RootAccessController {
 
         Thread worker = new Thread(() -> {
             Result result = runCheck();
+            if (result.status == Status.GRANTED) {
+                cachedGranted = result;
+                cachedFailure = null;
+                failureCooldownUntil = 0L;
+            } else if (result.status == Status.DENIED || result.status == Status.TIMEOUT) {
+                cachedFailure = result;
+                failureCooldownUntil = System.currentTimeMillis() + FAILURE_COOLDOWN_MILLIS;
+            }
             mainHandler.post(() -> {
                 synchronized (lock) {
                     checking = false;
@@ -98,36 +122,31 @@ public final class RootAccessController {
     }
 
     private Result runCheck() {
-        String lastOutput = "";
-        int lastExitCode = -1;
-        String lastStartError = "su executable not found";
+        String su = resolveCandidate();
+        CandidateResult candidate = runCandidate(su);
+        return candidate == null
+            ? Result.failed(Status.UNAVAILABLE, -1, "Unable to start Root shell")
+            : candidate.result;
+    }
 
-        for (String su : SU_CANDIDATES) {
-            CandidateResult candidate = runCandidate(su);
-            if (candidate == null) {
-                lastStartError = "Unable to start shell for " + su;
-                continue;
-            }
-
-            lastOutput = candidate.result.output;
-            lastExitCode = candidate.result.exitCode;
-            switch (candidate.result.status) {
-                case GRANTED:
-                case DENIED:
-                case TIMEOUT:
-                case ERROR:
-                    return candidate.result;
-                case UNAVAILABLE:
-                default:
-                    // A candidate can be present but hidden in the app's mount
-                    // namespace. Try the remaining known locations before
-                    // reporting that Root is unavailable.
-                    break;
+    /** Selects one canonical candidate without invoking su or opening an authorization dialog. */
+    private static String resolveCandidate() {
+        String cached = resolvedCandidate;
+        if (cached != null) return cached;
+        for (String candidate : SU_CANDIDATES) {
+            if (!candidate.startsWith("/")) continue;
+            File file = new File(candidate);
+            if (file.isFile() && file.canExecute()) {
+                try {
+                    resolvedCandidate = file.getCanonicalPath();
+                } catch (IOException ignored) {
+                    resolvedCandidate = file.getAbsolutePath();
+                }
+                return resolvedCandidate;
             }
         }
-
-        String message = lastOutput.isEmpty() ? lastStartError : lastOutput;
-        return Result.failed(Status.UNAVAILABLE, lastExitCode, message);
+        resolvedCandidate = "su";
+        return resolvedCandidate;
     }
 
     /** Runs one fixed su candidate and returns null only when the shell itself cannot start. */

@@ -54,7 +54,7 @@ export interface ToolDiagnosticTrace {
 
 export type Timelineitem = UserMessage | AssistantMessage | ReasoningBlock | ToolCard | QuestionCard | NoticeItem
 
-export type RunState = 'idle' | 'thinking' | 'executing' | 'awaiting_approval' | 'awaiting_question'
+export type RunState = 'idle' | 'syncing' | 'thinking' | 'executing' | 'awaiting_approval' | 'awaiting_question'
 
 export interface LoopProgress {
   active: boolean; currentStep: number; totalSteps: number

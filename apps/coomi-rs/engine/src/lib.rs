@@ -47,6 +47,7 @@ pub use types::ProviderRequestError;
 pub use types::Role;
 pub use types::TokenUsage;
 pub use types::ToolCall;
+pub use types::ToolConcurrency;
 pub use types::ToolResult;
 pub use types::ToolRuntime;
 pub use types::ToolSpec;

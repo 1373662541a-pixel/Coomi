@@ -164,6 +164,171 @@
                     android:contentDescription="@null"/>
             </LinearLayout>
 
+            <TextView
+                style="@style/Coomi.Text.Caption"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/coomi_space_l"
+                android:layout_marginBottom="@dimen/coomi_space_s"
+                android:text="自动备份" />
+
+            <LinearLayout
+                style="@style/Coomi.Card">
+
+                <LinearLayout style="@style/Coomi.Row">
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+                        <TextView
+                            style="@style/Coomi.Text.Body"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="定时自动备份" />
+                        <TextView
+                            style="@style/Coomi.Text.Caption"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="按计划保存会话、配置与扩展" />
+                    </LinearLayout>
+                    <Switch
+                        android:id="@+id/switch_auto_backup"
+                        android:layout_width="wrap_content"
+                        android:layout_height="48dp"
+                        android:buttonTint="?attr/coomiBlue"
+                        android:contentDescription="启用自动备份"
+                        android:showText="false" />
+                </LinearLayout>
+
+                <View style="@style/Coomi.Divider" />
+
+                <LinearLayout
+                    android:id="@+id/row_auto_backup_directory"
+                    style="@style/Coomi.Row"
+                    android:clickable="true"
+                    android:focusable="true">
+                    <ImageView
+                        android:layout_width="@dimen/coomi_icon_m"
+                        android:layout_height="@dimen/coomi_icon_m"
+                        android:layout_marginEnd="@dimen/coomi_space_m"
+                        android:contentDescription="@null"
+                        android:src="@drawable/coomi_ic_folder"
+                        android:tint="?attr/coomiBlue" />
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+                        <TextView
+                            style="@style/Coomi.Text.Body"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="导出目录" />
+                        <TextView
+                            android:id="@+id/txt_auto_backup_directory"
+                            style="@style/Coomi.Text.Caption"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:ellipsize="middle"
+                            android:maxLines="1"
+                            android:text="未选择" />
+                    </LinearLayout>
+                    <ImageView
+                        android:layout_width="@dimen/coomi_icon_s"
+                        android:layout_height="@dimen/coomi_icon_s"
+                        android:layout_marginStart="@dimen/coomi_space_s"
+                        android:contentDescription="@null"
+                        android:src="@drawable/coomi_ic_chevron_right"
+                        android:tint="?attr/coomiText3" />
+                </LinearLayout>
+
+                <View style="@style/Coomi.Divider" />
+
+                <LinearLayout style="@style/Coomi.Row">
+                    <TextView
+                        style="@style/Coomi.Text.Body"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="备份间隔" />
+                    <Spinner
+                        android:id="@+id/spinner_auto_backup_interval"
+                        android:layout_width="140dp"
+                        android:layout_height="48dp"
+                        android:gravity="end|center_vertical"
+                        android:contentDescription="自动备份间隔" />
+                </LinearLayout>
+
+                <View style="@style/Coomi.Divider" />
+
+                <LinearLayout style="@style/Coomi.Row">
+                    <TextView
+                        style="@style/Coomi.Text.Body"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="保留备份" />
+                    <Spinner
+                        android:id="@+id/spinner_auto_backup_keep"
+                        android:layout_width="140dp"
+                        android:layout_height="48dp"
+                        android:gravity="end|center_vertical"
+                        android:contentDescription="自动备份保留份数" />
+                </LinearLayout>
+
+                <View style="@style/Coomi.Divider" />
+
+                <LinearLayout style="@style/Coomi.Row" android:paddingStart="20dp">
+                    <CheckBox
+                        android:id="@+id/check_auto_backup_charging"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:buttonTint="?attr/coomiBlue"
+                        android:gravity="center_vertical"
+                        android:text="仅充电时执行"
+                        android:textColor="?attr/coomiText" />
+                </LinearLayout>
+
+                <View style="@style/Coomi.Divider" />
+
+                <LinearLayout style="@style/Coomi.Row" android:paddingStart="20dp">
+                    <CheckBox
+                        android:id="@+id/check_auto_backup_wifi"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:buttonTint="?attr/coomiBlue"
+                        android:gravity="center_vertical"
+                        android:text="仅 Wi-Fi 时执行"
+                        android:textColor="?attr/coomiText" />
+                </LinearLayout>
+
+                <View style="@style/Coomi.Divider" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="@dimen/coomi_space_l">
+                    <Button
+                        android:id="@+id/btn_auto_backup_now"
+                        style="@style/Coomi.Button.Secondary"
+                        android:layout_width="match_parent"
+                        android:layout_height="@dimen/coomi_button_height"
+                        android:text="立即备份" />
+                    <TextView
+                        android:id="@+id/txt_auto_backup_status"
+                        style="@style/Coomi.Text.Caption"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="@dimen/coomi_space_m"
+                        android:lineSpacingExtra="2dp"
+                        tools:text="上次：尚未执行&#10;下次：08-18 12:00" />
+                </LinearLayout>
+            </LinearLayout>
+
             <!-- ── 提示 ── -->
             <TextView
                 style="@style/Coomi.Text.Caption"

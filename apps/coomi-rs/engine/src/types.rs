@@ -125,9 +125,13 @@ impl ChatMessage {
     }
 
     pub fn assistant(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
+        let mut tool_calls = tool_calls;
+        for call in &mut tool_calls {
+            sanitize_json_encoded_data(&mut call.arguments);
+        }
         Self {
             role: Role::Assistant,
-            content: content.into(),
+            content: sanitize_long_encoded_data(&content.into()),
             tool_calls,
             tool_call_id: None,
             compaction_summary: false,
@@ -140,7 +144,7 @@ impl ChatMessage {
     pub fn tool(call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             role: Role::Tool,
-            content: content.into(),
+            content: sanitize_long_encoded_data(&content.into()),
             tool_calls: Vec::new(),
             tool_call_id: Some(call_id.into()),
             compaction_summary: false,
@@ -153,7 +157,7 @@ impl ChatMessage {
     fn plain(role: Role, content: impl Into<String>) -> Self {
         Self {
             role,
-            content: content.into(),
+            content: sanitize_long_encoded_data(&content.into()),
             tool_calls: Vec::new(),
             tool_call_id: None,
             compaction_summary: false,
@@ -178,8 +182,71 @@ impl ChatMessage {
     pub fn provider_item(item: Value) -> Self {
         let mut message = Self::assistant(String::new(), Vec::new());
         message.compaction_summary = true;
+        let mut item = item;
+        sanitize_json_encoded_data(&mut item);
         message.provider_items.push(item);
         message
+    }
+}
+
+/// Replace very long inline encodings before they enter model context or persistence.
+/// Structured `ImageContent` is intentionally excluded and remains available to vision calls.
+pub fn sanitize_long_encoded_data(input: &str) -> String {
+    const MIN_ENCODED_CHARS: usize = 4_096;
+    let bytes = input.as_bytes();
+    let mut output = String::with_capacity(input.len().min(64 * 1024));
+    let mut cursor = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        if !is_base64_body_byte(bytes[index]) {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < bytes.len() && is_base64_body_byte(bytes[index]) {
+            index += 1;
+        }
+        let mut padding = 0;
+        while index < bytes.len() && bytes[index] == b'=' && padding < 2 {
+            index += 1;
+            padding += 1;
+        }
+        let encoded = &input[start..index];
+        if encoded.len() < MIN_ENCODED_CHARS {
+            continue;
+        }
+        let is_hex = encoded.len() % 2 == 0 && encoded.bytes().all(|byte| byte.is_ascii_hexdigit());
+        let is_base64 =
+            encoded.len() % 4 == 0 && encoded.bytes().filter(|byte| *byte == b'=').count() <= 2;
+        if !is_hex && !is_base64 {
+            continue;
+        }
+        output.push_str(&input[cursor..start]);
+        let kind = if is_hex { "hex" } else { "base64" };
+        output.push_str(&format!(
+            "[encoded_data omitted type={kind} chars={} md5={:x}]",
+            encoded.len(),
+            md5::compute(encoded.as_bytes())
+        ));
+        cursor = index;
+    }
+    if cursor == 0 {
+        return input.to_owned();
+    }
+    output.push_str(&input[cursor..]);
+    output
+}
+
+fn is_base64_body_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/')
+}
+
+pub fn sanitize_json_encoded_data(value: &mut Value) {
+    match value {
+        Value::String(text) => *text = sanitize_long_encoded_data(text),
+        Value::Array(values) => values.iter_mut().for_each(sanitize_json_encoded_data),
+        Value::Object(values) => values.values_mut().for_each(sanitize_json_encoded_data),
+        _ => {}
     }
 }
 
@@ -188,6 +255,23 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: Value,
+}
+
+impl ToolCall {
+    pub fn resource_key(&self) -> Option<String> {
+        [
+            "path",
+            "file",
+            "directory",
+            "cwd",
+            "session_id",
+            "id",
+            "name",
+        ]
+        .iter()
+        .find_map(|key| self.arguments.get(*key).and_then(Value::as_str))
+        .map(|value| value.replace('\\', "/").to_ascii_lowercase())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -202,6 +286,39 @@ pub struct ToolSpec {
     pub name: String,
     pub description: String,
     pub parameters: Value,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToolConcurrency {
+    ReadOnly,
+    Mutating,
+    Destructive,
+    Interactive,
+}
+
+impl ToolSpec {
+    /// Conservative scheduling metadata for built-ins. Unknown/MCP tools stay serial
+    /// until they explicitly gain a trusted classification.
+    pub fn concurrency(&self) -> ToolConcurrency {
+        match self.name.as_str() {
+            "read_file" | "list_dir" | "search" | "grep_files" | "web_search" | "fetch"
+            | "view_image" | "show_image" | "list_skills" | "read_skill" | "memory_list"
+            | "memory_read" | "memory_search" | "list_mcp" | "get_loop" | "wait_agent" => {
+                ToolConcurrency::ReadOnly
+            }
+            "uninstall_mcp" | "uninstall_skill" | "memory_delete" | "close_agent" => {
+                ToolConcurrency::Destructive
+            }
+            "request_user_input" | "request_file_import" | "request_file_export" => {
+                ToolConcurrency::Interactive
+            }
+            _ => ToolConcurrency::Mutating,
+        }
+    }
+
+    pub fn background_capable(&self) -> bool {
+        matches!(self.name.as_str(), "shell" | "local_shell" | "wait_agent")
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -297,6 +414,13 @@ pub enum ProviderErrorKind {
     Http,
     Timeout,
     Connect,
+    Dns,
+    Tls,
+    Proxy,
+    Redirect,
+    RequestBuild,
+    RequestBody,
+    LocalIo,
     Request,
     Stream,
     Decode,
@@ -610,5 +734,28 @@ pub trait ToolRuntime: Send + Sync {
 
     async fn lifecycle(&self, _event: &str, _payload: Value) -> Result<Option<String>, String> {
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::sanitize_long_encoded_data;
+
+    #[test]
+    fn removes_one_megabyte_base64_without_retaining_payload() {
+        let payload = "QUJD".repeat(256 * 1024);
+        let sanitized = sanitize_long_encoded_data(&format!("data:image/png;base64,{payload}"));
+        assert!(sanitized.contains("encoded_data omitted type=base64"));
+        assert!(sanitized.contains("chars=1048576"));
+        assert!(!sanitized.contains(&payload[..4096]));
+        assert!(sanitized.len() < 256);
+    }
+
+    #[test]
+    fn keeps_hashes_and_regular_jwts() {
+        let hash = "0123456789abcdef".repeat(4);
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature";
+        let input = format!("hash={hash} jwt={jwt}");
+        assert_eq!(sanitize_long_encoded_data(&input), input);
     }
 }

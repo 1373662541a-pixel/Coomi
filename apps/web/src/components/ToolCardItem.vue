@@ -6,10 +6,11 @@
  * 状态是有语义色的：运行中蓝 + 左侧流光，成功绿勾，失败红叉且输出染红，
  * 待授权橙（真正的确认交给底部 ApprovalSheet，卡片只说明原因），缓存命中灰闪电。
  */
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 import type { ToolCard } from '@/stores/viewModel'
 import { asText, toolMeta, toolTarget } from '@/utils/toolMeta'
 import CoomiIcon from './CoomiIcon.vue'
+import { registerOverlay, unregisterOverlay } from '@/bridge/overlayStack'
 
 const props = defineProps<{ card: ToolCard }>()
 
@@ -62,6 +63,7 @@ function resetPreviewTransform() {
 }
 
 function closePreview() {
+  unregisterOverlay(`image-preview:${props.card.callId}`)
   previewSrc.value = ''
   resetPreviewTransform()
 }
@@ -134,10 +136,13 @@ function togglePreviewZoom(event: MouseEvent) {
 function openPreview(src: string) {
   resetPreviewTransform()
   previewSrc.value = src
+  registerOverlay(`image-preview:${props.card.callId}`, closePreview)
   const mime = src.match(/^data:([^;]+)/)?.[1] ?? 'image/png'
   const ext = (mime.split('/')[1] ?? 'png').replace('jpeg', 'jpg')
   previewName.value = `coomi-${Date.now()}.${ext}`
 }
+
+onBeforeUnmount(() => unregisterOverlay(`image-preview:${props.card.callId}`))
 
 function savePreview() {
   if (!previewSrc.value) return

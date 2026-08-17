@@ -3,8 +3,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use axum::Json;
 use axum::Router;
-use axum::extract::Path as AxumPath;
 use axum::extract::DefaultBodyLimit;
+use axum::extract::Path as AxumPath;
 use axum::extract::Query;
 use axum::extract::State;
 use axum::extract::ws::Message;
@@ -25,10 +25,10 @@ use coomi_engine::Agent;
 use coomi_engine::AgentEvent;
 use coomi_engine::AgentObserver;
 use coomi_engine::ApprovalHandler;
+use coomi_engine::ChatMessage;
 use coomi_engine::FileTransferRequest;
 use coomi_engine::InputQueue;
 use coomi_engine::LoopStatus;
-use coomi_engine::ChatMessage;
 use coomi_engine::ModelProvider;
 use coomi_engine::ModelRequest;
 use coomi_engine::PlanStepStatus;
@@ -71,12 +71,14 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use tokio::sync::RwLock;
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
@@ -101,6 +103,9 @@ struct AppState {
     /// 任务与 WS 连接解耦：连接断开任务继续在后台执行，断线期间的
     /// 交互事件缓存在 SessionTask 中，重连后补发。
     tasks: Arc<StdMutex<HashMap<String, Arc<SessionTask>>>>,
+    /// Global session-turn quota. Different sessions may run concurrently while
+    /// keeping Android memory use bounded.
+    task_slots: Arc<Semaphore>,
     /// 图片发送已降级的会话：请求因图片被上游拒绝后置位，
     /// 该会话后续请求不再重放历史图片，避免「一张图报错→整会话报废」。
     vision_degraded: Arc<StdMutex<HashSet<String>>>,
@@ -135,24 +140,100 @@ impl AppState {
             .or_insert_with(|| Arc::clone(&task))
             .clone()
     }
+}
 
-    fn remove_task(&self, session_id: &str) {
-        self.tasks
+fn task_checkpoints_path(home: &Path) -> PathBuf {
+    home.join("task_checkpoints.json")
+}
+
+fn load_task_checkpoints(home: &Path) -> HashMap<String, Arc<SessionTask>> {
+    let Ok(bytes) = std::fs::read(task_checkpoints_path(home)) else {
+        return HashMap::new();
+    };
+    let Ok(items) = serde_json::from_slice::<Vec<Value>>(&bytes) else {
+        return HashMap::new();
+    };
+    let mut tasks = HashMap::new();
+    for item in items {
+        let Some(session_id) = item.get("session_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(task_id) = item.get("task_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let task = Arc::new(SessionTask::new());
+        *task
+            .task_id
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(session_id);
+            .unwrap_or_else(|value| value.into_inner()) = Some(task_id.to_owned());
+        task.started_at.store(
+            item.get("started_at").and_then(Value::as_u64).unwrap_or(0),
+            Ordering::SeqCst,
+        );
+        let prior = item
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("interrupted");
+        task.set_phase(
+            if matches!(
+                prior,
+                "queued" | "running" | "awaiting_approval" | "awaiting_input"
+            ) {
+                "interrupted"
+            } else {
+                prior
+            },
+        );
+        tasks.insert(session_id.to_owned(), task);
+    }
+    tasks
+}
+
+fn persist_task_checkpoints(state: &AppState) {
+    let tasks = state
+        .tasks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let items = tasks
+        .iter()
+        .filter_map(|(session_id, task)| {
+            let task_id = task
+                .task_id
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()?;
+            Some(json!({
+                "session_id": session_id,
+                "task_id": task_id,
+                "status": task.phase.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone(),
+                "started_at": task.started_at.load(Ordering::SeqCst),
+            }))
+        })
+        .collect::<Vec<_>>();
+    drop(tasks);
+    let path = task_checkpoints_path(&state.home);
+    let temporary = path.with_extension("json.tmp");
+    if let Ok(bytes) = serde_json::to_vec_pretty(&items)
+        && std::fs::write(&temporary, bytes).is_ok()
+    {
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
+        }
+        let _ = std::fs::rename(temporary, path);
     }
 }
 
 /// 会话级任务：一次 send_message 产生的整轮执行（含引擎内部的 loop 续跑）。
 /// 生命周期锚定在会话而不是 WS 连接上，这样「切会话 / 断线」不会中断执行：
 ///  - 断线只清 conn_tx（连接引用），任务与子进程继续跑；
-///  - 断线期间到达的交互事件（审批 / 提问 / 文件传输）缓存在 pending_events，
-///    重连后补发；终态事件（turn_end 等）缓存在 terminal_event。
-/// 任务结束后 remove_task 删除条目；重连时若条目不存在则 running=false。
+///  - 所有未确认事件按序保留，重连后补发；客户端通过 ack_event 确认游标。
 struct SessionTask {
     abort: StdMutex<Option<AbortHandle>>,
     running: AtomicBool,
+    task_id: StdMutex<Option<String>>,
+    phase: StdMutex<String>,
+    started_at: AtomicU64,
+    current_tool: StdMutex<Option<String>>,
     processes: StdMutex<Option<Arc<ProcessManager>>>,
     /// 当前活跃连接的推送通道（None = 断线中）。
     conn_tx: StdMutex<Option<mpsc::UnboundedSender<Message>>>,
@@ -160,8 +241,8 @@ struct SessionTask {
     approvals: StdMutex<HashMap<String, oneshot::Sender<bool>>>,
     questions: StdMutex<HashMap<String, oneshot::Sender<UserInputResponse>>>,
     file_requests: StdMutex<HashMap<String, oneshot::Sender<Vec<String>>>>,
-    pending_events: StdMutex<VecDeque<Value>>,
-    terminal_event: StdMutex<Option<Value>>,
+    next_event_seq: AtomicU64,
+    unacked_events: StdMutex<VecDeque<Value>>,
 }
 
 impl SessionTask {
@@ -169,38 +250,34 @@ impl SessionTask {
         Self {
             abort: StdMutex::new(None),
             running: AtomicBool::new(false),
+            task_id: StdMutex::new(None),
+            phase: StdMutex::new("idle".into()),
+            started_at: AtomicU64::new(0),
+            current_tool: StdMutex::new(None),
             processes: StdMutex::new(None),
             conn_tx: StdMutex::new(None),
             input_queue: Arc::new(InputQueue::default()),
             approvals: StdMutex::new(HashMap::new()),
             questions: StdMutex::new(HashMap::new()),
             file_requests: StdMutex::new(HashMap::new()),
-            pending_events: StdMutex::new(VecDeque::new()),
-            terminal_event: StdMutex::new(None),
+            next_event_seq: AtomicU64::new(1),
+            unacked_events: StdMutex::new(VecDeque::new()),
         }
     }
 
-    /// 事件出口：缓存交互/终态事件供断线补发，同时推送给当前活跃连接。
-    fn push_event(&self, payload: Value) {
-        match payload.get("event_type").and_then(Value::as_str) {
-            Some("tool_approval_request" | "user_question_request" | "file_transfer_request") => {
-                let mut queue = self
-                    .pending_events
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if queue.len() >= 64 {
-                    queue.pop_front();
-                }
-                queue.push_back(payload.clone());
-            }
-            Some("turn_end" | "agent_error" | "agent_cancelled") => {
-                *self
-                    .terminal_event
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(payload.clone());
-            }
-            _ => {}
+    /// 事件出口：分配稳定序号并保留到客户端确认，同时推送给当前活跃连接。
+    fn push_event(&self, mut payload: Value) {
+        let seq = self.next_event_seq.fetch_add(1, Ordering::SeqCst);
+        payload["event_seq"] = json!(seq);
+        let mut queue = self
+            .unacked_events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if queue.len() >= 2_048 {
+            queue.pop_front();
         }
+        queue.push_back(payload.clone());
+        drop(queue);
         if let Some(tx) = self
             .conn_tx
             .lock()
@@ -211,6 +288,58 @@ impl SessionTask {
                 coomi_envelope("event", None, payload).to_string().into(),
             ));
         }
+    }
+
+    fn acknowledge_through(&self, seq: u64) {
+        let mut queue = self
+            .unacked_events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while queue
+            .front()
+            .and_then(|event| event.get("event_seq"))
+            .and_then(Value::as_u64)
+            .is_some_and(|event_seq| event_seq <= seq)
+        {
+            queue.pop_front();
+        }
+    }
+
+    fn begin_turn(&self) {
+        self.unacked_events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        *self
+            .task_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Uuid::new_v4().to_string());
+        *self
+            .phase
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = "queued".into();
+        self.started_at
+            .store(unix_time().max(0.0) as u64, Ordering::SeqCst);
+        *self
+            .current_tool
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    fn set_phase(&self, phase: &str) {
+        *self
+            .phase
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = phase.to_owned();
+    }
+
+    fn finish(&self, phase: &str) {
+        self.running.store(false, Ordering::SeqCst);
+        self.set_phase(phase);
+        *self
+            .current_tool
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 }
 
@@ -344,13 +473,15 @@ pub async fn serve(
 
     let permission = Arc::new(RwLock::new(load_permission_mode(&home)));
     let registry_cache = load_registry_disk_cache(&home);
+    let restored_tasks = load_task_checkpoints(&home);
     let state = AppState {
         home,
         cwd,
         port,
         token,
         permission,
-        tasks: Arc::new(StdMutex::new(HashMap::new())),
+        tasks: Arc::new(StdMutex::new(restored_tasks)),
+        task_slots: Arc::new(Semaphore::new(2)),
         vision_degraded: Arc::new(StdMutex::new(HashSet::new())),
         registry_cache: Arc::new(StdMutex::new(registry_cache)),
     };
@@ -370,6 +501,10 @@ pub async fn serve(
             "/api/runtime/custom-prompt",
             get(get_custom_prompt).post(set_custom_prompt),
         )
+        .route(
+            "/api/settings/connection",
+            get(get_connection_settings).put(set_connection_settings),
+        )
         .route("/api/runtime/hooks", get(get_hooks).put(set_hooks))
         .route("/api/memory", get(list_memory).post(create_memory))
         .route(
@@ -386,6 +521,8 @@ pub async fn serve(
             post(discover_provider_models),
         )
         .route("/api/sessions", get(list_sessions))
+        .route("/api/tasks", get(list_tasks))
+        .route("/api/tasks/{session_id}", delete(cancel_task_api))
         .route(
             "/api/sessions/{id}",
             get(get_session)
@@ -622,6 +759,101 @@ fn configured_max_tool_rounds(home: &Path) -> usize {
         .clamp(1, 512)
 }
 
+const DEFAULT_PROVIDER_RETRY_COUNT: u8 = 2;
+const DEFAULT_WS_RETRY_COUNT: u8 = 10;
+const DEFAULT_RECONNECT_INITIAL_DELAY_MS: u64 = 500;
+const DEFAULT_RECONNECT_MAX_DELAY_MS: u64 = 10_000;
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectionSettings {
+    provider_retry_count: u8,
+    ws_retry_count: u8,
+    reconnect_initial_delay_ms: u64,
+    reconnect_max_delay_ms: u64,
+}
+
+impl Default for ConnectionSettings {
+    fn default() -> Self {
+        Self {
+            provider_retry_count: DEFAULT_PROVIDER_RETRY_COUNT,
+            ws_retry_count: DEFAULT_WS_RETRY_COUNT,
+            reconnect_initial_delay_ms: DEFAULT_RECONNECT_INITIAL_DELAY_MS,
+            reconnect_max_delay_ms: DEFAULT_RECONNECT_MAX_DELAY_MS,
+        }
+    }
+}
+
+fn configured_connection_settings(home: &Path) -> ConnectionSettings {
+    let settings = read_settings(home);
+    let defaults = ConnectionSettings::default();
+    let initial = settings
+        .get("reconnect_initial_delay_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(defaults.reconnect_initial_delay_ms)
+        .clamp(500, 60_000);
+    ConnectionSettings {
+        provider_retry_count: settings
+            .get("provider_retry_count")
+            .and_then(Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok())
+            .unwrap_or(defaults.provider_retry_count)
+            .min(10),
+        ws_retry_count: settings
+            .get("ws_retry_count")
+            .and_then(Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok())
+            .unwrap_or(defaults.ws_retry_count)
+            .min(30),
+        reconnect_initial_delay_ms: initial,
+        reconnect_max_delay_ms: settings
+            .get("reconnect_max_delay_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(defaults.reconnect_max_delay_ms)
+            .clamp(1_000, 120_000)
+            .max(initial),
+    }
+}
+
+async fn get_connection_settings(State(state): State<AppState>) -> Json<ConnectionSettings> {
+    Json(configured_connection_settings(&state.home))
+}
+
+async fn set_connection_settings(
+    State(state): State<AppState>,
+    Json(body): Json<ConnectionSettings>,
+) -> Result<Json<ConnectionSettings>, ApiError> {
+    if body.provider_retry_count > 10 {
+        return Err(ApiError::bad_request(
+            "providerRetryCount must be between 0 and 10",
+        ));
+    }
+    if body.ws_retry_count > 30 {
+        return Err(ApiError::bad_request(
+            "wsRetryCount must be between 0 and 30",
+        ));
+    }
+    if !(500..=60_000).contains(&body.reconnect_initial_delay_ms) {
+        return Err(ApiError::bad_request(
+            "reconnectInitialDelayMs must be between 500 and 60000",
+        ));
+    }
+    if !(1_000..=120_000).contains(&body.reconnect_max_delay_ms)
+        || body.reconnect_max_delay_ms < body.reconnect_initial_delay_ms
+    {
+        return Err(ApiError::bad_request(
+            "reconnectMaxDelayMs must be between 1000 and 120000 and not below the initial delay",
+        ));
+    }
+    let mut settings = read_settings(&state.home);
+    settings["provider_retry_count"] = json!(body.provider_retry_count);
+    settings["ws_retry_count"] = json!(body.ws_retry_count);
+    settings["reconnect_initial_delay_ms"] = json!(body.reconnect_initial_delay_ms);
+    settings["reconnect_max_delay_ms"] = json!(body.reconnect_max_delay_ms);
+    write_settings(&state.home, &settings)?;
+    Ok(Json(body))
+}
+
 /// 定制身份提示词的最大长度（字符）。防止超大文本挤占每次对话的上下文。
 const CUSTOM_PROMPT_MAX_CHARS: usize = 20_000;
 
@@ -797,7 +1029,9 @@ async fn analyze_tool_failures(
     let response = tokio::time::timeout(Duration::from_secs(180), provider.complete(request))
         .await
         .map_err(|_| ApiError::bad_gateway("tool failure analysis timed out"))?
-        .map_err(|error| ApiError::bad_gateway(format!("tool failure analysis failed: {error:#}")))?;
+        .map_err(|error| {
+            ApiError::bad_gateway(format!("tool failure analysis failed: {error:#}"))
+        })?;
     let analysis = sanitize_generated_analysis(&response.content);
     if analysis.trim().is_empty() {
         return Err(ApiError::bad_gateway(
@@ -871,9 +1105,16 @@ fn sanitize_trace_value(value: Value, key: &str, depth: usize) -> Value {
 
 fn is_secret_key(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
-    ["key", "token", "secret", "password", "authorization", "credential"]
-        .iter()
-        .any(|needle| lower.contains(needle))
+    [
+        "key",
+        "token",
+        "secret",
+        "password",
+        "authorization",
+        "credential",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 fn sanitize_identifier(value: &str, max_chars: usize) -> String {
@@ -966,6 +1207,115 @@ async fn list_sessions(State(state): State<AppState>) -> Json<Value> {
         }));
     }
     Json(json!({ "sessions": sessions }))
+}
+
+/// Engine-authoritative task center. Completed task metadata stays available for
+/// the lifetime of the engine so switching sessions cannot erase the outcome.
+async fn list_tasks(State(state): State<AppState>) -> Json<Value> {
+    let store = SessionStore::new(&state.home);
+    let tasks = state
+        .tasks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut items = Vec::new();
+    for (session_id, task) in tasks.iter() {
+        let task_id = task
+            .task_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let Some(task_id) = task_id else { continue };
+        let running = task.running.load(Ordering::SeqCst);
+        let mut phase = task
+            .phase
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if running
+            && !task
+                .approvals
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+        {
+            phase = "awaiting_approval".into();
+        } else if running
+            && !task
+                .questions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+        {
+            phase = "awaiting_input".into();
+        }
+        let session = Uuid::parse_str(session_id)
+            .ok()
+            .and_then(|id| store.load(id).ok());
+        items.push(json!({
+            "task_id": task_id,
+            "session_id": session_id,
+            "session_title": session.as_ref().map(|value| value.title.as_str()).unwrap_or("新对话"),
+            "status": phase,
+            "running": running,
+            "started_at": task.started_at.load(Ordering::SeqCst),
+            "current_tool": task.current_tool.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone(),
+        }));
+    }
+    items.sort_by_key(|item| std::cmp::Reverse(item["started_at"].as_u64().unwrap_or(0)));
+    let running_count = items
+        .iter()
+        .filter(|item| item["running"].as_bool().unwrap_or(false))
+        .count();
+    Json(json!({
+        "tasks": items,
+        "running_count": running_count,
+        "concurrency_limit": 2,
+    }))
+}
+
+async fn stop_session_task(state: &AppState, session_id: &str, task: &Arc<SessionTask>) -> bool {
+    if !task.running.swap(false, Ordering::SeqCst) {
+        return false;
+    }
+    if let Some(handle) = task
+        .abort
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
+    {
+        handle.abort();
+    }
+    let processes = task
+        .processes
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    if let Some(processes) = processes {
+        processes.terminate_all().await;
+    }
+    if let Ok(parsed) = Uuid::parse_str(session_id) {
+        let _ = SessionStore::new(&state.home).touch_updated_at(parsed);
+    }
+    task.finish("cancelled");
+    persist_task_checkpoints(state);
+    task.push_event(json!({"event_type": "agent_cancelled"}));
+    task.push_event(json!({"event_type": "turn_end"}));
+    true
+}
+
+async fn cancel_task_api(
+    State(state): State<AppState>,
+    AxumPath(session_id): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let task = state
+        .tasks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| ApiError::bad_request("task not found"))?;
+    let cancelled = stop_session_task(&state, &session_id, &task).await;
+    Ok(Json(json!({"cancelled": cancelled})))
 }
 
 /// 完整会话内容（含消息历史与 usage），供前端恢复历史会话渲染。
@@ -1563,6 +1913,32 @@ async fn set_hooks(
             if command.is_empty() {
                 return Err(ApiError::bad_request("hook command must not be empty"));
             }
+            let keyword_match = entry
+                .get("keyword_match")
+                .and_then(Value::as_str)
+                .unwrap_or("disabled");
+            if !matches!(keyword_match, "disabled" | "exact" | "contains") {
+                return Err(ApiError::bad_request(
+                    "keyword_match must be disabled, exact, or contains",
+                ));
+            }
+            if keyword_match != "disabled" && event != "turn_start" {
+                return Err(ApiError::bad_request(
+                    "keyword hooks are only supported for turn_start",
+                ));
+            }
+            if keyword_match != "disabled"
+                && entry
+                    .get("keyword")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .is_empty()
+            {
+                return Err(ApiError::bad_request(
+                    "keyword must not be empty when keyword matching is enabled",
+                ));
+            }
         }
     }
     let path = hooks_path(&state.home);
@@ -1624,7 +2000,13 @@ async fn create_memory(
         return Err(ApiError::bad_request("memory already exists"));
     }
     manager
-        .save(body.scope, name, &body.description, body.memory_type, &body.content)
+        .save(
+            body.scope,
+            name,
+            &body.description,
+            body.memory_type,
+            &body.content,
+        )
         .map_err(|error| ApiError::bad_request(format!("failed to save memory: {error:#}")))?;
     Ok(Json(json!({"ok": true})))
 }
@@ -1644,7 +2026,13 @@ async fn update_memory(
             .map_err(|error| ApiError::internal(format!("failed to move memory: {error:#}")))?;
     }
     manager
-        .save(body.scope, &name, &body.description, body.memory_type, &body.content)
+        .save(
+            body.scope,
+            &name,
+            &body.description,
+            body.memory_type,
+            &body.content,
+        )
         .map_err(|error| ApiError::bad_request(format!("failed to save memory: {error:#}")))?;
     Ok(Json(json!({"ok": true})))
 }
@@ -1859,7 +2247,9 @@ fn canonicalize_android_path(path: &std::path::Path) -> std::path::PathBuf {
     canonical
 }
 
-fn canonicalize_with_existing_parent(path: &std::path::Path) -> Result<std::path::PathBuf, ApiError> {
+fn canonicalize_with_existing_parent(
+    path: &std::path::Path,
+) -> Result<std::path::PathBuf, ApiError> {
     if path.exists() {
         return Ok(canonicalize_android_path(path));
     }
@@ -2457,28 +2847,20 @@ async fn websocket_session(socket: WebSocket, state: AppState, session_id: Strin
         }
     }
 
-    // 补发断线期间的状态：会话是否仍在后台运行 + 缓存的交互/终态事件。
-    // 顺序很重要：任务已结束（terminal 有值）时不再发 running=true，
-    // 否则前端会先进入 thinking 又被 turn_end 拉回 idle，状态栏闪一下。
-    let terminal = task
-        .terminal_event
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .take();
-    if terminal.is_none() && task.running.load(Ordering::SeqCst) {
-        context.send_event(json!({"event_type": "session_state", "running": true}));
-    }
+    // 先同步引擎权威状态，再按事件序号补发尚未被客户端确认的事件。
+    context.send_event(json!({
+        "event_type": "session_state",
+        "running": task.running.load(Ordering::SeqCst)
+    }));
     let pending: Vec<Value> = task
-        .pending_events
+        .unacked_events
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .drain(..)
+        .iter()
+        .cloned()
         .collect();
     for event in pending {
         context.send_event(event);
-    }
-    if let Some(terminal) = terminal {
-        context.send_event(terminal);
     }
 
     while let Some(Ok(message)) = source.next().await {
@@ -2552,13 +2934,13 @@ async fn handle_command(
                     context.send_error(envelope_id, "a turn is already running");
                     return;
                 }
+                task.begin_turn();
+                persist_task_checkpoints(state);
                 context.send_ack(envelope_id);
                 let compact_state = state.clone();
                 let compact_session_id = session_id.to_owned();
                 let compact_context = Arc::clone(&context);
                 let compact_task = Arc::clone(&task);
-                let cleanup_state = state.clone();
-                let cleanup_session_id = session_id.to_owned();
                 let spawned = tokio::spawn(async move {
                     let result = compact_web_session(
                         &compact_state,
@@ -2566,24 +2948,26 @@ async fn handle_command(
                         Arc::clone(&compact_context),
                     )
                     .await;
+                    let failed = result.is_err();
                     if let Err(error) = result {
                         compact_context.task.push_event(json!({"event_type":"agent_error","message":format!("上下文压缩失败：{error:#}"),"is_fatal":false}));
                     }
                     compact_context
                         .task
                         .push_event(json!({"event_type":"turn_end"}));
-                    compact_task.running.store(false, Ordering::SeqCst);
+                    compact_task.finish(if failed { "failed" } else { "completed" });
+                    persist_task_checkpoints(&compact_state);
                     compact_task
                         .abort
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .take();
-                    cleanup_state.remove_task(&cleanup_session_id);
                 });
                 *task
                     .abort
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(spawned.abort_handle());
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                    Some(spawned.abort_handle());
                 return;
             }
             if ProviderRegistry::load(&providers_path(&state.home)).is_err() {
@@ -2600,6 +2984,8 @@ async fn handle_command(
                 context.send_error(envelope_id, "a turn is already running");
                 return;
             }
+            task.begin_turn();
+            persist_task_checkpoints(state);
             context.send_ack(envelope_id);
             let turn_state = state.clone();
             let turn_session_id = session_id.to_owned();
@@ -2612,10 +2998,8 @@ async fn handle_command(
             };
             let turn_context = Arc::clone(&context);
             let turn_task = Arc::clone(&task);
-            let cleanup_state = state.clone();
-            let cleanup_session_id = session_id.to_owned();
             let spawned = tokio::spawn(async move {
-                if let Err(error) = run_turn(
+                let result = run_turn(
                     &turn_state,
                     &turn_session_id,
                     &turn_prompt,
@@ -2623,8 +3007,9 @@ async fn handle_command(
                     Arc::clone(&turn_context),
                     Arc::clone(&turn_task),
                 )
-                .await
-                {
+                .await;
+                let failed = result.is_err();
+                if let Err(error) = result {
                     let message = format!("{error:#}");
                     if is_retryable_error_text(&message)
                         || message.contains("tool round limit reached")
@@ -2647,13 +3032,13 @@ async fn handle_command(
                     }
                 }
                 turn_task.push_event(json!({"event_type": "turn_end"}));
-                turn_task.running.store(false, Ordering::SeqCst);
+                turn_task.finish(if failed { "failed" } else { "completed" });
+                persist_task_checkpoints(&turn_state);
                 turn_task
                     .abort
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .take();
-                cleanup_state.remove_task(&cleanup_session_id);
             });
             *task
                 .abort
@@ -2661,35 +3046,16 @@ async fn handle_command(
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(spawned.abort_handle());
         }
         "cancel" => {
-            // Abort the agent task first (synchronous), then kill any shell subprocesses
-            // started by tools; killing first would let the still-running agent spawn new
-            // processes that escape this cleanup round.
             let task = Arc::clone(&context.task);
-            if task.running.swap(false, Ordering::SeqCst) {
-                if let Some(handle) = task
-                    .abort
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .take()
-                {
-                    handle.abort();
-                }
-                let processes = task
-                    .processes
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .take();
-                if let Some(processes) = processes {
-                    processes.terminate_all().await;
-                }
-                // 用户取消也算一次执行：记录「最后执行时间」，列表排序不受影响。
-                if let Ok(parsed) = Uuid::parse_str(session_id) {
-                    let _ = SessionStore::new(&state.home).touch_updated_at(parsed);
-                }
-                task.push_event(json!({"event_type": "agent_cancelled"}));
-                task.push_event(json!({"event_type": "turn_end"}));
-            }
-            state.remove_task(session_id);
+            stop_session_task(state, session_id, &task).await;
+            context.send_ack(envelope_id);
+        }
+        "ack_event" => {
+            let seq = payload
+                .get("event_seq")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            context.task.acknowledge_through(seq);
             context.send_ack(envelope_id);
         }
         "jump_in" => {
@@ -2904,13 +3270,13 @@ async fn handle_command(
                 context.send_error(envelope_id, "a turn is already running");
                 return;
             }
+            task.begin_turn();
+            persist_task_checkpoints(state);
             context.send_ack(envelope_id);
             let turn_state = state.clone();
             let turn_session_id = session_id.to_owned();
             let turn_context = Arc::clone(&context);
             let turn_task = Arc::clone(&task);
-            let cleanup_state = state.clone();
-            let cleanup_session_id = session_id.to_owned();
             let spawned = tokio::spawn(async move {
                 let result = retry_turn(
                     &turn_state,
@@ -2919,17 +3285,18 @@ async fn handle_command(
                     Arc::clone(&turn_task),
                 )
                 .await;
+                let failed = result.is_err();
                 if let Err(error) = result {
                     turn_task.push_event(json!({"event_type":"agent_error","message":format!("{error:#}"),"is_fatal":false}));
                 }
                 turn_task.push_event(json!({"event_type":"turn_end"}));
-                turn_task.running.store(false, Ordering::SeqCst);
+                turn_task.finish(if failed { "failed" } else { "completed" });
+                persist_task_checkpoints(&turn_state);
                 turn_task
                     .abort
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .take();
-                cleanup_state.remove_task(&cleanup_session_id);
             });
             *task.abort.lock().unwrap_or_else(|p| p.into_inner()) = Some(spawned.abort_handle());
         }
@@ -3104,6 +3471,13 @@ async fn run_turn(
     context: Arc<ConnectionContext>,
     task: Arc<SessionTask>,
 ) -> Result<()> {
+    let _task_slot = Arc::clone(&state.task_slots)
+        .acquire_owned()
+        .await
+        .context("task scheduler is unavailable")?;
+    anyhow::ensure!(task.running.load(Ordering::SeqCst), "task was cancelled");
+    task.set_phase("running");
+    persist_task_checkpoints(state);
     let registry = ProviderRegistry::load(&providers_path(&state.home))
         .context("configure a provider before starting a chat")?;
     let selected = context.selected_model.read().await.clone();
@@ -3196,6 +3570,7 @@ async fn run_turn(
     };
     let reasoning_effort = context.reasoning_effort.read().await.clone();
     let max_tool_rounds = *context.max_tool_rounds.read().await;
+    let connection_settings = configured_connection_settings(&state.home);
     let context_categories = estimate_context_categories(
         &state.home,
         &prompt_context,
@@ -3215,6 +3590,11 @@ async fn run_turn(
     );
     let agent = Agent::new(prompt_context)
         .with_max_tool_rounds(max_tool_rounds)
+        .with_provider_retry_policy(
+            connection_settings.provider_retry_count,
+            connection_settings.reconnect_initial_delay_ms,
+            connection_settings.reconnect_max_delay_ms,
+        )
         .with_reasoning_effort(reasoning_effort)
         .with_input_queue(Arc::clone(&task.input_queue))
         // 图片降级：请求曾因图片被上游拒绝的会话，不再重放历史图片
@@ -3695,6 +4075,12 @@ impl AgentObserver for BrowserObserver {
                     .push_event(json!({"event_type": "reasoning_chunk", "content": content}));
             }
             AgentEvent::ToolStarted(call) => {
+                *self
+                    .task
+                    .current_tool
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(call.name.clone());
+                self.task.set_phase("running");
                 self.started
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -3712,6 +4098,11 @@ impl AgentObserver for BrowserObserver {
                 }));
             }
             AgentEvent::ToolFinished { call, result } => {
+                *self
+                    .task
+                    .current_tool
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
                 let elapsed = self
                     .started
                     .lock()
@@ -3937,7 +4328,11 @@ impl ApprovalHandler for BrowserApproval {
             "suggested_name": request.suggested_name,
             "multiple": request.multiple,
         }));
-        let timeout = if request.operation == "export" { 30 } else { 600 };
+        let timeout = if request.operation == "export" {
+            30
+        } else {
+            600
+        };
         let result = tokio::time::timeout(std::time::Duration::from_secs(timeout), receiver)
             .await
             .ok()
@@ -3977,6 +4372,9 @@ fn system_prompt(
     }
     prompt.push_str(
         "You are Coomi, a pragmatic coding agent running locally on Android. Inspect evidence before editing, keep changes scoped, preserve unrelated work, and verify results. When requirements, preferences, or consequential choices are unclear, use request_user_input proactively instead of guessing; group related questions into one batch when practical. Use request_file_import when the user needs to choose phone files and request_file_export to return local artifacts such as APKs. You may use the web freely: web_search for search, fetch to read pages, and shell / curl / wget for downloads, API calls, and file access. If web_search reports unavailable, report it once and continue with other approaches rather than looping command-line searches.",
+    );
+    prompt.push_str(
+        "\n\nCommunication: lead with results, avoid restating the request or narrating obvious steps, and keep progress updates to meaningful milestones, blockers, or decisions. Final responses start with the outcome and verification. Be concise without hiding failures, risks, or unfinished work. Tool recovery: never repeat an unchanged failing call more than once; for permission, policy, invalid-argument, or missing-path errors, change the parameters or approach before retrying.",
     );
     match policy {
         AccessMode::ReadOnly => prompt.push_str(
@@ -4676,6 +5074,7 @@ mod tests {
             token: "test-token".into(),
             permission: Arc::new(RwLock::new(PermissionMode::Auto)),
             tasks: Arc::new(StdMutex::new(HashMap::new())),
+            task_slots: Arc::new(Semaphore::new(2)),
             vision_degraded: Arc::new(StdMutex::new(HashSet::new())),
             registry_cache: Arc::new(StdMutex::new(None)),
         };
@@ -4691,9 +5090,10 @@ mod tests {
 
         // 只把 running_session 标记为执行中（模拟 send_message 后的任务表状态）。
         let running_task = state.task(&running_session.id.to_string());
+        running_task.begin_turn();
         running_task.running.store(true, Ordering::SeqCst);
 
-        let response = list_sessions(axum::extract::State(state)).await;
+        let response = list_sessions(axum::extract::State(state.clone())).await;
         let sessions = response.0["sessions"].as_array().expect("sessions array");
         let mut found_running = false;
         let mut found_idle = false;
@@ -4726,5 +5126,27 @@ mod tests {
         }
         assert!(found_running, "running session present in list");
         assert!(found_idle, "idle session present in list");
+
+        let task_response = list_tasks(axum::extract::State(state.clone())).await;
+        let tasks = task_response.0["tasks"].as_array().expect("tasks array");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0]["session_id"], running_session.id.to_string());
+        assert_eq!(tasks[0]["status"], "queued");
+        assert_eq!(task_response.0["running_count"], 1);
+
+        persist_task_checkpoints(&state);
+        let restored = load_task_checkpoints(&home);
+        let restored_task = restored
+            .get(&running_session.id.to_string())
+            .expect("task checkpoint restored");
+        assert!(!restored_task.running.load(Ordering::SeqCst));
+        assert_eq!(
+            restored_task
+                .phase
+                .lock()
+                .unwrap_or_else(|value| value.into_inner())
+                .as_str(),
+            "interrupted"
+        );
     }
 }

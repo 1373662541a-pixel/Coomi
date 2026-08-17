@@ -33,6 +33,7 @@ public class AuthFragment extends Fragment implements CoomiSetupActivity.StepFra
         Button providersButton = view.findViewById(R.id.btn_open_providers);
         providersButton.setOnClickListener(ignored -> openProviders());
         updateStatus();
+        CoomiTheme.applyCustomColors(requireContext(), view);
         return view;
     }
 
@@ -59,8 +60,14 @@ public class AuthFragment extends Fragment implements CoomiSetupActivity.StepFra
     }
 
     private void setStatus(@StringRes int textRes, int colorRes) {
-        mStatusText.setTextColor(ContextCompat.getColor(mStatusText.getContext(),
-            CoomiTheme.isDark(requireActivity()) ? nightColor(colorRes) : colorRes));
+        if (CoomiTheme.isCustomEnabled(requireContext())) {
+            String key = colorRes == R.color.coomi_ok ? "success"
+                : colorRes == R.color.coomi_danger ? "danger" : "text_secondary";
+            mStatusText.setTextColor(CoomiTheme.getCustomColor(requireContext(), key));
+        } else {
+            mStatusText.setTextColor(ContextCompat.getColor(mStatusText.getContext(),
+                CoomiTheme.isDark(requireActivity()) ? nightColor(colorRes) : colorRes));
+        }
         mStatusText.setText(textRes);
     }
 

@@ -3,6 +3,8 @@ use crate::ContextState;
 use crate::LoopState;
 use crate::PlanState;
 use crate::TokenUsage;
+use crate::types::sanitize_json_encoded_data;
+use crate::types::sanitize_long_encoded_data;
 use anyhow::Context;
 use anyhow::Result;
 use chrono::DateTime;
@@ -137,6 +139,15 @@ impl SessionStore {
         })?;
         let path = self.path(session.id);
         let mut persisted = session.clone();
+        for message in &mut persisted.messages {
+            message.content = sanitize_long_encoded_data(&message.content);
+            for item in &mut message.provider_items {
+                sanitize_json_encoded_data(item);
+            }
+            for call in &mut message.tool_calls {
+                sanitize_json_encoded_data(&mut call.arguments);
+            }
+        }
         // 用户可能在 agent 运行期间改名/置顶。运行中的 Session 是较早快照，
         // 每次 checkpoint 都必须保留磁盘上更新后的用户元数据。
         if let Ok(bytes) = fs::read(&path)

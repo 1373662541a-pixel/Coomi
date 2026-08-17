@@ -10,14 +10,29 @@ use crate::ModelStreamObserver;
 use crate::ProviderRequestError;
 use crate::SUMMARIZATION_PROMPT;
 use crate::Session;
+use crate::ToolConcurrency;
+use crate::ToolResult;
 use crate::ToolRuntime;
 use crate::compacted_history;
 use crate::normalize_history;
 use crate::trim_history_to_fit;
+use crate::types::sanitize_json_encoded_data;
+use crate::types::sanitize_long_encoded_data;
+use futures_util::future::join_all;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
+use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::Semaphore;
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ToolFailureState {
+    executions: u8,
+    requires_changed_call: bool,
+}
 
 #[derive(Debug)]
 pub enum AgentError {
@@ -45,6 +60,10 @@ impl std::error::Error for AgentError {}
 pub struct Agent {
     system_prompt: String,
     max_tool_rounds: usize,
+    provider_retry_count: u8,
+    reconnect_initial_delay_ms: u64,
+    reconnect_max_delay_ms: u64,
+    max_parallel_tools: usize,
     force_compaction: bool,
     input_queue: Option<Arc<InputQueue>>,
     /// 是否在请求中重放历史图片（Tool 消息的 images）。
@@ -63,6 +82,10 @@ impl Agent {
         Self {
             system_prompt: system_prompt.into(),
             max_tool_rounds: 192,
+            provider_retry_count: 2,
+            reconnect_initial_delay_ms: 1_000,
+            reconnect_max_delay_ms: 10_000,
+            max_parallel_tools: 4,
             force_compaction: false,
             input_queue: None,
             vision_replay: true,
@@ -93,6 +116,27 @@ impl Agent {
 
     pub fn with_max_tool_rounds(mut self, max_tool_rounds: usize) -> Self {
         self.max_tool_rounds = max_tool_rounds.clamp(1, 512);
+        self
+    }
+
+    /// Configure retries for transient provider failures. A count of zero disables
+    /// automatic replay. Non-retryable protocol/auth/argument failures still fail fast.
+    pub fn with_provider_retry_policy(
+        mut self,
+        retry_count: u8,
+        initial_delay_ms: u64,
+        max_delay_ms: u64,
+    ) -> Self {
+        self.provider_retry_count = retry_count.min(10);
+        self.reconnect_initial_delay_ms = initial_delay_ms.clamp(500, 60_000);
+        self.reconnect_max_delay_ms = max_delay_ms
+            .clamp(1_000, 120_000)
+            .max(self.reconnect_initial_delay_ms);
+        self
+    }
+
+    pub fn with_max_parallel_tools(mut self, max_parallel_tools: usize) -> Self {
+        self.max_parallel_tools = max_parallel_tools.clamp(1, 16);
         self
     }
 
@@ -307,6 +351,7 @@ impl Agent {
         let mut compacted_for_provider_error = false;
         let mut vision_replay = self.vision_replay;
         let mut invalid_tool_retry_used = false;
+        let mut tool_failures: HashMap<String, ToolFailureState> = HashMap::new();
 
         'tool_rounds: for round in 1..=self.max_tool_rounds {
             session.messages = normalize_history(&session.messages);
@@ -338,6 +383,15 @@ impl Agent {
             let mut messages = Vec::with_capacity(session.messages.len() + 1);
             messages.push(ChatMessage::system(self.system_prompt.clone()));
             messages.extend(session.messages.iter().cloned());
+            for message in &mut messages {
+                message.content = sanitize_long_encoded_data(&message.content);
+                for item in &mut message.provider_items {
+                    sanitize_json_encoded_data(item);
+                }
+                for call in &mut message.tool_calls {
+                    sanitize_json_encoded_data(&mut call.arguments);
+                }
+            }
             if !vision_replay {
                 // 图片降级：请求中剥离工具消息携带的图片（base64），避免上游
                 // 拒绝图片导致整会话反复失败。图片本身仍留在会话记录中，
@@ -389,13 +443,21 @@ impl Agent {
                             message: "当前模型拒绝图片内容，正在切换为纯文本恢复".into(),
                         });
                     }
-                    Err(error) if retry_attempt < 2 && is_transient_provider_error(&error) => {
+                    Err(error)
+                        if retry_attempt < self.provider_retry_count
+                            && is_transient_provider_error(&error) =>
+                    {
                         retry_attempt += 1;
-                        let delay_ms = retry_delay_ms(&error, retry_attempt);
+                        let delay_ms = retry_delay_ms(
+                            &error,
+                            retry_attempt,
+                            self.reconnect_initial_delay_ms,
+                            self.reconnect_max_delay_ms,
+                        );
                         observer.on_event(&AgentEvent::StreamReset);
                         observer.on_event(&AgentEvent::ConnectionRetry {
                             attempt: retry_attempt,
-                            max_attempts: 2,
+                            max_attempts: self.provider_retry_count,
                             delay_ms,
                             message: "网络或上游服务暂时不可用，正在自动恢复".into(),
                         });
@@ -436,19 +498,37 @@ impl Agent {
 
             if !response.invalid_tool_calls.is_empty() {
                 if invalid_tool_retry_used {
-                    return Err(AgentError::Provider(anyhow::anyhow!(
-                        "provider returned invalid tool arguments after one correction attempt"
-                    )));
+                    for invalid in &response.invalid_tool_calls {
+                        let call = crate::ToolCall {
+                            id: invalid.id.clone(),
+                            name: invalid.name.clone(),
+                            arguments: serde_json::json!({"invalid_arguments_omitted": true}),
+                        };
+                        let result = crate::ToolResult::error(format!(
+                            "工具参数纠正后仍未通过校验，已阻止执行。{}",
+                            invalid.reason
+                        ));
+                        observer.on_event(&AgentEvent::ToolStarted(call.clone()));
+                        observer.on_event(&AgentEvent::ToolFinished { call, result });
+                    }
+                    let recovery_message = "工具参数在一次纠正后仍未通过校验，相关工具未执行。请调整请求或补充参数后继续。";
+                    observer.on_event(&AgentEvent::Text(recovery_message.into()));
+                    session
+                        .messages
+                        .push(ChatMessage::assistant(recovery_message, Vec::new()));
+                    self.run_checkpoint(session);
+                    session.touch();
+                    return Ok(recovery_message.into());
                 }
                 invalid_tool_retry_used = true;
                 let problems = response
                     .invalid_tool_calls
                     .iter()
-                    .map(|call| format!("{}: {}", call.name, call.reason))
+                    .map(|call| tool_correction_problem(call, &tool_specs))
                     .collect::<Vec<_>>()
-                    .join("; ");
+                    .join("\n\n");
                 session.messages.push(ChatMessage::internal_user(format!(
-                    "<tool_call_correction>The previous tool call was not executed because its arguments were invalid. Return the same tool call once more with one valid JSON object matching the tool schema. Do not use Markdown fences or explanatory text. Problems: {problems}</tool_call_correction>"
+                    "<tool_call_correction>The previous tool call was not executed because its arguments were invalid. Return the same tool call once more with exactly one valid JSON object matching the supplied schema. Do not use Markdown fences or explanatory text.\n{problems}</tool_call_correction>"
                 )));
                 self.run_checkpoint(session);
                 continue;
@@ -462,9 +542,66 @@ impl Agent {
                 return Ok(response.content);
             }
 
-            for call in response.tool_calls {
+            let calls = response.tool_calls;
+            for call in &calls {
                 observer.on_event(&AgentEvent::ToolStarted(call.clone()));
-                let result = tools.call(&call, approval).await;
+            }
+            let specs_by_name: HashMap<&str, &crate::ToolSpec> = tool_specs
+                .iter()
+                .map(|spec| (spec.name.as_str(), spec))
+                .collect();
+            let mutating_resources: HashSet<String> = calls
+                .iter()
+                .filter(|call| {
+                    specs_by_name
+                        .get(call.name.as_str())
+                        .is_none_or(|spec| spec.concurrency() != ToolConcurrency::ReadOnly)
+                })
+                .filter_map(|call| call.resource_key())
+                .collect();
+            let parallel_limit = Arc::new(Semaphore::new(self.max_parallel_tools));
+            let serial_gate = Arc::new(AsyncMutex::new(()));
+            let mut scheduled_fingerprints = HashSet::new();
+            let scheduled = calls.into_iter().map(|call| {
+                let fingerprint = tool_call_fingerprint(&call);
+                let repeated_in_batch = !scheduled_fingerprints.insert(fingerprint.clone());
+                let previous = tool_failures.get(&fingerprint).copied().unwrap_or_default();
+                let blocked =
+                    repeated_in_batch || previous.requires_changed_call || previous.executions >= 2;
+                (call, fingerprint, blocked, previous, repeated_in_batch)
+            });
+            let executions = scheduled.map(
+                |(call, fingerprint, blocked, previous, repeated_in_batch)| {
+                    let parallel_limit = Arc::clone(&parallel_limit);
+                    let serial_gate = Arc::clone(&serial_gate);
+                    let resource = call.resource_key();
+                    let read_only = specs_by_name
+                        .get(call.name.as_str())
+                        .is_some_and(|spec| spec.concurrency() == ToolConcurrency::ReadOnly);
+                    let parallel = read_only
+                        && resource
+                            .as_ref()
+                            .is_none_or(|key| !mutating_resources.contains(key));
+                    async move {
+                        let result = if blocked {
+                            ToolResult::error(tool_retry_block_reason(previous, repeated_in_batch))
+                        } else if parallel {
+                            let _permit = parallel_limit.acquire().await.ok();
+                            tools.call(&call, approval).await
+                        } else {
+                            let _guard = serial_gate.lock().await;
+                            tools.call(&call, approval).await
+                        };
+                        (call, fingerprint, result, !blocked)
+                    }
+                },
+            );
+
+            for (call, fingerprint, mut result, executed) in join_all(executions).await {
+                result.output = sanitize_long_encoded_data(&result.output);
+                if let Some(context) = &mut result.additional_context {
+                    *context = sanitize_long_encoded_data(context);
+                }
                 if let Some(plan) = result.plan.clone() {
                     session.plan = Some(plan.clone());
                     observer.on_event(&AgentEvent::PlanUpdated(plan));
@@ -486,6 +623,14 @@ impl Agent {
                     && !context.trim().is_empty()
                 {
                     session.messages.push(ChatMessage::internal_user(context));
+                }
+                if result.success {
+                    tool_failures.remove(&fingerprint);
+                } else if executed {
+                    let state = tool_failures.entry(fingerprint).or_default();
+                    state.executions = state.executions.saturating_add(1);
+                    state.requires_changed_call =
+                        tool_failure_requires_changed_call(&result.output);
                 }
             }
             self.accept_queued_input(session, observer);
@@ -514,6 +659,13 @@ impl Agent {
         // vision. Keep the textual tool result while never replaying image payloads.
         for message in &mut normalized {
             message.images.clear();
+            message.content = sanitize_long_encoded_data(&message.content);
+            for item in &mut message.provider_items {
+                sanitize_json_encoded_data(item);
+            }
+            for call in &mut message.tool_calls {
+                sanitize_json_encoded_data(&mut call.arguments);
+            }
         }
         let compaction_limit = capabilities
             .context_window
@@ -596,6 +748,70 @@ impl Agent {
     }
 }
 
+fn tool_correction_problem(call: &crate::InvalidToolCall, specs: &[crate::ToolSpec]) -> String {
+    let schema = specs
+        .iter()
+        .find(|spec| spec.name == call.name)
+        .and_then(|spec| serde_json::to_string(&spec.parameters).ok())
+        .map(|schema| truncate_chars(&schema, 4_000))
+        .unwrap_or_else(|| "unavailable; do not guess fields".into());
+    format!(
+        "tool_name: {}\nvalidation_stage: arguments\nfield_error: {}\njson_schema: {}",
+        call.name, call.reason, schema
+    )
+}
+
+fn truncate_chars(input: &str, max_chars: usize) -> String {
+    if input.chars().count() <= max_chars {
+        return input.to_owned();
+    }
+    let mut output = input.chars().take(max_chars).collect::<String>();
+    output.push_str("...[truncated]");
+    output
+}
+
+fn tool_call_fingerprint(call: &crate::ToolCall) -> String {
+    let arguments = serde_json::to_vec(&call.arguments).unwrap_or_default();
+    let mut bytes = Vec::with_capacity(call.name.len() + 1 + arguments.len());
+    bytes.extend_from_slice(call.name.as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(&arguments);
+    format!("{:x}", md5::compute(bytes))
+}
+
+fn tool_failure_requires_changed_call(output: &str) -> bool {
+    let text = output.to_ascii_lowercase();
+    [
+        "permission denied",
+        "not permitted",
+        "policy",
+        "sandbox",
+        "invalid argument",
+        "invalid parameter",
+        "missing required",
+        "not found",
+        "no such file",
+        "old_string",
+        "权限",
+        "策略",
+        "参数",
+        "不存在",
+        "未找到",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
+fn tool_retry_block_reason(previous: ToolFailureState, repeated_in_batch: bool) -> String {
+    if repeated_in_batch {
+        return "已阻止同一批次中的重复工具调用；请合并调用或修改参数。".into();
+    }
+    if previous.requires_changed_call {
+        return "相同工具与参数此前因权限、策略、参数或路径问题失败，已阻止原样重试；请修改参数、路径或改用其他工具。".into();
+    }
+    "相同工具与参数已达到最多一次重试上限，已阻止继续执行；请修改参数或切换工具。".into()
+}
+
 fn is_transient_provider_error(error: &anyhow::Error) -> bool {
     if let Some(error) = error.downcast_ref::<ProviderRequestError>() {
         return error.retryable;
@@ -625,21 +841,27 @@ fn is_transient_provider_error(error: &anyhow::Error) -> bool {
     .any(|needle| text.contains(needle))
 }
 
-fn retry_delay_ms(error: &anyhow::Error, attempt: u8) -> u64 {
+fn retry_delay_ms(
+    error: &anyhow::Error,
+    attempt: u8,
+    initial_delay_ms: u64,
+    max_delay_ms: u64,
+) -> u64 {
     if let Some(delay) = error
         .downcast_ref::<ProviderRequestError>()
         .and_then(|error| error.retry_after_ms)
     {
-        return delay.clamp(250, 30_000);
+        return delay.clamp(initial_delay_ms, max_delay_ms);
     }
-    let base = 1_000_u64.saturating_mul(1_u64 << attempt.saturating_sub(1));
+    let exponent = u32::from(attempt.saturating_sub(1)).min(16);
+    let base = initial_delay_ms.saturating_mul(1_u64 << exponent);
     let jitter = (error
         .to_string()
         .bytes()
         .fold(0_u64, |sum, byte| sum.wrapping_add(u64::from(byte)))
         % 251)
         + 50;
-    base.saturating_add(jitter).min(10_000)
+    base.saturating_add(jitter).min(max_delay_ms)
 }
 
 fn request_has_images(request: &ModelRequest) -> bool {
@@ -836,6 +1058,91 @@ mod tests {
             .expect("agent turn");
         assert_eq!(output, "done");
         assert_eq!(session.messages.len(), 4);
+    }
+
+    struct ParallelReadTools;
+
+    #[async_trait]
+    impl ToolRuntime for ParallelReadTools {
+        fn specs(&self) -> Vec<ToolSpec> {
+            vec![ToolSpec {
+                name: "read_file".into(),
+                description: "read".into(),
+                parameters: json!({"type": "object"}),
+            }]
+        }
+
+        async fn call(&self, call: &ToolCall, _approval: &dyn ApprovalHandler) -> ToolResult {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            ToolResult::success(call.id.clone())
+        }
+    }
+
+    struct ParallelReadProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ModelProvider for ParallelReadProvider {
+        fn provider_id(&self) -> &str {
+            "mock"
+        }
+        fn model(&self) -> &str {
+            "mock-model"
+        }
+
+        async fn complete(&self, request: ModelRequest) -> Result<ModelResponse> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(ModelResponse {
+                    tool_calls: vec![
+                        ToolCall {
+                            id: "first".into(),
+                            name: "read_file".into(),
+                            arguments: json!({"path": "a"}),
+                        },
+                        ToolCall {
+                            id: "second".into(),
+                            name: "read_file".into(),
+                            arguments: json!({"path": "b"}),
+                        },
+                    ],
+                    ..ModelResponse::default()
+                });
+            }
+            let outputs = request
+                .messages
+                .iter()
+                .filter(|message| message.role == crate::Role::Tool)
+                .collect::<Vec<_>>();
+            assert_eq!(outputs.len(), 2);
+            assert!(outputs[0].content.contains("first"));
+            assert!(outputs[1].content.contains("second"));
+            Ok(ModelResponse {
+                content: "done".into(),
+                ..ModelResponse::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn independent_read_tools_run_concurrently_and_keep_result_order() {
+        let mut session = Session::new("mock", "mock-model", PathBuf::from("."));
+        let provider = ParallelReadProvider {
+            calls: AtomicUsize::new(0),
+        };
+        let started = Instant::now();
+        Agent::new("test")
+            .run_turn(
+                &mut session,
+                "read",
+                &provider,
+                &ParallelReadTools,
+                &Approve,
+                &NoopObserver,
+            )
+            .await
+            .expect("parallel reads should complete");
+        assert!(started.elapsed() < Duration::from_millis(1_700));
     }
 
     struct QueuedInputProvider {
@@ -1058,7 +1365,7 @@ mod tests {
             calls: AtomicUsize::new(0),
         };
         let mut session = Session::new("mock", "invalid-tool", PathBuf::from("."));
-        let error = Agent::new("test")
+        let output = Agent::new("test")
             .run_turn(
                 &mut session,
                 "run",
@@ -1068,14 +1375,114 @@ mod tests {
                 &NoopObserver,
             )
             .await
-            .expect_err("second invalid call should terminate");
-        assert!(error.to_string().contains("after one correction attempt"));
+            .expect("second invalid call should remain recoverable");
+        assert!(output.contains("仍未通过校验"));
         assert_eq!(tools.calls.load(Ordering::SeqCst), 0);
         let requests = provider.requests.lock().expect("requests");
         assert_eq!(requests.len(), 2);
         assert!(requests[1].messages.iter().any(|message| {
-            message.internal && message.content.contains("tool_call_correction")
+            message.internal
+                && message.content.contains("tool_call_correction")
+                && message.content.contains("json_schema")
         }));
+    }
+
+    struct RepeatedCallProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ModelProvider for RepeatedCallProvider {
+        fn provider_id(&self) -> &str {
+            "mock"
+        }
+
+        fn model(&self) -> &str {
+            "repeated-tool"
+        }
+
+        async fn complete(&self, _request: ModelRequest) -> Result<ModelResponse> {
+            let round = self.calls.fetch_add(1, Ordering::SeqCst);
+            if round < 3 {
+                return Ok(ModelResponse {
+                    tool_calls: vec![ToolCall {
+                        id: format!("call-{round}"),
+                        name: "echo".into(),
+                        arguments: json!({"value": "same"}),
+                    }],
+                    ..Default::default()
+                });
+            }
+            Ok(ModelResponse {
+                content: "done".into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    struct FailingTool {
+        calls: AtomicUsize,
+        output: &'static str,
+    }
+
+    #[async_trait]
+    impl ToolRuntime for FailingTool {
+        fn specs(&self) -> Vec<ToolSpec> {
+            EchoTool.specs()
+        }
+
+        async fn call(&self, _call: &ToolCall, _approval: &dyn ApprovalHandler) -> ToolResult {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            ToolResult::error(self.output)
+        }
+    }
+
+    #[tokio::test]
+    async fn unchanged_generic_failure_is_executed_at_most_twice() {
+        let provider = RepeatedCallProvider {
+            calls: AtomicUsize::new(0),
+        };
+        let tools = FailingTool {
+            calls: AtomicUsize::new(0),
+            output: "process exited with code 1",
+        };
+        let mut session = Session::new("mock", "repeated-tool", PathBuf::from("."));
+        Agent::new("test")
+            .run_turn(
+                &mut session,
+                "run",
+                &provider,
+                &tools,
+                &Approve,
+                &NoopObserver,
+            )
+            .await
+            .expect("turn remains recoverable");
+        assert_eq!(tools.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn unchanged_permission_failure_is_not_retried() {
+        let provider = RepeatedCallProvider {
+            calls: AtomicUsize::new(0),
+        };
+        let tools = FailingTool {
+            calls: AtomicUsize::new(0),
+            output: "permission denied by sandbox policy",
+        };
+        let mut session = Session::new("mock", "repeated-tool", PathBuf::from("."));
+        Agent::new("test")
+            .run_turn(
+                &mut session,
+                "run",
+                &provider,
+                &tools,
+                &Approve,
+                &NoopObserver,
+            )
+            .await
+            .expect("turn remains recoverable");
+        assert_eq!(tools.calls.load(Ordering::SeqCst), 1);
     }
 
     struct ImageFallbackProvider {
@@ -1211,7 +1618,7 @@ mod tests {
             });
             assert_eq!(is_transient_provider_error(&error), retryable);
             if status == 429 {
-                assert_eq!(retry_delay_ms(&error, 1), 30_000);
+                assert_eq!(retry_delay_ms(&error, 1, 1_000, 30_000), 30_000);
             }
         }
     }

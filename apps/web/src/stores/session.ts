@@ -39,6 +39,8 @@ export const useSessionStore = defineStore('session', () => {
   let connectedSessionId = ''
   let persistTimer: ReturnType<typeof setTimeout> | null = null
   let turnToolTrace: ToolDiagnosticTrace[] = []
+  let consecutiveToolFailures = 0
+  let maxConsecutiveToolFailures = 0
   const transport = shallowRef<Transport | null>(null)
 
   const isBusy = computed(() => runState.value !== 'idle')
@@ -47,14 +49,8 @@ export const useSessionStore = defineStore('session', () => {
 
   persistActiveSessionId(sessionId.value)
 
-  /** 通知原生层任务状态：更新通知栏常驻通知（执行中 / 已完成）。 */
-  function syncTaskStatus(status: 'running' | 'done') {
-    window.CoomiAndroid?.updateTaskStatus?.(status)
-  }
-  watch(runState, (state) => {
-    if (state === 'idle') syncTaskStatus('done')
-    else if (state !== 'awaiting_approval' && state !== 'awaiting_question') syncTaskStatus('running')
-  })
+  // Native task status is derived from /api/tasks in the sessions store. A
+  // foreground idle session must not overwrite another session's running state.
 
   /** 发送内置引导（EmptyState 引导卡）：先置用户标题消息，再让引擎流式推正文。 */
   const GUIDE_TITLES: Record<string, string> = {
@@ -109,10 +105,11 @@ export const useSessionStore = defineStore('session', () => {
     const t = createTransport(targetSessionId, wsUrl)
     transport.value = t
     connectedSessionId = targetSessionId
-    t.onStateChange(s => {
+    let lastEventSeq = 0
+    t.onStateChange(status => {
       if (transport.value !== t || sessionId.value !== targetSessionId) return
-      connection.setState(s)
-      if (s === 'open') {
+      connection.setStatus(status)
+      if (status.state === 'open') {
         t.send({ command: 'set_permission_mode', mode: config.permissionMode })
         if (config.currentProviderId && config.currentModel) {
           t.send({ command: 'select_model', provider_id: config.currentProviderId, model: config.currentModel })
@@ -123,6 +120,17 @@ export const useSessionStore = defineStore('session', () => {
     })
     t.onMessage(env => {
       if (transport.value !== t || sessionId.value !== targetSessionId) return
+      if (env.type === 'event' && env.payload.event_seq) {
+        const seq = env.payload.event_seq
+        if (seq <= lastEventSeq) {
+          t.send({ command: 'ack_event', event_seq: seq })
+          return
+        }
+        lastEventSeq = seq
+        onInbound(env)
+        t.send({ command: 'ack_event', event_seq: seq })
+        return
+      }
       onInbound(env)
     })
     t.connect()
@@ -171,9 +179,11 @@ export const useSessionStore = defineStore('session', () => {
             trace.status = ev.is_error ? 'error' : 'success'
             trace.elapsedMs = Math.max(0, Math.round(ev.elapsed * 1000))
             if (ev.is_error) {
+              consecutiveToolFailures += 1
+              maxConsecutiveToolFailures = Math.max(maxConsecutiveToolFailures, consecutiveToolFailures)
               trace.category = classifyToolError(ev.result_preview)
               trace.errorSummary = sanitizeDiagnosticText(ev.result_preview)
-            }
+            } else consecutiveToolFailures = 0
           }
         }
         break
@@ -182,6 +192,7 @@ export const useSessionStore = defineStore('session', () => {
         {
           const trace = turnToolTrace.find(item => item.callId === ev.call_id)
           if (trace) trace.status = 'success'
+          consecutiveToolFailures = 0
         }
         break
       case 'tool_approval_request':
@@ -256,24 +267,26 @@ export const useSessionStore = defineStore('session', () => {
         endAssistantStream(); cancelRunningTools(); connection.setRetry(null); runState.value = 'idle'
         {
           const failures = turnToolTrace.filter(item => item.status === 'error').length
-          if (failures >= 3) {
+          if (maxConsecutiveToolFailures >= 3) {
             const trace = turnToolTrace.map(item => ({ ...item, callId: undefined }))
             const noticeId = nextId()
             timeline.value.push({
               kind: 'notice', id: noticeId, tone: 'warn', analysisStatus: 'consent', feedbackEligible: true,
-              text: `本轮任务中工具调用失败 ${failures} 次，建议反馈错误记录。注意此信息不是报错。本次反馈需额外轻量调用一次当前模型 API 进行脱敏整理。`,
+              text: `同一任务链连续 ${maxConsecutiveToolFailures} 次工具调用未恢复，建议反馈脱敏错误记录。`,
               analysisTrace: trace,
               failureCount: failures,
             })
           }
         }
         turnToolTrace = []
+        consecutiveToolFailures = 0
+        maxConsecutiveToolFailures = 0
         persistSoon()
         break
       case 'session_state': {
         // 重连后引擎告知本会话是否仍在后台执行（切走会话后任务继续跑）。
         sessions.refreshRunning()
-        if (ev.running && runState.value === 'idle') runState.value = 'thinking'
+        runState.value = ev.running ? 'thinking' : 'idle'
         break
       }
       case 'session_loaded': {
@@ -477,7 +490,7 @@ export const useSessionStore = defineStore('session', () => {
     endAssistantStream()
     usage.value = null
     loop.value = { active: false, currentStep: 0, totalSteps: 0, status: '' }
-    runState.value = 'idle'
+    runState.value = 'syncing'
     const targetId = isUuid(id) ? id : sessions.migrateId(id, createSessionId())
     activateSession(targetId)
     const restoredFromEngine = await restoreFromEngine(targetId)

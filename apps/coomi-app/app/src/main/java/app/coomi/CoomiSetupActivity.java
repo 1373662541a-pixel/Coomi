@@ -46,6 +46,7 @@ public class CoomiSetupActivity extends AppCompatActivity {
         CoomiTheme.applyTheme(this);
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_coomi_setup);
+        CoomiTheme.applyPageSystemBars(this);
 
         mViewPager = findViewById(R.id.setup_viewpager);
         mNavigationBar = findViewById(R.id.setup_nav_bar);
@@ -97,6 +98,12 @@ public class CoomiSetupActivity extends AppCompatActivity {
         updateNavButtons(startStep);
     }
 
+    @Override
+    protected void onResume() {
+        super.onResume();
+        CoomiTheme.applyPageSystemBars(this);
+    }
+
     private void updateNavButtons(int position) {
         mBackButton.setText(mSettingsMode || position == 0 ? R.string.coomi_setup_cancel : R.string.coomi_setup_back);
         mNextButton.setText(position == STEP_COUNT - 1 ? R.string.coomi_setup_finish : R.string.coomi_setup_next);
@@ -109,6 +116,7 @@ public class CoomiSetupActivity extends AppCompatActivity {
             pill.setBackgroundResource(i <= position
                 ? R.drawable.coomi_step_active
                 : R.drawable.coomi_step_idle);
+            CoomiTheme.applyCustomColors(this, pill);
         }
     }
 

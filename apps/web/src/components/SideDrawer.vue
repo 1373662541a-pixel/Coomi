@@ -106,6 +106,11 @@ function openDashboard() {
         <span class="nicon"><CoomiIcon name="pencil" :size="17" /></span>
         <span>开启新对话</span>
       </button>
+      <button class="taskrow" @click="go('/tasks')">
+        <CoomiIcon name="subtask" :size="17" />
+        <span>任务中心</span>
+        <span v-if="sessions.runningIds.size" class="task-count">{{ sessions.runningIds.size }}</span>
+      </button>
 
       <div class="list">
         <!-- 历史会话列表始终可见；「全局会话记忆」开关只控制模型能否读取这些记录。 -->
@@ -191,7 +196,7 @@ function openDashboard() {
   width: 82%; max-width: 340px;
   padding-top: var(--safe-top);
   background: var(--bg);
-  box-shadow: var(--shadow-drawer);
+  box-shadow: none;
   transform: translateX(-102%);
   transition: transform .3s cubic-bezier(.22, .68, .19, 1);
 }
@@ -224,6 +229,13 @@ function openDashboard() {
   font-size: 15.5px; font-weight: 600; color: var(--blue);
 }
 .newrow:active { background: var(--fill); }
+.taskrow {
+  display: flex; align-items: center; gap: 10px;
+  margin: 0 10px 5px; min-height: 40px; padding: 7px 10px;
+  border-radius: var(--r-md); color: var(--text-2); font-size: 14px; text-align: left;
+}
+.taskrow:active { background: var(--fill); }
+.task-count { margin-left: auto; min-width: 22px; padding: 2px 7px; border-radius: var(--r-pill); background: var(--blue); color: #fff; font-size: 11px; text-align: center; }
 .nicon {
   display: grid; place-items: center; width: 30px; height: 30px;
   border-radius: 50%; background: var(--blue-soft);

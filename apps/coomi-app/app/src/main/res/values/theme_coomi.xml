@@ -196,6 +196,7 @@
     <!-- ==================== 文字 ==================== -->
 
     <style name="Coomi.Text" parent="">
+        <item name="android:tag">coomi:text</item>
         <!-- 不设 textColor：走主题 android:textColorPrimary，夜间自动变浅 -->
         <item name="android:textSize">@dimen/coomi_text_body</item>
         <item name="android:lineSpacingExtra">3sp</item>
@@ -223,18 +224,21 @@
     </style>
 
     <style name="Coomi.Text.Secondary">
+        <item name="android:tag">coomi:text2</item>
         <item name="android:textColor">?attr/coomiText2</item>
         <item name="android:textSize">@dimen/coomi_text_secondary</item>
         <item name="android:lineSpacingExtra">4sp</item>
     </style>
 
     <style name="Coomi.Text.Caption">
+        <item name="android:tag">coomi:text3</item>
         <item name="android:textColor">?attr/coomiText3</item>
         <item name="android:textSize">@dimen/coomi_text_caption</item>
     </style>
 
     <!-- 卡片组上方的小节标题 -->
     <style name="Coomi.Text.SectionLabel">
+        <item name="android:tag">coomi:text3</item>
         <item name="android:textColor">?attr/coomiText3</item>
         <item name="android:textSize">@dimen/coomi_text_caption</item>
         <item name="android:textStyle">bold</item>
@@ -245,6 +249,7 @@
 
     <!-- 等宽：日志 / 版本号 / 命令 -->
     <style name="Coomi.Text.Mono">
+        <item name="android:tag">coomi:text2</item>
         <item name="android:fontFamily">monospace</item>
         <item name="android:textColor">?attr/coomiText2</item>
         <item name="android:textSize">@dimen/coomi_text_caption</item>
@@ -255,6 +260,7 @@
     <!-- ==================== 按钮 ==================== -->
 
     <style name="Coomi.Button" parent="">
+        <item name="android:tag">coomi:button-primary</item>
         <item name="android:background">@drawable/coomi_bg_button_primary</item>
         <item name="android:textColor">@color/coomi_button_primary_text</item>
         <item name="android:textSize">@dimen/coomi_text_heading</item>
@@ -272,24 +278,28 @@
 
     <!-- 次级：浅灰底深字 -->
     <style name="Coomi.Button.Secondary">
+        <item name="android:tag">coomi:button-secondary</item>
         <item name="android:background">@drawable/coomi_bg_button_secondary</item>
         <item name="android:textColor">?attr/coomiText2</item>
     </style>
 
     <!-- 描边：白底蓝字 -->
     <style name="Coomi.Button.Outline">
+        <item name="android:tag">coomi:button-outline</item>
         <item name="android:background">@drawable/coomi_bg_button_outline</item>
         <item name="android:textColor">?attr/coomiBlue</item>
     </style>
 
     <!-- 危险：白底红字描边 -->
     <style name="Coomi.Button.Danger">
+        <item name="android:tag">coomi:button-danger</item>
         <item name="android:background">@drawable/coomi_bg_button_danger</item>
         <item name="android:textColor">?attr/coomiDanger</item>
     </style>
 
     <!-- 小号胶囊：卡片内的「允许」「重试」 -->
     <style name="Coomi.Button.Pill">
+        <item name="android:tag">coomi:button-primary</item>
         <item name="android:background">@drawable/coomi_bg_pill_blue</item>
         <item name="android:textColor">@color/coomi_text_on_blue</item>
         <item name="android:textSize">@dimen/coomi_text_secondary</item>
@@ -300,6 +310,7 @@
     </style>
 
     <style name="Coomi.Button.Pill.Warning" parent="Coomi.Button.Pill">
+        <item name="android:tag">coomi:button-warning</item>
         <item name="android:background">@drawable/coomi_bg_pill_warning</item>
         <item name="android:textColor">@color/coomi_warn</item>
         <item name="android:textStyle">bold</item>
@@ -308,6 +319,7 @@
 
     <!-- 文字按钮 -->
     <style name="Coomi.Button.Text">
+        <item name="android:tag">coomi:button-text</item>
         <item name="android:background">@drawable/coomi_bg_ghost</item>
         <item name="android:textColor">?attr/coomiBlue</item>
         <item name="android:textSize">@dimen/coomi_text_body</item>
@@ -320,6 +332,7 @@
     <!-- ==================== 输入 ==================== -->
 
     <style name="Coomi.Input" parent="Widget.AppCompat.EditText">
+        <item name="android:tag">coomi:input</item>
         <item name="android:background">@drawable/coomi_bg_input</item>
         <item name="android:textColor">?attr/coomiText</item>
         <item name="android:textColorHint">?attr/coomiText3</item>
@@ -343,6 +356,7 @@
 
     <!-- 白色卡片 -->
     <style name="Coomi.Card" parent="">
+        <item name="android:tag">coomi:card</item>
         <item name="android:background">@drawable/coomi_bg_card</item>
         <item name="android:orientation">vertical</item>
         <item name="android:layout_width">match_parent</item>
@@ -351,6 +365,7 @@
 
     <!-- 卡片内一行（可点） -->
     <style name="Coomi.Row" parent="">
+        <item name="android:tag">coomi:row</item>
         <item name="android:background">@drawable/coomi_bg_row</item>
         <item name="android:orientation">horizontal</item>
         <item name="android:gravity">center_vertical</item>
@@ -363,6 +378,7 @@
 
     <!-- 1px 分隔线 -->
     <style name="Coomi.Divider" parent="">
+        <item name="android:tag">coomi:divider</item>
         <item name="android:layout_width">match_parent</item>
         <item name="android:layout_height">1dp</item>
         <item name="android:layout_marginStart">@dimen/coomi_space_l</item>
@@ -386,6 +402,7 @@
         选中态由 coomi_bg_provider_card（浅蓝底+蓝描边）+ 右侧对勾表达。
     -->
     <style name="Coomi.ProviderCard" parent="">
+        <item name="android:tag">coomi:provider-card</item>
         <item name="android:layout_width">match_parent</item>
         <item name="android:layout_height">wrap_content</item>
         <item name="android:background">@drawable/coomi_bg_provider_card</item>

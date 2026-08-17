@@ -52,7 +52,7 @@ public class CoomiEngineMonitor extends Service {
     private boolean mRestartInFlight = false;
     private String mCurrentStatus = "Starting...";
 
-    /** 任务执行状态（由前端 JS 桥 updateTaskStatus 更新）：null=无任务 / running / done。 */
+    /** Task state from the Web bridge: done or running:&lt;count&gt;. */
     private static volatile String sTaskStatus = null;
     /** 当前运行中的 Monitor 实例（静态持有，供任务状态回调即时刷新通知）。 */
     private static volatile CoomiEngineMonitor sInstance = null;
@@ -62,7 +62,20 @@ public class CoomiEngineMonitor extends Service {
         sTaskStatus = status;
         CoomiEngineMonitor instance = sInstance;
         if (instance != null) {
+            instance.updateWakeLockForTask();
             instance.updateStatus(instance.mCurrentStatus);
+        }
+    }
+
+    private static int runningTaskCount() {
+        String status = sTaskStatus;
+        if (status == null) return 0;
+        if ("running".equals(status)) return 1;
+        if (!status.startsWith("running:")) return 0;
+        try {
+            return Math.max(0, Integer.parseInt(status.substring("running:".length())));
+        } catch (NumberFormatException ignored) {
+            return 0;
         }
     }
 
@@ -114,7 +127,7 @@ public class CoomiEngineMonitor extends Service {
         if (pm != null) {
             mWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Coomi::EngineMonitor");
             mWakeLock.setReferenceCounted(false);
-            acquireWakeLock();
+            updateWakeLockForTask();
         }
     }
 
@@ -143,16 +156,9 @@ public class CoomiEngineMonitor extends Service {
 
     @Override
     public void onTaskRemoved(Intent rootIntent) {
-        // 用户从最近任务划掉 app：终止引擎及其全部子进程，并停止保活服务。
-        // （Rust 引擎收到 SIGTERM 后会先清理所有由它启动的工具进程。）
-        Logger.logInfo(LOG_TAG, "Task removed; shutting down engine and monitor");
-        if (mBound && mCoomiService != null) {
-            mCoomiService.stopEngine(null);
-        }
-        try {
-            stopService(new Intent(this, CoomiService.class));
-        } catch (Exception ignored) { /* service may be gone */ }
-        stopSelf();
+        // 划掉界面只表示 UI detach；前台服务与引擎继续执行后台任务。
+        // 只有控制台里的显式停止操作才终止引擎及其子进程。
+        Logger.logInfo(LOG_TAG, "Task removed; keeping engine and active tasks running");
         super.onTaskRemoved(rootIntent);
     }
 
@@ -269,10 +275,10 @@ public class CoomiEngineMonitor extends Service {
 
     private Notification buildNotification(String contentText) {
         // 任务执行状态拼进正文：如「Coomi: 运行中 · 任务执行中」
-        String status = sTaskStatus;
-        if ("running".equals(status)) {
-            contentText += " · 任务执行中";
-        } else if ("done".equals(status)) {
+        int runningTasks = runningTaskCount();
+        if (runningTasks > 0) {
+            contentText += " · " + runningTasks + " 个任务执行中";
+        } else if ("done".equals(sTaskStatus)) {
             contentText += " · 任务已完成";
         }
         return new NotificationCompat.Builder(this, CoomiConstants.NOTIFICATION_CHANNEL_ID)
@@ -297,10 +303,20 @@ public class CoomiEngineMonitor extends Service {
 
     private void reacquireWakeLockIfNeeded() {
         if (mWakeLock == null) return;
+        if (runningTaskCount() == 0) {
+            if (mWakeLock.isHeld()) mWakeLock.release();
+            return;
+        }
         long elapsed = System.currentTimeMillis() - mWakeLockLastAcquired;
         if (elapsed >= WAKELOCK_REACQUIRE_INTERVAL_MS) {
             if (mWakeLock.isHeld()) mWakeLock.release();
             acquireWakeLock();
         }
+    }
+
+    private void updateWakeLockForTask() {
+        if (mWakeLock == null) return;
+        if (runningTaskCount() > 0) acquireWakeLock();
+        else if (mWakeLock.isHeld()) mWakeLock.release();
     }
 }

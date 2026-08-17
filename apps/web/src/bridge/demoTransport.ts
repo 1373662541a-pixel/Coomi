@@ -1,6 +1,6 @@
 import type { AgentEvent } from '@/protocol/events'
 import { PROTOCOL_VERSION, type AgentCommand, type InboundEnvelope } from '@/protocol/commands'
-import type { ConnectionState, Transport } from './transport'
+import type { ConnectionState, ConnectionStatus, Transport } from './transport'
 import { emitCancelled, playDemoRun, type DemoCtx } from './demoScript'
 import { nextId } from './envelope'
 
@@ -15,7 +15,7 @@ class DemoAbort extends Error {}
  */
 export class DemoTransport implements Transport {
   private msgHandlers: ((env: InboundEnvelope) => void)[] = []
-  private stateHandlers: ((state: ConnectionState) => void)[] = []
+  private stateHandlers: ((status: ConnectionStatus) => void)[] = []
   private timers = new Set<ReturnType<typeof setTimeout>>()
   private running = false
   private closed = false
@@ -64,7 +64,7 @@ export class DemoTransport implements Transport {
   }
 
   onMessage(handler: (env: InboundEnvelope) => void): void { this.msgHandlers.push(handler) }
-  onStateChange(handler: (state: ConnectionState) => void): void { this.stateHandlers.push(handler) }
+  onStateChange(handler: (status: ConnectionStatus) => void): void { this.stateHandlers.push(handler) }
 
   private async run(): Promise<void> {
     this.running = true
@@ -128,5 +128,5 @@ export class DemoTransport implements Transport {
     this.msgHandlers.forEach(h => h(env))
   }
 
-  private emitState(state: ConnectionState): void { this.stateHandlers.forEach(h => h(state)) }
+  private emitState(state: ConnectionState): void { this.stateHandlers.forEach(h => h({ state })) }
 }

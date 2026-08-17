@@ -56,7 +56,7 @@ export async function apiGet<T>(path: string): Promise<T> {
   return r.json() as Promise<T>
 }
 
-export async function apiSend<T>(path: string, method: 'POST' | 'DELETE', body?: unknown): Promise<T> {
+export async function apiSend<T>(path: string, method: 'POST' | 'PUT' | 'DELETE', body?: unknown): Promise<T> {
   const r = await authedFetch(`${API_BASE}${path}`, {
     method,
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },

@@ -3,9 +3,9 @@
  * 设置。分组白卡 + 行的结构，选中态用蓝勾而不是描边 ——
  * 和抽屉、空态里的选中语言保持一致。
  */
-import { computed, ref, onMounted } from 'vue'
+import { computed, ref, onBeforeUnmount, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { useConfigStore, PERMISSION_MODES, REASONING_EFFORTS, THEME_MODES } from '@/stores/config'
+import { useConfigStore, DEFAULT_CONNECTION_SETTINGS, PERMISSION_MODES, REASONING_EFFORTS, THEME_MODES, type ConnectionSettings } from '@/stores/config'
 import { useSessionStore } from '@/stores/session'
 import { useSessionsStore } from '@/stores/sessions'
 import { useConnectionStore } from '@/stores/connection'
@@ -19,6 +19,35 @@ const config = useConfigStore()
 const session = useSessionStore()
 const sessions = useSessionsStore()
 const connection = useConnectionStore()
+const connectionDraft = ref<ConnectionSettings>({ ...config.connectionSettings })
+const connectionError = ref('')
+const connectionSaved = ref(false)
+const customAppearanceEnabled = ref(document.documentElement.dataset.customAppearance === 'true')
+
+function syncCustomAppearance() {
+  customAppearanceEnabled.value = document.documentElement.dataset.customAppearance === 'true'
+}
+
+function resetConnectionSettings() {
+  connectionDraft.value = { ...DEFAULT_CONNECTION_SETTINGS }
+  void saveConnectionSettings()
+}
+
+async function saveConnectionSettings() {
+  connectionError.value = ''
+  connectionSaved.value = false
+  const value = connectionDraft.value
+  if (!Number.isInteger(value.providerRetryCount) || value.providerRetryCount < 0 || value.providerRetryCount > 10
+    || !Number.isInteger(value.wsRetryCount) || value.wsRetryCount < 0 || value.wsRetryCount > 30
+    || !Number.isInteger(value.reconnectInitialDelayMs) || value.reconnectInitialDelayMs < 500 || value.reconnectInitialDelayMs > 60_000
+    || !Number.isInteger(value.reconnectMaxDelayMs) || value.reconnectMaxDelayMs < 1_000 || value.reconnectMaxDelayMs > 120_000
+    || value.reconnectMaxDelayMs < value.reconnectInitialDelayMs) {
+    connectionError.value = '请检查范围，且最大间隔不能小于首次间隔'
+    return
+  }
+  if (await config.saveConnectionSettings(value)) connectionSaved.value = true
+  else connectionError.value = '保存失败，请确认引擎已连接'
+}
 
 /** 全局记忆开关同步失败时的行内提示。 */
 const gmError = ref('')
@@ -65,7 +94,9 @@ function isCurrent(providerId: string, model: string): boolean {
 
 /** 进入设置页时拉取定制提示词与统计开关状态（旧引擎无统计接口时保持默认）。 */
 onMounted(async () => {
+  window.addEventListener('coomi:appearance-changed', syncCustomAppearance)
   void config.fetchCustomPrompt()
+  if (await config.fetchConnectionSettings()) connectionDraft.value = { ...config.connectionSettings }
   try {
     const res = await authedFetch('/api/settings/telemetry')
     if (res.ok) {
@@ -74,6 +105,8 @@ onMounted(async () => {
     }
   } catch { /* 旧引擎进程：接口不存在，保持默认开启 */ }
 })
+
+onBeforeUnmount(() => window.removeEventListener('coomi:appearance-changed', syncCustomAppearance))
 </script>
 <template>
   <div class="page">
@@ -128,6 +161,31 @@ onMounted(async () => {
       </div>
       <p class="option-note">默认 192，256 为进阶选项，512 为硬上限。</p>
 
+      <p class="sec-label">连接与重试</p>
+      <div class="group numeric-settings">
+        <label class="number-row">
+          <span class="rt"><span class="rmain">模型重试次数</span><span class="rsub">瞬时网络或上游故障，0 表示禁用</span></span>
+          <input v-model.number="connectionDraft.providerRetryCount" type="number" min="0" max="10" step="1" inputmode="numeric" aria-label="模型重试次数" />
+        </label>
+        <label class="number-row">
+          <span class="rt"><span class="rmain">WebSocket 重连次数</span><span class="rsub">界面与引擎断开后的尝试次数</span></span>
+          <input v-model.number="connectionDraft.wsRetryCount" type="number" min="0" max="30" step="1" inputmode="numeric" aria-label="WebSocket 重连次数" />
+        </label>
+        <label class="number-row">
+          <span class="rt"><span class="rmain">首次重连间隔</span><span class="rsub">500 - 60000 毫秒</span></span>
+          <input v-model.number="connectionDraft.reconnectInitialDelayMs" type="number" min="500" max="60000" step="100" inputmode="numeric" aria-label="首次重连间隔（毫秒）" />
+        </label>
+        <label class="number-row">
+          <span class="rt"><span class="rmain">最大重连间隔</span><span class="rsub">1000 - 120000 毫秒</span></span>
+          <input v-model.number="connectionDraft.reconnectMaxDelayMs" type="number" min="1000" max="120000" step="500" inputmode="numeric" aria-label="最大重连间隔（毫秒）" />
+        </label>
+        <div class="settings-actions">
+          <span class="save-state" :class="{ err: !!connectionError }">{{ connectionError || (connectionSaved ? '已保存，新连接生效' : '') }}</span>
+          <button class="text-action" type="button" @click="resetConnectionSettings">恢复默认</button>
+          <button class="primary-action" type="button" @click="saveConnectionSettings">保存</button>
+        </div>
+      </div>
+
       <p class="sec-label">身份定位</p>
       <div class="group">
         <button class="row" @click="router.push('/persona')">
@@ -141,8 +199,8 @@ onMounted(async () => {
       </div>
 
       <p class="sec-label">外观</p>
-      <div class="group">
-        <button v-for="m in THEME_MODES" :key="m.mode" class="row" @click="config.setThemeMode(m.mode)">
+      <div class="group theme-options" :class="{ disabled: customAppearanceEnabled }">
+        <button v-for="m in THEME_MODES" :key="m.mode" class="row" :disabled="customAppearanceEnabled" @click="config.setThemeMode(m.mode)">
           <span class="ri" :class="{ on: config.themeMode === m.mode }">
             <CoomiIcon :name="m.mode === 'dark' ? 'moon' : m.mode === 'light' ? 'sun' : 'phone'" :size="17" />
           </span>
@@ -222,6 +280,18 @@ onMounted(async () => {
 }
 .row + .row { border-top: 1px solid var(--border); }
 .row:active { background: var(--fill); }
+.theme-options.disabled { opacity: .42; }
+.theme-options .row:disabled { color: inherit; cursor: default; }
+.theme-options .row:disabled:active { background: var(--bg); }
+.number-row { display: flex; align-items: center; gap: 12px; min-height: 64px; padding: 10px 13px; }
+.number-row + .number-row { border-top: 1px solid var(--border); }
+.number-row input { width: 92px; height: 38px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--page); color: var(--text); text-align: right; font-variant-numeric: tabular-nums; }
+.settings-actions { display: flex; align-items: center; gap: 8px; min-height: 50px; padding: 8px 12px; border-top: 1px solid var(--border); }
+.save-state { flex: 1; min-width: 0; font-size: 12px; color: var(--ok); }
+.save-state.err { color: var(--danger, #d43d2e); }
+.text-action, .primary-action { height: 34px; padding: 0 11px; border-radius: 6px; font-size: 13px; }
+.text-action { color: var(--text-2); background: var(--fill); }
+.primary-action { color: #fff; background: var(--blue); }
 
 .ri {
   display: grid; place-items: center; flex-shrink: 0;

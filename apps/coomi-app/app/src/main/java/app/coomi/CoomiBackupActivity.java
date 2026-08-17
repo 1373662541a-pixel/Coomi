@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ContentValues;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -12,6 +13,13 @@ import android.provider.MediaStore;
 import android.view.View;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.widget.ArrayAdapter;
+import android.widget.AdapterView;
+import android.widget.CheckBox;
+import android.widget.Spinner;
+import android.widget.Switch;
+
+import androidx.documentfile.provider.DocumentFile;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -45,16 +53,27 @@ public class CoomiBackupActivity extends Activity {
 
     private static final int REQ_IMPORT = 4001;
     private static final int REQ_EXPORT = 4002;
+    private static final int REQ_AUTO_DIRECTORY = 4003;
 
     private TextView mStatusText;
     private String mAppliedThemeMode;
+    private String mAppliedAppearanceSignature;
     private File mPendingBackup;
+    private SharedPreferences mAutoPreferences;
+    private Switch mAutoEnabled;
+    private TextView mAutoDirectory;
+    private Spinner mAutoInterval;
+    private Spinner mAutoKeep;
+    private CheckBox mAutoCharging;
+    private CheckBox mAutoWifi;
+    private TextView mAutoStatus;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         CoomiTheme.applyPageTheme(this);
         super.onCreate(savedInstanceState);
         mAppliedThemeMode = CoomiTheme.getMode(this);
+        mAppliedAppearanceSignature = CoomiTheme.appearanceSignature(this);
         setContentView(R.layout.activity_coomi_backup);
         CoomiTheme.applyPageSystemBars(this);
 
@@ -63,6 +82,113 @@ public class CoomiBackupActivity extends Activity {
         findViewById(R.id.btn_backup_back).setOnClickListener(v -> finish());
         findViewById(R.id.btn_backup_action).setOnClickListener(v -> backupData());
         findViewById(R.id.btn_backup_import).setOnClickListener(v -> pickBackupZip());
+        bindAutoBackupControls();
+    }
+
+    private void bindAutoBackupControls() {
+        mAutoPreferences = CoomiAutoBackup.preferences(this);
+        mAutoEnabled = findViewById(R.id.switch_auto_backup);
+        mAutoDirectory = findViewById(R.id.txt_auto_backup_directory);
+        mAutoInterval = findViewById(R.id.spinner_auto_backup_interval);
+        mAutoKeep = findViewById(R.id.spinner_auto_backup_keep);
+        mAutoCharging = findViewById(R.id.check_auto_backup_charging);
+        mAutoWifi = findViewById(R.id.check_auto_backup_wifi);
+        mAutoStatus = findViewById(R.id.txt_auto_backup_status);
+
+        String[] intervals = {"每 6 小时", "每 12 小时", "每天", "每 3 天", "每 7 天"};
+        mAutoInterval.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, intervals));
+        String[] keep = new String[30];
+        for (int index = 0; index < keep.length; index++) keep[index] = "保留 " + (index + 1) + " 份";
+        mAutoKeep.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, keep));
+        loadAutoBackupControls();
+
+        findViewById(R.id.row_auto_backup_directory).setOnClickListener(v -> chooseAutoBackupDirectory());
+        findViewById(R.id.btn_auto_backup_now).setOnClickListener(v -> {
+            if (CoomiAutoBackup.directoryUri(this) == null) {
+                Toast.makeText(this, "请先选择自动备份目录", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            CoomiAutoBackup.runNow(this);
+            Toast.makeText(this, "已加入备份队列", Toast.LENGTH_SHORT).show();
+        });
+        mAutoEnabled.setOnCheckedChangeListener((button, checked) -> {
+            if (checked && CoomiAutoBackup.directoryUri(this) == null) {
+                button.setChecked(false);
+                Toast.makeText(this, "请先选择自动备份目录", Toast.LENGTH_SHORT).show();
+                chooseAutoBackupDirectory();
+                return;
+            }
+            saveAutoBackupControls();
+        });
+        mAutoInterval.setOnItemSelectedListener(new SimpleItemSelectedListener(this::saveAutoBackupControls));
+        mAutoKeep.setOnItemSelectedListener(new SimpleItemSelectedListener(this::saveAutoBackupControls));
+        mAutoCharging.setOnCheckedChangeListener((button, checked) -> saveAutoBackupControls());
+        mAutoWifi.setOnCheckedChangeListener((button, checked) -> saveAutoBackupControls());
+    }
+
+    private void chooseAutoBackupDirectory() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+            | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+            | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+        startActivityForResult(intent, REQ_AUTO_DIRECTORY);
+    }
+
+    private void loadAutoBackupControls() {
+        if (mAutoPreferences == null) return;
+        mAutoEnabled.setChecked(mAutoPreferences.getBoolean(CoomiAutoBackup.KEY_ENABLED, false));
+        int interval = CoomiAutoBackup.normalizeInterval(
+            mAutoPreferences.getInt(CoomiAutoBackup.KEY_INTERVAL_HOURS, CoomiAutoBackup.DEFAULT_INTERVAL_HOURS));
+        int intervalIndex = 2;
+        for (int index = 0; index < CoomiAutoBackup.INTERVAL_HOURS.length; index++) {
+            if (CoomiAutoBackup.INTERVAL_HOURS[index] == interval) intervalIndex = index;
+        }
+        mAutoInterval.setSelection(intervalIndex);
+        int keep = Math.max(1, Math.min(30,
+            mAutoPreferences.getInt(CoomiAutoBackup.KEY_KEEP_COUNT, CoomiAutoBackup.DEFAULT_KEEP_COUNT)));
+        mAutoKeep.setSelection(keep - 1);
+        mAutoCharging.setChecked(mAutoPreferences.getBoolean(CoomiAutoBackup.KEY_CHARGING, false));
+        mAutoWifi.setChecked(mAutoPreferences.getBoolean(CoomiAutoBackup.KEY_WIFI, false));
+        Uri uri = CoomiAutoBackup.directoryUri(this);
+        DocumentFile directory = uri == null ? null : DocumentFile.fromTreeUri(this, uri);
+        mAutoDirectory.setText(directory == null || directory.getName() == null
+            ? "未选择" : directory.getName());
+        updateAutoBackupStatus();
+    }
+
+    private void saveAutoBackupControls() {
+        if (mAutoPreferences == null || mAutoInterval.getSelectedItemPosition() < 0) return;
+        int intervalIndex = Math.min(CoomiAutoBackup.INTERVAL_HOURS.length - 1,
+            mAutoInterval.getSelectedItemPosition());
+        mAutoPreferences.edit()
+            .putBoolean(CoomiAutoBackup.KEY_ENABLED, mAutoEnabled.isChecked())
+            .putInt(CoomiAutoBackup.KEY_INTERVAL_HOURS, CoomiAutoBackup.INTERVAL_HOURS[intervalIndex])
+            .putInt(CoomiAutoBackup.KEY_KEEP_COUNT, mAutoKeep.getSelectedItemPosition() + 1)
+            .putBoolean(CoomiAutoBackup.KEY_CHARGING, mAutoCharging.isChecked())
+            .putBoolean(CoomiAutoBackup.KEY_WIFI, mAutoWifi.isChecked())
+            .apply();
+        CoomiAutoBackup.schedule(this);
+        updateAutoBackupStatus();
+    }
+
+    private void updateAutoBackupStatus() {
+        long last = mAutoPreferences.getLong(CoomiAutoBackup.KEY_LAST_SUCCESS, 0);
+        long next = mAutoPreferences.getLong(CoomiAutoBackup.KEY_NEXT_RUN, 0);
+        long size = mAutoPreferences.getLong(CoomiAutoBackup.KEY_LAST_SIZE, 0);
+        String error = mAutoPreferences.getString(CoomiAutoBackup.KEY_LAST_ERROR, "");
+        SimpleDateFormat format = new SimpleDateFormat("MM-dd HH:mm", Locale.getDefault());
+        StringBuilder status = new StringBuilder();
+        status.append("上次：").append(last > 0 ? format.format(new Date(last)) + " · " + formatBytes(size) : "尚未执行");
+        if (next > 0) status.append("\n下次：").append(format.format(new Date(next)));
+        if (error != null && !error.isEmpty()) status.append("\n失败：").append(error);
+        mAutoStatus.setText(status.toString());
+    }
+
+    private static String formatBytes(long bytes) {
+        if (bytes >= 1024L * 1024L) return String.format(Locale.US, "%.1f MB", bytes / 1048576d);
+        if (bytes >= 1024L) return String.format(Locale.US, "%.1f KB", bytes / 1024d);
+        return bytes + " B";
     }
 
     private void pickBackupZip() {
@@ -82,6 +208,17 @@ public class CoomiBackupActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQ_IMPORT && resultCode == RESULT_OK && data != null && data.getData() != null) {
             importBackup(data.getData());
+        } else if (requestCode == REQ_AUTO_DIRECTORY && resultCode == RESULT_OK && data != null && data.getData() != null) {
+            Uri directory = data.getData();
+            int flags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            try {
+                getContentResolver().takePersistableUriPermission(directory, flags);
+                mAutoPreferences.edit().putString(CoomiAutoBackup.KEY_DIRECTORY, directory.toString()).apply();
+                loadAutoBackupControls();
+                saveAutoBackupControls();
+            } catch (SecurityException error) {
+                Toast.makeText(this, "无法保留目录授权，请重新选择", Toast.LENGTH_LONG).show();
+            }
         } else if (requestCode == REQ_EXPORT && resultCode == RESULT_OK && data != null && data.getData() != null && mPendingBackup != null) {
             final File source = mPendingBackup;
             final Uri destination = data.getData();
@@ -106,19 +243,12 @@ public class CoomiBackupActivity extends Activity {
     private void backupData() {
         Toast.makeText(this, R.string.coomi_dash_backup_starting, Toast.LENGTH_SHORT).show();
         new Thread(() -> {
+            if (!CoomiAutoBackup.OPERATION_LOCK.tryLock()) {
+                runOnUiThread(() -> Toast.makeText(this, "已有备份或导入任务正在执行", Toast.LENGTH_SHORT).show());
+                return;
+            }
             try {
-                File home = new File(CoomiConstants.COOMI_CONFIG_DIR);
-                File virtualHome = new File(TermuxConstants.TERMUX_HOME_DIR_PATH);
-                File configDir = new File(home, "config");
-
-                File zip = File.createTempFile("coomi-backup-", ".zip", getCacheDir());
-                try (ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(zip))) {
-                    // Back up Coomi data/configuration and user-created HOME files, but not
-                    // package caches, language runtimes, virtual environments, or shell state.
-                    addDirRecursive(zos, home, "coomi-home");
-                    addUserDataRecursive(zos, virtualHome, "user-data", true);
-                    addMcpImplementationFiles(zos, new File(configDir, "mcp_servers.json"));
-                }
+                File zip = CoomiBackupArchive.create(this);
 
                 String stamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date());
                 runOnUiThread(() -> {
@@ -132,6 +262,8 @@ public class CoomiBackupActivity extends Activity {
             } catch (Exception e) {
                 runOnUiThread(() -> Toast.makeText(this,
                     getString(R.string.coomi_dash_backup_failed, e.getMessage()), Toast.LENGTH_LONG).show());
+            } finally {
+                CoomiAutoBackup.OPERATION_LOCK.unlock();
             }
         }).start();
     }
@@ -203,11 +335,30 @@ public class CoomiBackupActivity extends Activity {
     protected void onResume() {
         super.onResume();
         String current = CoomiTheme.getMode(this);
-        if (mAppliedThemeMode != null && !mAppliedThemeMode.equals(current)) {
+        String currentAppearance = CoomiTheme.appearanceSignature(this);
+        if ((mAppliedThemeMode != null && !mAppliedThemeMode.equals(current))
+            || (mAppliedAppearanceSignature != null && !mAppliedAppearanceSignature.equals(currentAppearance))) {
             recreate();
             return;
         }
         CoomiTheme.applyPageSystemBars(this);
+        loadAutoBackupControls();
+    }
+
+    private static final class SimpleItemSelectedListener implements AdapterView.OnItemSelectedListener {
+        private final Runnable callback;
+
+        SimpleItemSelectedListener(Runnable callback) {
+            this.callback = callback;
+        }
+
+        @Override
+        public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+            callback.run();
+        }
+
+        @Override
+        public void onNothingSelected(AdapterView<?> parent) { }
     }
 
     /** Includes local MCP scripts/projects referenced by command or args when they live in Termux HOME. */
@@ -282,35 +433,46 @@ public class CoomiBackupActivity extends Activity {
         mStatusText.setText(R.string.coomi_backup_importing);
 
         new Thread(() -> {
-            File tmp = new File(getCacheDir(), "coomi-import-" + System.currentTimeMillis());
-            tmp.mkdirs();
-            try (InputStream in = getContentResolver().openInputStream(uri);
-                 ZipInputStream zis = new ZipInputStream(new BufferedInputStream(in))) {
-                ZipEntry entry;
-                while ((entry = zis.getNextEntry()) != null) {
-                    if (entry.isDirectory()) continue;
-                    File out = safeResolve(tmp, entry.getName());
-                    if (out == null) continue;
-                    out.getParentFile().mkdirs();
-                    try (OutputStream os = new BufferedOutputStream(new FileOutputStream(out))) {
-                        copyStream(zis, os);
-                    }
-                    zis.closeEntry();
-                }
-            } catch (Exception e) {
+            if (!CoomiAutoBackup.OPERATION_LOCK.tryLock()) {
                 runOnUiThread(() -> {
                     mStatusText.setVisibility(View.GONE);
-                    Toast.makeText(this,
-                        getString(R.string.coomi_backup_import_failed, e.getMessage()), Toast.LENGTH_LONG).show();
+                    Toast.makeText(this, "已有备份或导入任务正在执行", Toast.LENGTH_SHORT).show();
                 });
                 return;
             }
+            try {
+                File tmp = new File(getCacheDir(), "coomi-import-" + System.currentTimeMillis());
+                tmp.mkdirs();
+                try (InputStream in = getContentResolver().openInputStream(uri);
+                     ZipInputStream zis = new ZipInputStream(new BufferedInputStream(in))) {
+                    ZipEntry entry;
+                    while ((entry = zis.getNextEntry()) != null) {
+                        if (entry.isDirectory()) continue;
+                        File out = safeResolve(tmp, entry.getName());
+                        if (out == null) continue;
+                        out.getParentFile().mkdirs();
+                        try (OutputStream os = new BufferedOutputStream(new FileOutputStream(out))) {
+                            copyStream(zis, os);
+                        }
+                        zis.closeEntry();
+                    }
+                } catch (Exception e) {
+                    runOnUiThread(() -> {
+                        mStatusText.setVisibility(View.GONE);
+                        Toast.makeText(this,
+                            getString(R.string.coomi_backup_import_failed, e.getMessage()), Toast.LENGTH_LONG).show();
+                    });
+                    return;
+                }
 
-            int[] counts = restore(tmp);
-            runOnUiThread(() -> {
-                mStatusText.setVisibility(View.GONE);
-                showImportResult(counts);
-            });
+                int[] counts = restore(tmp);
+                runOnUiThread(() -> {
+                    mStatusText.setVisibility(View.GONE);
+                    showImportResult(counts);
+                });
+            } finally {
+                CoomiAutoBackup.OPERATION_LOCK.unlock();
+            }
         }).start();
     }
 

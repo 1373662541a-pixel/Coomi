@@ -4,7 +4,7 @@ import { isDemoMode } from './demoMode'
 import { engineToken } from './http'
 import type { Transport } from './transport'
 
-export type { Transport, ConnectionState } from './transport'
+export type { Transport, ConnectionState, ConnectionStatus } from './transport'
 
 export function createTransport(sessionId: string, wsUrl?: string): Transport {
   // 演示模式不碰网络：引擎没起来也要能看界面。界面上有「演示」标记。
@@ -17,6 +17,13 @@ export function createTransport(sessionId: string, wsUrl?: string): Transport {
   const urlWithToken = token
     ? url + (url.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(token)
     : url
-  return new WsTransport({ url: urlWithToken })
+  const maxRetries = Number(localStorage.getItem('coomi.wsRetryCount'))
+  const backoffBase = Number(localStorage.getItem('coomi.reconnectInitialDelayMs'))
+  const backoffMax = Number(localStorage.getItem('coomi.reconnectMaxDelayMs'))
+  return new WsTransport({
+    url: urlWithToken,
+    maxRetries: Number.isInteger(maxRetries) && maxRetries >= 0 && maxRetries <= 30 ? maxRetries : 10,
+    backoffBase: Number.isFinite(backoffBase) && backoffBase >= 500 && backoffBase <= 60_000 ? backoffBase : 500,
+    backoffMax: Number.isFinite(backoffMax) && backoffMax >= 1_000 && backoffMax <= 120_000 ? backoffMax : 10_000,
+  })
 }
-

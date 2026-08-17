@@ -7,7 +7,16 @@ import { authedFetch } from '@/bridge/http'
 import { goBack } from '@/bridge/navigation'
 
 type EventName = 'session_start' | 'turn_start' | 'turn_end' | 'pre_tool_use' | 'post_tool_use'
-interface HookItem { enabled: boolean; matcher: string; command: string; args: string[]; timeout_ms: number }
+type KeywordMatch = 'disabled' | 'exact' | 'contains'
+interface HookItem {
+  enabled: boolean
+  matcher: string
+  keyword: string
+  keyword_match: KeywordMatch
+  command: string
+  args: string[]
+  timeout_ms: number
+}
 const EVENTS: Array<{ value: EventName; label: string }> = [
   { value: 'session_start', label: '会话开始' }, { value: 'turn_start', label: '每轮开始' },
   { value: 'turn_end', label: '每轮结束' }, { value: 'pre_tool_use', label: '工具调用前' },
@@ -22,11 +31,25 @@ onMounted(async () => {
   try {
     const response = await authedFetch('/api/runtime/hooks')
     const data = await response.json()
-    for (const event of EVENTS) hooks.value[event.value] = data.hooks?.[event.value] ?? []
+    for (const event of EVENTS) {
+      hooks.value[event.value] = (data.hooks?.[event.value] ?? []).map((hook: Partial<HookItem>) => ({
+        enabled: hook.enabled ?? true,
+        matcher: hook.matcher ?? '*',
+        keyword: hook.keyword ?? '',
+        keyword_match: hook.keyword_match ?? 'disabled',
+        command: hook.command ?? '',
+        args: hook.args ?? [],
+        timeout_ms: hook.timeout_ms ?? 10000,
+      }))
+    }
   } catch { notice.value = '加载钩子配置失败' }
 })
 
-function add(event: EventName) { hooks.value[event].push({ enabled: true, matcher: '*', command: '', args: [], timeout_ms: 10000 }) }
+function add(event: EventName) {
+  hooks.value[event].push({ enabled: true, matcher: '*', keyword: '', keyword_match: 'disabled', command: '', args: [], timeout_ms: 10000 })
+}
+
+function isToolEvent(event: EventName) { return event === 'pre_tool_use' || event === 'post_tool_use' }
 
 async function save() {
   saving.value = true; notice.value = ''
@@ -50,8 +73,17 @@ async function save() {
         <div v-for="(hook, index) in hooks[event.value]" :key="index" class="hook">
           <label class="toggle"><input v-model="hook.enabled" type="checkbox" />启用</label>
           <input v-model="hook.command" placeholder="命令绝对路径" />
-          <input v-model="hook.matcher" placeholder="匹配工具名，默认 *" />
+          <input v-if="isToolEvent(event.value)" v-model="hook.matcher" placeholder="匹配工具名，默认 *" />
+          <template v-if="event.value === 'turn_start'">
+            <div class="match-mode" role="group" aria-label="触发方式">
+              <button :class="{ on: hook.keyword_match === 'disabled' }" @click="hook.keyword_match = 'disabled'">每轮</button>
+              <button :class="{ on: hook.keyword_match === 'exact' }" @click="hook.keyword_match = 'exact'">全匹配</button>
+              <button :class="{ on: hook.keyword_match === 'contains' }" @click="hook.keyword_match = 'contains'">句中匹配</button>
+            </div>
+            <input v-if="hook.keyword_match !== 'disabled'" v-model="hook.keyword" maxlength="200" placeholder="触发关键词" />
+          </template>
           <input :value="hook.args.join(' ')" placeholder="参数，以空格分隔" @input="hook.args = ($event.target as HTMLInputElement).value.split(/\s+/).filter(Boolean)" />
+          <label class="timeout">超时（毫秒）<input v-model.number="hook.timeout_ms" type="number" min="100" max="60000" /></label>
           <button class="remove" @click="hooks[event.value].splice(index, 1)">删除</button>
         </div>
       </section>
@@ -60,7 +92,8 @@ async function save() {
       <section class="guide" aria-label="配置说明">
         <h2>配置说明</h2>
         <p><b>事件：</b>会话开始、每轮开始/结束以及工具调用前后均可独立配置命令。</p>
-        <p><b>匹配：</b>仅工具事件使用匹配项，填写工具名称；<code>*</code> 表示匹配全部工具。</p>
+        <p><b>工具匹配：</b>仅工具事件使用匹配项，填写工具名称；<code>*</code> 表示匹配全部工具。</p>
+        <p><b>关键词：</b>在“每轮开始”中可设为全匹配或句中匹配。全匹配允许关键词前后出现空格、标点等符号，但不能有其他文字；句中匹配只要输入中包含关键词就会触发。</p>
         <p><b>命令：</b>必须填写本机可执行文件的完整路径。</p>
         <p><b>参数：</b>填写传给命令的命令行参数，以空格分隔，每一项会按顺序原样传入。参数不经过 Shell，不会展开 <code>~</code>、变量、通配符或引号；路径请使用完整路径，单个参数本身不能包含空格。</p>
         <p><b>超时：</b>默认 10 秒。钩子在本机执行，请只配置可信命令，并避免在命令参数中写入密钥。</p>
@@ -88,6 +121,10 @@ async function save() {
 .hook { display: grid; gap: 7px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
 .hook input:not([type=checkbox]) { height: 40px; padding: 0 11px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--fill); color: var(--text); }
 .toggle { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--text-2); }
+.match-mode { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; padding: 2px; border-radius: var(--r-md); background: var(--fill-strong); }
+.match-mode button { min-height: 36px; border-radius: 9px; color: var(--text-2); font-size: 12.5px; }
+.match-mode button.on { background: var(--bg); color: var(--blue); font-weight: 650; }
+.timeout { display: grid; grid-template-columns: 1fr 130px; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-2); }
 .remove { justify-self: end; color: var(--danger); font-size: 12.5px; background: none; }
 .save { width: 100%; min-height: 44px; border-radius: var(--r-md); background: var(--blue); color: #fff; font-weight: 650; }
 .notice { margin: 10px 2px; font-size: 12.5px; color: var(--text-2); }

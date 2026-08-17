@@ -80,7 +80,8 @@
 
                 <LinearLayout
                     style="@style/Coomi.Card"
-                    android:background="@drawable/coomi_bg_card_outlined">
+                    android:background="@drawable/coomi_bg_card_outlined"
+                    android:tag="coomi:card-outlined">
 
                     <!-- 通知权限 -->
                     <LinearLayout

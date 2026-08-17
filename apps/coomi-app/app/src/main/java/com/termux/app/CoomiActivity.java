@@ -167,8 +167,8 @@ public class CoomiActivity extends Activity {
         String currentMode = CoomiTheme.getMode(this);
         if (mAppliedThemeMode == null || !mAppliedThemeMode.equals(currentMode)) {
             mAppliedThemeMode = currentMode;
-            applyThemeToWebView();
         }
+        applyThemeToWebView();
         CoomiTheme.applySystemBars(this);
     }
 
@@ -310,6 +310,21 @@ public class CoomiActivity extends Activity {
             /** 演示包用假域名装本地文件；正式包不拦，让它照常走 loopback。 */
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                if ("/__coomi_appearance/chat-background".equals(request.getUrl().getPath())) {
+                    try {
+                        String mimeType = CoomiTheme.backgroundMimeType(
+                            CoomiActivity.this, CoomiTheme.SURFACE_CHAT);
+                        InputStream background = CoomiTheme.openBackground(
+                            CoomiActivity.this, CoomiTheme.SURFACE_CHAT);
+                        if (background == null) return null;
+                        return new WebResourceResponse(
+                            mimeType,
+                            null,
+                            background);
+                    } catch (Exception ignored) {
+                        return null;
+                    }
+                }
                 if (!CoomiDemo.isEnabled()) return null;
                 return CoomiDemo.serve(CoomiActivity.this, request.getUrl());
             }
@@ -416,8 +431,10 @@ public class CoomiActivity extends Activity {
         String webTheme = isDark() ? "dark"
             : CoomiTheme.MODE_BOOK.equals(mode) ? "book"
             : CoomiTheme.MODE_ORANGE.equals(mode) ? "orange" : "light";
+        String appearance = CoomiTheme.appearanceJson(this);
         runOnUiThread(() -> evaluateJavascript(
-            "document.documentElement.setAttribute('data-theme','" + webTheme + "')"));
+            "document.documentElement.setAttribute('data-theme','" + webTheme + "');"
+                + "window.__coomiApplyAppearance&&window.__coomiApplyAppearance(" + appearance + ")"));
     }
 
     @Override
@@ -471,9 +488,15 @@ public class CoomiActivity extends Activity {
             return CoomiTheme.getMode(CoomiActivity.this);
         }
 
+        @JavascriptInterface
+        public String getAppearanceConfig() {
+            return CoomiTheme.appearanceJson(CoomiActivity.this);
+        }
+
         /** 前端设置页切换主题档位：持久化 + 刷新 Web 主题与原生状态栏。 */
         @JavascriptInterface
         public void setThemeMode(String mode) {
+            if (CoomiTheme.isCustomEnabled(CoomiActivity.this)) return;
             CoomiTheme.setMode(CoomiActivity.this, mode);
             runOnUiThread(() -> {
                 mAppliedThemeMode = CoomiTheme.getMode(CoomiActivity.this);

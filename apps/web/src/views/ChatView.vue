@@ -30,6 +30,7 @@ import LoopProgressBar from '@/components/LoopProgressBar.vue'
 import ApprovalSheet from '@/components/ApprovalSheet.vue'
 import QuestionSheet from '@/components/QuestionSheet.vue'
 import CoomiIcon from '@/components/CoomiIcon.vue'
+import { registerOverlay, unregisterOverlay } from '@/bridge/overlayStack'
 
 type Block =
   | { t: 'one'; key: string; item: Timelineitem }
@@ -136,12 +137,23 @@ watch(() => session.timeline.length, () => nextTick(follow))
 
 function onDecide(callId: string, decision: ApprovalDecision) { session.approve(callId, decision) }
 function onAnswer(callId: string, answers: Record<string, string>) { session.answerQuestion(callId, answers) }
+function openDrawer() { drawerOpen.value = true; registerOverlay('side-drawer', closeDrawer) }
+function closeDrawer() { drawerOpen.value = false; unregisterOverlay('side-drawer') }
+
+watch(() => session.pendingApproval?.callId, (id, previous) => {
+  if (previous) unregisterOverlay(`approval:${previous}`)
+  if (id) registerOverlay(`approval:${id}`, () => session.approve(id, 'deny'))
+})
+watch(() => session.pendingQuestion?.callId, (id, previous) => {
+  if (previous) unregisterOverlay(`question:${previous}`)
+  if (id) registerOverlay(`question:${id}`, () => session.answerQuestion(id, {}))
+})
 </script>
 
 <template>
   <div class="chat">
     <div class="shell" :class="{ pushed: drawerOpen }">
-      <TopBar @menu="drawerOpen = true" />
+      <TopBar @menu="openDrawer" />
 
       <main ref="scroller" class="stream">
         <div ref="content" class="inner">
@@ -189,7 +201,7 @@ function onAnswer(callId: string, answers: Record<string, string>) { session.ans
       <Composer />
     </div>
 
-    <SideDrawer :open="drawerOpen" @close="drawerOpen = false" />
+    <SideDrawer :open="drawerOpen" @close="closeDrawer" />
 
     <ApprovalSheet
       v-if="session.pendingApproval"
@@ -205,12 +217,21 @@ function onAnswer(callId: string, answers: Record<string, string>) { session.ans
 </template>
 
 <style scoped>
-.chat { height: 100%; min-height: 0; background: var(--bg); }
+.chat {
+  height: 100%;
+  min-height: 0;
+  background-color: transparent;
+  background-image:
+    linear-gradient(var(--chat-background-overlay), var(--chat-background-overlay)),
+    var(--chat-background-image);
+  background-position: center;
+  background-size: cover;
+}
 
 .shell {
   position: relative;
   display: flex; flex-direction: column; height: 100%; min-height: 0;
-  background: var(--bg);
+  background: transparent;
   transform-origin: left center;
   /* 只保留 transform 动画：Android WebView 里 transform+border-radius 同时
      过渡会反复重建合成层，表现为打开侧边栏时主内容文字闪烁。
@@ -224,7 +245,6 @@ function onAnswer(callId: string, answers: Record<string, string>) { session.ans
   transform: translateX(6%) scale(.94);
   border-radius: 20px;
   overflow: hidden;
-  box-shadow: var(--shadow-2);
 }
 
 .stream {

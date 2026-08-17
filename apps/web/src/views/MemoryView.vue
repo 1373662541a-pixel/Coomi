@@ -25,6 +25,14 @@ const editing = ref<MemoryItem | null>(null)
 const editingExisting = ref(false)
 const loading = ref(true)
 const notice = ref('')
+const expanded = ref(new Set<string>())
+
+function toggleExpanded(name: string) {
+  const next = new Set(expanded.value)
+  if (next.has(name)) next.delete(name)
+  else next.add(name)
+  expanded.value = next
+}
 
 async function load() {
   loading.value = true
@@ -93,17 +101,18 @@ onMounted(load)
       <p class="scope-note">这里只管理 Coomi 内建持久记忆，与任何 MCP、Skill 或第三方记忆扩展无关。</p>
       <p v-if="loading" class="empty">加载中…</p>
       <p v-else-if="!memories.length" class="empty">暂无内建持久记忆</p>
-      <article v-for="item in memories" :key="item.name" class="memory">
-        <div class="memory-head">
-          <div><h2>{{ item.name }}</h2><p>{{ item.description || '无描述' }}</p></div>
+      <article v-for="item in memories" :key="item.name" :class="['memory', { expanded: expanded.has(item.name) }]">
+        <button class="memory-head" :aria-expanded="expanded.has(item.name)" @click="toggleExpanded(item.name)">
+          <div><h2>{{ item.name }}</h2><p class="description">{{ item.description || '无描述' }}</p></div>
           <span :class="['life', item.lifecycle]">{{ item.lifecycle }}</span>
-        </div>
-        <p class="content">{{ item.content }}</p>
-        <div class="meta">
+          <CoomiIcon class="chevron" name="chevronDown" :size="17" />
+        </button>
+        <p :class="['content', { preview: !expanded.has(item.name) }]">{{ item.content }}</p>
+        <div v-if="expanded.has(item.name)" class="meta">
           <span>{{ item.scope }}</span><span>命中 {{ item.hit_count }} 次</span>
           <span>{{ item.last_triggered ? `最近 ${new Date(item.last_triggered).toLocaleDateString()}` : '从未命中' }}</span>
         </div>
-        <div class="actions">
+        <div v-if="expanded.has(item.name)" class="actions">
           <button @click="editing = { ...item }; editingExisting = true"><CoomiIcon name="pencil" :size="15" />编辑</button>
           <button class="danger" @click="remove(item)"><CoomiIcon name="trash" :size="15" />删除</button>
         </div>
@@ -135,13 +144,18 @@ onMounted(load)
 .scope-note { margin: 2px 2px 12px; padding: 10px 12px; border-left: 3px solid var(--blue); background: var(--blue-soft); color: var(--text-2); font-size: 12.5px; line-height: 1.6; }
 .empty { padding: 32px 0; text-align: center; color: var(--text-3); }
 .memory { margin-bottom: 10px; padding: 13px; border-radius: var(--r-card); background: var(--bg); box-shadow: var(--shadow-1); }
-.memory-head { display: flex; justify-content: space-between; gap: 10px; }
+.memory-head { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: start; width: 100%; gap: 10px; text-align: left; }
 .memory h2, .editor h2 { font-size: 15px; color: var(--text); }
 .memory-head p { margin-top: 3px; font-size: 12px; color: var(--text-3); }
+.description { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.memory.expanded .description { overflow: visible; white-space: normal; }
+.chevron { align-self: center; color: var(--text-3); transition: transform .16s ease; }
+.memory.expanded .chevron { transform: rotate(180deg); }
 .life { align-self: flex-start; padding: 3px 7px; border-radius: 4px; background: var(--fill); color: var(--text-2); font-size: 10px; text-transform: uppercase; }
 .life.core { background: var(--blue-soft); color: var(--blue); }
 .life.stable { color: var(--ok); }
 .content { margin-top: 10px; white-space: pre-wrap; font-size: 13px; line-height: 1.65; color: var(--text-2); }
+.content.preview { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .meta, .actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 10px; font-size: 11px; color: var(--text-3); }
 .actions { justify-content: flex-end; padding-top: 9px; border-top: 1px solid var(--border); }
 .actions button { display: flex; align-items: center; gap: 4px; color: var(--blue); }

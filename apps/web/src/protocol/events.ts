@@ -59,7 +59,7 @@ export interface SessionLoadedEvent {
   usage: { input_tokens: number; output_tokens: number; total_tokens: number }
 }
 
-export type AgentEvent =
+export type AgentEvent = (
   | TextChunkEvent | ReasoningChunkEvent | ToolStartEvent | ToolRunningEvent
   | ToolDoneEvent | ToolCacheHitEvent | UsageUpdateEvent | ConnectionRetryEvent | StreamResetEvent
   | CompressionEvent | AgentErrorEvent | ConfigurationRequiredEvent | AgentCancelledEvent | BgTaskDetachedEvent
@@ -69,5 +69,6 @@ export type AgentEvent =
   | TurnEndEvent
   | SessionStateEvent
   | SessionLoadedEvent
+) & { event_seq?: number }
 
 export type AgentEventType = AgentEvent['event_type']

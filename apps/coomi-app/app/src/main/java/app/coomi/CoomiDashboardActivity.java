@@ -86,6 +86,7 @@ public class CoomiDashboardActivity extends Activity {
     private final ArrayList<Uri> mFeedbackImageUris = new ArrayList<>();
     private TextView mFeedbackImageCount;
     private String mAppliedThemeMode;
+    private String mAppliedAppearanceSignature;
 
     private CoomiService mCoomiService;
     private boolean mBound = false;
@@ -115,8 +116,10 @@ public class CoomiDashboardActivity extends Activity {
         CoomiTheme.applyPageTheme(this);
         super.onCreate(savedInstanceState);
         mAppliedThemeMode = CoomiTheme.getMode(this);
+        mAppliedAppearanceSignature = CoomiTheme.appearanceSignature(this);
         setContentView(R.layout.activity_coomi_dashboard);
         CoomiTheme.applyPageSystemBars(this);
+        CoomiTheme.applyConsoleBackground(this, findViewById(R.id.coomi_dashboard_root));
 
         mStatusIndicator = findViewById(R.id.dashboard_status_indicator);
         mStatusText = findViewById(R.id.dashboard_status_text);
@@ -191,6 +194,7 @@ public class CoomiDashboardActivity extends Activity {
     /** 演示包：引擎和终端都不存在，界面上直说，别让人以为它在跑。 */
     private void applyDemoState() {
         mStatusIndicator.setBackgroundResource(R.drawable.coomi_dot_idle);
+        CoomiTheme.applyCustomColors(this, mStatusIndicator);
         mStatusText.setText(R.string.coomi_demo_dash_status);
         mRuntimeVersionText.setText(R.string.coomi_demo_dash_runtime);
         mRestartButton.setEnabled(false);
@@ -244,6 +248,7 @@ public class CoomiDashboardActivity extends Activity {
                     : starting ? R.string.coomi_dash_engine_starting
                     : R.string.coomi_dash_engine_stopped;
                 mStatusIndicator.setBackgroundResource(indicator);
+                CoomiTheme.applyCustomColors(this, mStatusIndicator);
                 mStatusText.setText(label);
                 mRestartButton.setEnabled(!starting);
                 mStopButton.setEnabled(running);
@@ -269,11 +274,14 @@ public class CoomiDashboardActivity extends Activity {
         super.onResume();
         mRegistryRefreshRequested = false;
         String currentMode = CoomiTheme.getMode(this);
-        if (mAppliedThemeMode != null && !mAppliedThemeMode.equals(currentMode)) {
+        String currentAppearance = CoomiTheme.appearanceSignature(this);
+        if ((mAppliedThemeMode != null && !mAppliedThemeMode.equals(currentMode))
+            || (mAppliedAppearanceSignature != null && !mAppliedAppearanceSignature.equals(currentAppearance))) {
             recreate();
             return;
         }
         CoomiTheme.applyPageSystemBars(this);
+        CoomiTheme.applyConsoleBackground(this, findViewById(R.id.coomi_dashboard_root));
     }
 
     private void openCoomiRoute(String route) {
@@ -445,6 +453,7 @@ public class CoomiDashboardActivity extends Activity {
     private void showFeedbackDialog() {
         mFeedbackImageUris.clear();
         View form = getLayoutInflater().inflate(R.layout.dialog_coomi_feedback, null);
+        CoomiTheme.applyCustomColors(this, form);
         EditText messageInput = form.findViewById(R.id.feedback_message);
         EditText contactInput = form.findViewById(R.id.feedback_contact);
         RadioGroup typeInput = form.findViewById(R.id.feedback_type);
@@ -462,6 +471,9 @@ public class CoomiDashboardActivity extends Activity {
             }
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(resolveThemeColor(R.attr.coomiBlue));
             dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setTextColor(resolveThemeColor(R.attr.coomiText2));
+            if (dialog.getWindow() != null) {
+                CoomiTheme.applyCustomColors(this, dialog.getWindow().getDecorView());
+            }
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
             String message = messageInput.getText().toString().trim();
             if (message.isEmpty()) {

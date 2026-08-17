@@ -15,6 +15,8 @@ serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 tokio.workspace = true
+md5.workspace = true
+futures-util.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
