@@ -193,6 +193,16 @@
       background: var(--blue-hover);
     }
 
+    .button-disabled,
+    .button-disabled:hover {
+      background: #a8b0bc;
+      color: #f7f8fa;
+      box-shadow: none;
+      cursor: not-allowed;
+      pointer-events: none;
+      transform: none;
+    }
+
     .button-secondary {
       background: var(--surface);
       border-color: var(--line);
@@ -630,7 +640,7 @@
             <span class="download-arrow" aria-hidden="true">↓</span>
             <span data-download-label="android">下载 APK</span>
           </a>
-          <a id="downloadButtonDesktop" class="button button-primary" href="https://updates.septemc.com/coomi/desktop/Coomi-Setup-0.1.1.exe" data-stat-action="download" data-download-button="desktop">
+          <a id="downloadButtonDesktop" class="button button-disabled" aria-disabled="true" tabindex="-1" data-download-disabled data-download-button="desktop">
             <span class="download-arrow" aria-hidden="true">↓</span>
             <span data-download-label="desktop">下载 Windows 版</span>
           </a>
@@ -970,7 +980,9 @@
           if (!response.ok) return;
           const release = await response.json();
           const button = downloadButtons[platform];
-          if (release.file) button.href = releaseRoots[platform] + encodeURIComponent(release.file);
+          if (release.file && !button.hasAttribute("data-download-disabled")) {
+            button.href = releaseRoots[platform] + encodeURIComponent(release.file);
+          }
           if (release.label) downloadLabels[platform].textContent = release.label;
           if (release.version) {
             versionValues[platform].textContent = release.version;
@@ -993,7 +1005,13 @@
       }
 
       platformTabs.forEach(tab => tab.addEventListener("click", () => setPlatform(tab.dataset.platform)));
-      Object.entries(downloadButtons).forEach(([key, button]) => button.addEventListener("click", () => recordDownload(key)));
+      Object.entries(downloadButtons).forEach(([key, button]) => button.addEventListener("click", event => {
+        if (button.hasAttribute("data-download-disabled")) {
+          event.preventDefault();
+          return;
+        }
+        recordDownload(key);
+      }));
       setPlatform("android");
       resolveLatestRelease("android");
       resolveLatestRelease("desktop");
