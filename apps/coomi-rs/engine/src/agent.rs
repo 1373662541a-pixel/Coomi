@@ -85,7 +85,7 @@ impl Agent {
             provider_retry_count: 2,
             reconnect_initial_delay_ms: 1_000,
             reconnect_max_delay_ms: 10_000,
-            max_parallel_tools: 4,
+            max_parallel_tools: 5,
             force_compaction: false,
             input_queue: None,
             vision_replay: true,

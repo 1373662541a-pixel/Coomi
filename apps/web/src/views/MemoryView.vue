@@ -26,6 +26,8 @@ const editingExisting = ref(false)
 const loading = ref(true)
 const notice = ref('')
 const expanded = ref(new Set<string>())
+const pendingDelete = ref<MemoryItem | null>(null)
+const deletingName = ref('')
 
 function toggleExpanded(name: string) {
   const next = new Set(expanded.value)
@@ -76,14 +78,32 @@ async function save() {
   await load()
 }
 
-async function remove(item: MemoryItem) {
-  if (!confirm(`删除记忆“${item.name}”？`)) return
+function requestRemove(item: MemoryItem) {
+  pendingDelete.value = item
+}
+
+async function confirmRemove() {
+  const item = pendingDelete.value
+  if (!item || deletingName.value) return
+  deletingName.value = item.name
   const response = await authedFetch(`/api/memory/${encodeURIComponent(item.name)}`, { method: 'DELETE' })
   if (!response.ok) {
-    notice.value = `删除失败：HTTP ${response.status}`
+    const data = await response.json().catch(() => ({}))
+    notice.value = data.error ?? `删除失败：HTTP ${response.status}`
+    deletingName.value = ''
+    return
+  }
+  const data = await response.json().catch(() => ({ deleted: true }))
+  pendingDelete.value = null
+  deletingName.value = ''
+  if (data.deleted === false) {
+    notice.value = '该记忆不存在或已被删除'
+    await load()
     return
   }
   if (editing.value?.name === item.name) editing.value = null
+  memories.value = memories.value.filter(memory => memory.name !== item.name)
+  notice.value = '已删除'
   await load()
 }
 
@@ -114,7 +134,7 @@ onMounted(load)
         </div>
         <div v-if="expanded.has(item.name)" class="actions">
           <button @click="editing = { ...item }; editingExisting = true"><CoomiIcon name="pencil" :size="15" />编辑</button>
-          <button class="danger" @click="remove(item)"><CoomiIcon name="trash" :size="15" />删除</button>
+          <button class="danger" :disabled="deletingName === item.name" @click="requestRemove(item)"><CoomiIcon name="trash" :size="15" />删除</button>
         </div>
       </article>
       <p v-if="notice" class="notice">{{ notice }}</p>
@@ -133,6 +153,16 @@ onMounted(load)
         </div>
         <label>内容<textarea v-model="editing.content" rows="7" /></label>
         <button class="save" @click="save">保存</button>
+      </section>
+    </div>
+    <div v-if="pendingDelete" class="scrim confirm-scrim" @click.self="pendingDelete = null">
+      <section class="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-memory-title">
+        <h2 id="delete-memory-title">删除持久记忆</h2>
+        <p>确定删除“{{ pendingDelete.name }}”？此操作无法撤销。</p>
+        <div class="confirm-actions">
+          <button :disabled="!!deletingName" @click="pendingDelete = null">取消</button>
+          <button class="confirm-delete" :disabled="!!deletingName" @click="confirmRemove">{{ deletingName ? '删除中…' : '删除' }}</button>
+        </div>
       </section>
     </div>
   </div>
@@ -169,4 +199,12 @@ onMounted(load)
 .editor textarea { resize: vertical; line-height: 1.5; }
 .selects { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
 .save { width: 100%; min-height: 44px; margin-top: 14px; border-radius: var(--r-md); background: var(--blue); color: #fff; font-weight: 650; }
+.confirm-scrim { align-items: center; padding: 18px; }
+.confirm-dialog { width: 100%; max-width: 360px; margin: auto; padding: 18px; border-radius: var(--r-card); background: var(--bg); box-shadow: var(--shadow-2); }
+.confirm-dialog h2 { color: var(--text); font-size: 16px; }
+.confirm-dialog p { margin-top: 9px; color: var(--text-2); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+.confirm-actions button { min-width: 72px; min-height: 40px; padding: 0 14px; border-radius: var(--r-md); background: var(--fill); color: var(--text-2); }
+.confirm-actions .confirm-delete { background: var(--danger); color: #fff; }
+.confirm-actions button:disabled { opacity: .55; }
 </style>

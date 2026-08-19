@@ -25,6 +25,12 @@ const statusLabels: Record<TaskInfo['status'], string> = {
   interrupted: '已中断',
 }
 
+const downloadLabels: Record<NonNullable<TaskInfo['download_status']>, string> = {
+  downloading: '下载中',
+  completed: '下载完成，等待使用',
+  failed: '下载失败',
+}
+
 function openTask(task: TaskInfo) {
   session.openSession(task.session_id)
   router.push('/')
@@ -55,12 +61,13 @@ onBeforeUnmount(() => { if (poll) clearInterval(poll) })
 
       <p class="sec-label">当前任务</p>
       <div v-if="active.length" class="task-list">
-        <div v-for="task in active" :key="task.task_id" class="task-row">
+        <div v-for="task in active" :key="task.task_id" :class="['task-row', { download: task.task_kind === 'download' }]">
           <button class="task-main" @click="openTask(task)">
             <span class="task-title">{{ task.session_title }}</span>
             <span class="task-meta">
-              <span class="live-dot" />{{ statusLabels[task.status] }} · {{ elapsed(task.started_at) }}
-              <template v-if="task.current_tool"> · {{ task.current_tool }}</template>
+              <span class="live-dot" />{{ task.download_status ? downloadLabels[task.download_status] : statusLabels[task.status] }} · {{ elapsed(task.started_at) }}
+              <template v-if="task.download_label"> · {{ task.download_label }}</template>
+              <template v-else-if="task.current_tool"> · {{ task.current_tool }}</template>
             </span>
           </button>
           <button class="stop" aria-label="取消任务" @click="sessions.cancelTask(task.session_id)">
@@ -95,6 +102,8 @@ onBeforeUnmount(() => { if (poll) clearInterval(poll) })
 .task-list { background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-card); overflow: hidden; }
 .task-row { display: flex; align-items: center; width: 100%; min-height: 66px; text-align: left; }
 .task-row + .task-row { border-top: 1px solid var(--border); }
+.task-row.download { background: var(--blue-soft); }
+.task-row.download .task-title::before { content: '下载 · '; color: var(--blue); font-weight: 650; }
 .task-main { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 5px; padding: 11px 6px 11px 14px; text-align: left; }
 .task-title { overflow: hidden; color: var(--text); font-size: 14.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .task-meta { display: flex; align-items: center; min-width: 0; overflow: hidden; color: var(--text-3); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }

@@ -28,6 +28,9 @@ final class CoomiAutoBackup {
     static final String KEY_LAST_SIZE = "last_size";
     static final String KEY_LAST_ERROR = "last_error";
     static final String KEY_NEXT_RUN = "next_run";
+    static final String KEY_PROGRESS_STAGE = "progress_stage";
+    static final String KEY_PROGRESS_PERCENT = "progress_percent";
+    static final String KEY_PROGRESS_RUNNING = "progress_running";
     static final int DEFAULT_INTERVAL_HOURS = 24;
     static final int DEFAULT_KEEP_COUNT = 7;
     static final int[] INTERVAL_HOURS = {6, 12, 24, 72, 168};
@@ -68,6 +71,12 @@ final class CoomiAutoBackup {
     }
 
     static void runNow(Context context) {
+        preferences(context).edit()
+            .putString(KEY_LAST_ERROR, "")
+            .putString(KEY_PROGRESS_STAGE, "等待开始自动备份")
+            .putInt(KEY_PROGRESS_PERCENT, 0)
+            .putBoolean(KEY_PROGRESS_RUNNING, true)
+            .apply();
         OneTimeWorkRequest request = new OneTimeWorkRequest.Builder(CoomiAutoBackupWorker.class)
             .setInputData(new Data.Builder().putBoolean("force", true).build())
             .addTag(UNIQUE_IMMEDIATE)

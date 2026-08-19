@@ -9,6 +9,8 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.MediaStore;
 import android.view.View;
 import android.widget.TextView;
@@ -18,6 +20,7 @@ import android.widget.AdapterView;
 import android.widget.CheckBox;
 import android.widget.Spinner;
 import android.widget.Switch;
+import android.widget.ProgressBar;
 
 import androidx.documentfile.provider.DocumentFile;
 
@@ -56,6 +59,9 @@ public class CoomiBackupActivity extends Activity {
     private static final int REQ_AUTO_DIRECTORY = 4003;
 
     private TextView mStatusText;
+    private ProgressBar mBackupProgress;
+    private View mBackupAction;
+    private View mBackupImport;
     private String mAppliedThemeMode;
     private String mAppliedAppearanceSignature;
     private File mPendingBackup;
@@ -67,6 +73,16 @@ public class CoomiBackupActivity extends Activity {
     private CheckBox mAutoCharging;
     private CheckBox mAutoWifi;
     private TextView mAutoStatus;
+    private final Handler mStatusHandler = new Handler(Looper.getMainLooper());
+    private final Runnable mStatusRefresh = new Runnable() {
+        @Override public void run() {
+            updateAutoBackupStatus();
+            if (mAutoPreferences != null
+                && mAutoPreferences.getBoolean(CoomiAutoBackup.KEY_PROGRESS_RUNNING, false)) {
+                mStatusHandler.postDelayed(this, 500);
+            }
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -78,10 +94,13 @@ public class CoomiBackupActivity extends Activity {
         CoomiTheme.applyPageSystemBars(this);
 
         mStatusText = findViewById(R.id.txt_backup_status);
+        mBackupProgress = findViewById(R.id.progress_backup);
+        mBackupAction = findViewById(R.id.btn_backup_action);
+        mBackupImport = findViewById(R.id.btn_backup_import);
 
         findViewById(R.id.btn_backup_back).setOnClickListener(v -> finish());
-        findViewById(R.id.btn_backup_action).setOnClickListener(v -> backupData());
-        findViewById(R.id.btn_backup_import).setOnClickListener(v -> pickBackupZip());
+        mBackupAction.setOnClickListener(v -> backupData());
+        mBackupImport.setOnClickListener(v -> pickBackupZip());
         bindAutoBackupControls();
     }
 
@@ -109,6 +128,9 @@ public class CoomiBackupActivity extends Activity {
                 return;
             }
             CoomiAutoBackup.runNow(this);
+            updateAutoBackupStatus();
+            mStatusHandler.removeCallbacks(mStatusRefresh);
+            mStatusHandler.post(mStatusRefresh);
             Toast.makeText(this, "已加入备份队列", Toast.LENGTH_SHORT).show();
         });
         mAutoEnabled.setOnCheckedChangeListener((button, checked) -> {
@@ -177,11 +199,17 @@ public class CoomiBackupActivity extends Activity {
         long next = mAutoPreferences.getLong(CoomiAutoBackup.KEY_NEXT_RUN, 0);
         long size = mAutoPreferences.getLong(CoomiAutoBackup.KEY_LAST_SIZE, 0);
         String error = mAutoPreferences.getString(CoomiAutoBackup.KEY_LAST_ERROR, "");
+        String progressStage = mAutoPreferences.getString(CoomiAutoBackup.KEY_PROGRESS_STAGE, "");
+        int progressPercent = mAutoPreferences.getInt(CoomiAutoBackup.KEY_PROGRESS_PERCENT, 0);
+        boolean progressRunning = mAutoPreferences.getBoolean(CoomiAutoBackup.KEY_PROGRESS_RUNNING, false);
         SimpleDateFormat format = new SimpleDateFormat("MM-dd HH:mm", Locale.getDefault());
         StringBuilder status = new StringBuilder();
         status.append("上次：").append(last > 0 ? format.format(new Date(last)) + " · " + formatBytes(size) : "尚未执行");
         if (next > 0) status.append("\n下次：").append(format.format(new Date(next)));
         if (error != null && !error.isEmpty()) status.append("\n失败：").append(error);
+        if (progressRunning && progressStage != null && !progressStage.isEmpty()) {
+            status.append("\n").append(progressStage).append(" · ").append(progressPercent).append("%");
+        }
         mAutoStatus.setText(status.toString());
     }
 
@@ -222,18 +250,29 @@ public class CoomiBackupActivity extends Activity {
         } else if (requestCode == REQ_EXPORT && resultCode == RESULT_OK && data != null && data.getData() != null && mPendingBackup != null) {
             final File source = mPendingBackup;
             final Uri destination = data.getData();
+            showBackupProgress("正在写入所选位置", 0, source.length());
             new Thread(() -> {
                 try (InputStream in = new FileInputStream(source); OutputStream out = getContentResolver().openOutputStream(destination)) {
                     if (out == null) throw new Exception("无法打开保存位置");
-                    copyStream(in, out);
-                    runOnUiThread(() -> Toast.makeText(this, R.string.coomi_dash_backup_done, Toast.LENGTH_LONG).show());
+                    copyStream(in, out, source.length(), written -> showBackupProgress("正在写入所选位置", written, source.length()));
+                    runOnUiThread(() -> {
+                        finishBackupProgress("备份完成");
+                        Toast.makeText(this, R.string.coomi_dash_backup_done, Toast.LENGTH_LONG).show();
+                    });
                 } catch (Exception e) {
-                    runOnUiThread(() -> Toast.makeText(this, getString(R.string.coomi_dash_backup_failed, e.getMessage()), Toast.LENGTH_LONG).show());
+                    runOnUiThread(() -> {
+                        finishBackupProgress("备份失败：" + e.getMessage());
+                        Toast.makeText(this, getString(R.string.coomi_dash_backup_failed, e.getMessage()), Toast.LENGTH_LONG).show();
+                    });
                 } finally {
                     source.delete();
                     mPendingBackup = null;
                 }
             }).start();
+        } else if (requestCode == REQ_EXPORT && mPendingBackup != null) {
+            mPendingBackup.delete();
+            mPendingBackup = null;
+            finishBackupProgress("已取消保存");
         }
     }
 
@@ -242,17 +281,32 @@ public class CoomiBackupActivity extends Activity {
     /** 备份：会话 + Skill 内容 + MCP/Provider 配置 + 清单，保存到下载目录。 */
     private void backupData() {
         Toast.makeText(this, R.string.coomi_dash_backup_starting, Toast.LENGTH_SHORT).show();
+        setBackupControlsEnabled(false);
+        showBackupProgress("正在准备备份", 0, 0);
         new Thread(() -> {
             if (!CoomiAutoBackup.OPERATION_LOCK.tryLock()) {
-                runOnUiThread(() -> Toast.makeText(this, "已有备份或导入任务正在执行", Toast.LENGTH_SHORT).show());
+                runOnUiThread(() -> {
+                    finishBackupProgress("已有备份或导入任务正在执行");
+                    Toast.makeText(this, "已有备份或导入任务正在执行", Toast.LENGTH_SHORT).show();
+                });
                 return;
             }
             try {
-                File zip = CoomiBackupArchive.create(this);
+                final int[] lastPercent = {-1};
+                final String[] lastStage = {""};
+                File zip = CoomiBackupArchive.create(this, (stage, processed, total) -> {
+                    int percent = total > 0 ? (int) Math.min(100, processed * 100 / total) : -1;
+                    if (percent != lastPercent[0] || !stage.equals(lastStage[0])) {
+                        lastPercent[0] = percent;
+                        lastStage[0] = stage;
+                        showBackupProgress(stage, processed, total);
+                    }
+                });
 
                 String stamp = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date());
                 runOnUiThread(() -> {
                     mPendingBackup = zip;
+                    showBackupProgress("压缩完成，请选择保存位置", zip.length(), zip.length());
                     Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
                     intent.addCategory(Intent.CATEGORY_OPENABLE);
                     intent.setType("application/zip");
@@ -260,12 +314,40 @@ public class CoomiBackupActivity extends Activity {
                     startActivityForResult(intent, REQ_EXPORT);
                 });
             } catch (Exception e) {
-                runOnUiThread(() -> Toast.makeText(this,
-                    getString(R.string.coomi_dash_backup_failed, e.getMessage()), Toast.LENGTH_LONG).show());
+                runOnUiThread(() -> {
+                    finishBackupProgress("备份失败：" + e.getMessage());
+                    Toast.makeText(this, getString(R.string.coomi_dash_backup_failed, e.getMessage()), Toast.LENGTH_LONG).show();
+                });
             } finally {
                 CoomiAutoBackup.OPERATION_LOCK.unlock();
             }
         }).start();
+    }
+
+    private void setBackupControlsEnabled(boolean enabled) {
+        mBackupAction.setEnabled(enabled);
+        mBackupImport.setEnabled(enabled);
+        mBackupAction.setAlpha(enabled ? 1f : 0.55f);
+        mBackupImport.setAlpha(enabled ? 1f : 0.55f);
+    }
+
+    private void showBackupProgress(String stage, long processed, long total) {
+        runOnUiThread(() -> {
+            mBackupProgress.setVisibility(View.VISIBLE);
+            mBackupProgress.setIndeterminate(total <= 0);
+            if (total > 0) mBackupProgress.setProgress((int) Math.min(100, processed * 100 / total));
+            mStatusText.setVisibility(View.VISIBLE);
+            mStatusText.setText(total > 0
+                ? stage + " · " + formatBytes(processed) + " / " + formatBytes(total)
+                : stage);
+        });
+    }
+
+    private void finishBackupProgress(String status) {
+        mBackupProgress.setVisibility(View.GONE);
+        mStatusText.setVisibility(View.VISIBLE);
+        mStatusText.setText(status);
+        setBackupControlsEnabled(true);
     }
 
     private void addSessions(ZipOutputStream zos, File sessionsDir) throws Exception {
@@ -343,6 +425,14 @@ public class CoomiBackupActivity extends Activity {
         }
         CoomiTheme.applyPageSystemBars(this);
         loadAutoBackupControls();
+        mStatusHandler.removeCallbacks(mStatusRefresh);
+        mStatusHandler.post(mStatusRefresh);
+    }
+
+    @Override
+    protected void onPause() {
+        mStatusHandler.removeCallbacks(mStatusRefresh);
+        super.onPause();
     }
 
     private static final class SimpleItemSelectedListener implements AdapterView.OnItemSelectedListener {
@@ -792,6 +882,27 @@ public class CoomiBackupActivity extends Activity {
         byte[] buf = new byte[65536];
         int n;
         while ((n = in.read(buf)) >= 0) out.write(buf, 0, n);
+    }
+
+    private interface CopyProgress {
+        void onBytesCopied(long bytes);
+    }
+
+    private static void copyStream(InputStream in, OutputStream out, long total, CopyProgress progress) throws Exception {
+        byte[] buf = new byte[65536];
+        int n;
+        long copied = 0;
+        int lastPercent = -1;
+        while ((n = in.read(buf)) >= 0) {
+            out.write(buf, 0, n);
+            copied += n;
+            int percent = total > 0 ? (int) Math.min(100, copied * 100 / total) : 0;
+            if (percent != lastPercent) {
+                lastPercent = percent;
+                progress.onBytesCopied(copied);
+            }
+        }
+        out.flush();
     }
 
     private static void copyFile(File src, File dst) throws Exception {

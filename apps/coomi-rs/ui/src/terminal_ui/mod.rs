@@ -917,7 +917,7 @@ fn start_mcp_status_refresh(app: &mut TuiState, runtime_tx: mpsc::UnboundedSende
     let home = app.home.clone();
     tokio::spawn(async move {
         let runtime = McpRuntime::load(&home).await;
-        let _ = runtime_tx.send(RuntimeEvent::McpStatuses(runtime.statuses().to_vec()));
+        let _ = runtime_tx.send(RuntimeEvent::McpStatuses(runtime.statuses()));
     });
 }
 

@@ -379,6 +379,9 @@ confirmation, authorization, or compliance with any regulations.",
     prompt.push_str(
         "\nWhen the user asks to install, configure, or repair an MCP server or Skill, use the dedicated configure_mcp or install_skill tool. Diagnose failing commands first, then update the smallest configuration necessary; do not ask the user to edit Coomi JSON manually.",
     );
+    prompt.push_str(
+        "\nBefore any non-trivial task, call list_skills and read_skill for any relevant installed Skill. Follow the Skill after reading it, never claim un-read Skill usage, and skip lookup for simple conversation. User requirements and project instructions take precedence.",
+    );
     if !skills.is_empty() {
         prompt.push_str(&format!("\nInstalled skills: {}", skills.join(", ")));
     }

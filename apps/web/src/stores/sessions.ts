@@ -53,6 +53,9 @@ export interface TaskInfo {
   running: boolean
   started_at: number
   current_tool?: string | null
+  task_kind?: 'download' | null
+  download_label?: string | null
+  download_status?: 'downloading' | 'completed' | 'failed' | null
 }
 
 function readMetas(): SessionMeta[] {
@@ -90,13 +93,13 @@ export const useSessionsStore = defineStore('sessions', () => {
   /** 引擎侧正在后台执行的会话 id 集合（/api/sessions 的 running 字段）。 */
   const runningIds = ref<Set<string>>(new Set())
   const tasks = ref<TaskInfo[]>([])
-  const taskConcurrencyLimit = ref(2)
+  const taskConcurrencyLimit = ref(5)
 
   async function refreshTasks() {
     try {
       const data = await apiGet<{ tasks: TaskInfo[]; running_count: number; concurrency_limit: number }>('/api/tasks')
       tasks.value = data.tasks ?? []
-      taskConcurrencyLimit.value = data.concurrency_limit || 2
+      taskConcurrencyLimit.value = data.concurrency_limit || 5
       runningIds.value = new Set(tasks.value.filter(task => task.running).map(task => task.session_id))
       window.CoomiAndroid?.updateTaskStatus?.(
         data.running_count > 0 ? `running:${data.running_count}` : 'done',

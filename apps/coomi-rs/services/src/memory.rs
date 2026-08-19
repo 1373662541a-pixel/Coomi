@@ -289,7 +289,8 @@ impl MemoryManager {
     pub fn report(&self) -> String {
         let memories = self.list();
         if memories.is_empty() {
-            return "当前没有 Coomi 内建持久记忆。此指令不会读取任何 MCP、Skill 或第三方记忆扩展。".into();
+            return "当前没有 Coomi 内建持久记忆。此指令不会读取任何 MCP、Skill 或第三方记忆扩展。"
+                .into();
         }
         let mut output = format!(
             "当前共有 {} 条 Coomi 内建持久记忆（不含任何 MCP、Skill 或第三方记忆扩展）。核心层最多保留 {} 条，排序由生命周期、命中次数和创建时间共同决定。\n\n",

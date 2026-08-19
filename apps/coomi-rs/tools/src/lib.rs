@@ -208,10 +208,15 @@ impl CoreTools {
                 })
                 .unwrap_or_default();
             return match CatalogInstaller::new(home).install_mcp(catalog_id, &values) {
-                Ok(path) => ToolResult::success(format!(
-                    "Configured catalog MCP `{catalog_id}` at {}",
-                    path.display()
-                )),
+                Ok(path) => {
+                    if let Some(runtime) = &self.mcp_runtime {
+                        runtime.reload(home).await;
+                    }
+                    ToolResult::success(format!(
+                        "Configured catalog MCP `{catalog_id}` at {}",
+                        path.display()
+                    ))
+                }
                 Err(error) => ToolResult::error(format!("{error:#}")),
             };
         }
@@ -231,7 +236,12 @@ impl CoreTools {
         )
         .await
         {
-            Ok(result) => ToolResult::success(result.message),
+            Ok(result) => {
+                if let Some(runtime) = &self.mcp_runtime {
+                    runtime.reload(home).await;
+                }
+                ToolResult::success(result.message)
+            }
             Err(error) => ToolResult::error(format!("{error:#}")),
         }
     }
@@ -318,9 +328,14 @@ impl CoreTools {
             return ToolResult::error("missing string argument: name");
         };
         match coomi_services::remove_configured_mcp(home, name) {
-            Ok(()) => ToolResult::success(format!(
-                "Uninstalled MCP server `{name}`: configuration removed"
-            )),
+            Ok(()) => {
+                if let Some(runtime) = &self.mcp_runtime {
+                    runtime.reload(home).await;
+                }
+                ToolResult::success(format!(
+                    "Uninstalled MCP server `{name}`: configuration removed"
+                ))
+            }
             Err(error) => ToolResult::error(format!("{error:#}")),
         }
     }
@@ -1663,7 +1678,7 @@ impl ToolRuntime for CoreTools {
             },
             ToolSpec {
                 name: "local_shell".into(),
-                description: "Run and manage a persistent local shell process. Use exec to start, write for stdin, wait for incremental output, and terminate to stop it.".into(),
+                description: "Run and manage a persistent local shell process. Use exec to start, write for stdin, wait for incremental output, and terminate to stop it. For dependency or tool downloads, start with exec and yield-time_ms 0, continue independent work, then use wait before the first dependent step.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {

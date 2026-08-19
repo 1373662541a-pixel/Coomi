@@ -12,6 +12,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::RwLock;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -34,12 +35,21 @@ pub struct McpServerStatus {
     pub error: Option<String>,
 }
 
-#[derive(Default)]
 pub struct McpRuntime {
-    tools: BTreeMap<String, McpTool>,
-    statuses: Vec<McpServerStatus>,
+    tools: RwLock<BTreeMap<String, McpTool>>,
+    statuses: RwLock<Vec<McpServerStatus>>,
 }
 
+impl Default for McpRuntime {
+    fn default() -> Self {
+        Self {
+            tools: RwLock::new(BTreeMap::new()),
+            statuses: RwLock::new(Vec::new()),
+        }
+    }
+}
+
+#[derive(Clone)]
 struct McpTool {
     spec: ToolSpec,
     original_name: String,
@@ -127,13 +137,13 @@ impl McpRuntime {
                 Ok(document) => document,
                 Err(error) => {
                     return Self {
-                        statuses: vec![McpServerStatus {
+                        statuses: RwLock::new(vec![McpServerStatus {
                             name: "configuration".into(),
                             transport: "file".into(),
                             enabled: true,
                             tools_count: 0,
                             error: Some(format!("invalid {}: {error}", path.display())),
-                        }],
+                        }]),
                         ..Self::default()
                     };
                 }
@@ -141,36 +151,41 @@ impl McpRuntime {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Self::default(),
             Err(error) => {
                 return Self {
-                    statuses: vec![McpServerStatus {
+                    statuses: RwLock::new(vec![McpServerStatus {
                         name: "configuration".into(),
                         transport: "file".into(),
                         enabled: true,
                         tools_count: 0,
                         error: Some(format!("failed to read {}: {error}", path.display())),
-                    }],
+                    }]),
                     ..Self::default()
                 };
             }
         };
 
-        let mut runtime = Self::default();
+        let runtime = Self::default();
         for (name, config) in document.servers {
             if !config.enabled {
-                runtime.statuses.push(McpServerStatus {
-                    name,
-                    transport: config.transport,
-                    enabled: false,
-                    tools_count: 0,
-                    error: None,
-                });
+                runtime
+                    .statuses
+                    .write()
+                    .expect("MCP status lock poisoned")
+                    .push(McpServerStatus {
+                        name,
+                        transport: config.transport,
+                        enabled: false,
+                        tools_count: 0,
+                        error: None,
+                    });
                 continue;
             }
             match connect(&name, &config).await {
                 Ok((client, specs)) => {
                     let count = specs.len();
+                    let mut tools = runtime.tools.write().expect("MCP tool lock poisoned");
                     for (original_name, description, parameters) in specs {
                         let flat = mcp_tool_name(&name, &original_name);
-                        runtime.tools.entry(flat.clone()).or_insert(McpTool {
+                        tools.entry(flat.clone()).or_insert(McpTool {
                             spec: ToolSpec {
                                 name: flat,
                                 description,
@@ -180,42 +195,69 @@ impl McpRuntime {
                             client: client.clone(),
                         });
                     }
-                    runtime.statuses.push(McpServerStatus {
+                    drop(tools);
+                    runtime
+                        .statuses
+                        .write()
+                        .expect("MCP status lock poisoned")
+                        .push(McpServerStatus {
+                            name,
+                            transport: config.transport,
+                            enabled: true,
+                            tools_count: count,
+                            error: None,
+                        });
+                }
+                Err(error) => runtime
+                    .statuses
+                    .write()
+                    .expect("MCP status lock poisoned")
+                    .push(McpServerStatus {
                         name,
                         transport: config.transport,
                         enabled: true,
-                        tools_count: count,
-                        error: None,
-                    });
-                }
-                Err(error) => runtime.statuses.push(McpServerStatus {
-                    name,
-                    transport: config.transport,
-                    enabled: true,
-                    tools_count: 0,
-                    error: Some(format!("{error:#}")),
-                }),
+                        tools_count: 0,
+                        error: Some(format!("{error:#}")),
+                    }),
             }
         }
         runtime
     }
 
     pub fn specs(&self) -> Vec<ToolSpec> {
-        self.tools.values().map(|tool| tool.spec.clone()).collect()
+        self.tools
+            .read()
+            .expect("MCP tool lock poisoned")
+            .values()
+            .map(|tool| tool.spec.clone())
+            .collect()
+    }
+
+    /// Reconnect MCP servers and replace the live tool inventory without restarting the agent.
+    pub async fn reload(&self, home: &Path) {
+        let fresh = Self::load(home).await;
+        *self.tools.write().expect("MCP tool lock poisoned") =
+            fresh.tools.into_inner().unwrap_or_default();
+        *self.statuses.write().expect("MCP status lock poisoned") =
+            fresh.statuses.into_inner().unwrap_or_default();
     }
 
     /// 已配置 MCP server 清单（含每个 server 的可调用工具名），供系统提示注入：
     /// agent 需要知道「装了哪些 MCP、能不能用、能调哪些工具」才能方便地调用。
     /// 连接失败的 server 也列出（带错误原因），避免 agent 以为它不存在。
     pub fn inventory(&self) -> String {
-        if self.statuses.is_empty() && self.tools.is_empty() {
+        let tools = self.tools.read().expect("MCP tool lock poisoned");
+        let statuses = self.statuses.read().expect("MCP status lock poisoned");
+        if statuses.is_empty() && tools.is_empty() {
             return String::new();
         }
         let mut out = String::from("Configured MCP servers:\n");
-        for status in &self.statuses {
+        for status in statuses.iter() {
             let prefix = format!("mcp__{}__", sanitize(&status.name));
-            let mut tool_names: Vec<&String> =
-                self.tools.keys().filter(|name| name.starts_with(&prefix)).collect();
+            let mut tool_names: Vec<&String> = tools
+                .keys()
+                .filter(|name| name.starts_with(&prefix))
+                .collect();
             tool_names.sort();
             let state = if !status.enabled {
                 "disabled".to_string()
@@ -241,12 +283,20 @@ impl McpRuntime {
         out
     }
 
-    pub fn statuses(&self) -> &[McpServerStatus] {
-        &self.statuses
+    pub fn statuses(&self) -> Vec<McpServerStatus> {
+        self.statuses
+            .read()
+            .expect("MCP status lock poisoned")
+            .clone()
     }
 
     pub async fn call(&self, name: &str, arguments: Value) -> Option<ToolResult> {
-        let tool = self.tools.get(name)?;
+        let tool = self
+            .tools
+            .read()
+            .expect("MCP tool lock poisoned")
+            .get(name)
+            .cloned()?;
         let result = tool
             .client
             .request(

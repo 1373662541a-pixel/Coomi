@@ -20,6 +20,8 @@ const session = useSessionStore()
 const sessions = useSessionsStore()
 const connection = useConnectionStore()
 const connectionDraft = ref<ConnectionSettings>({ ...config.connectionSettings })
+const reconnectInitialSeconds = ref(config.connectionSettings.reconnectInitialDelayMs / 1000)
+const reconnectMaxSeconds = ref(config.connectionSettings.reconnectMaxDelayMs / 1000)
 const connectionError = ref('')
 const connectionSaved = ref(false)
 const customAppearanceEnabled = ref(document.documentElement.dataset.customAppearance === 'true')
@@ -30,23 +32,48 @@ function syncCustomAppearance() {
 
 function resetConnectionSettings() {
   connectionDraft.value = { ...DEFAULT_CONNECTION_SETTINGS }
+  reconnectInitialSeconds.value = DEFAULT_CONNECTION_SETTINGS.reconnectInitialDelayMs / 1000
+  reconnectMaxSeconds.value = DEFAULT_CONNECTION_SETTINGS.reconnectMaxDelayMs / 1000
   void saveConnectionSettings()
 }
 
 async function saveConnectionSettings() {
   connectionError.value = ''
   connectionSaved.value = false
-  const value = connectionDraft.value
-  if (!Number.isInteger(value.providerRetryCount) || value.providerRetryCount < 0 || value.providerRetryCount > 10
-    || !Number.isInteger(value.wsRetryCount) || value.wsRetryCount < 0 || value.wsRetryCount > 30
-    || !Number.isInteger(value.reconnectInitialDelayMs) || value.reconnectInitialDelayMs < 500 || value.reconnectInitialDelayMs > 60_000
-    || !Number.isInteger(value.reconnectMaxDelayMs) || value.reconnectMaxDelayMs < 1_000 || value.reconnectMaxDelayMs > 120_000
-    || value.reconnectMaxDelayMs < value.reconnectInitialDelayMs) {
-    connectionError.value = '请检查范围，且最大间隔不能小于首次间隔'
+  if (!Number.isInteger(connectionDraft.value.providerRetryCount)
+    || connectionDraft.value.providerRetryCount < 0 || connectionDraft.value.providerRetryCount > 10) {
+    connectionError.value = '模型重试次数需为 0 - 10 的整数'
     return
   }
-  if (await config.saveConnectionSettings(value)) connectionSaved.value = true
-  else connectionError.value = '保存失败，请确认引擎已连接'
+  if (!Number.isInteger(connectionDraft.value.wsRetryCount)
+    || connectionDraft.value.wsRetryCount < 0 || connectionDraft.value.wsRetryCount > 30) {
+    connectionError.value = 'WebSocket 重连次数需为 0 - 30 的整数'
+    return
+  }
+  if (!Number.isFinite(reconnectInitialSeconds.value)
+    || reconnectInitialSeconds.value < 0.5 || reconnectInitialSeconds.value > 60) {
+    connectionError.value = '首次重连间隔需在 0.5 - 60 秒之间'
+    return
+  }
+  if (!Number.isFinite(reconnectMaxSeconds.value)
+    || reconnectMaxSeconds.value < 1 || reconnectMaxSeconds.value > 120) {
+    connectionError.value = '最大重连间隔需在 1 - 120 秒之间'
+    return
+  }
+  if (reconnectMaxSeconds.value < reconnectInitialSeconds.value) {
+    connectionError.value = '最大重连间隔不能小于首次重连间隔'
+    return
+  }
+  const value: ConnectionSettings = {
+    ...connectionDraft.value,
+    reconnectInitialDelayMs: Math.round(reconnectInitialSeconds.value * 1000),
+    reconnectMaxDelayMs: Math.round(reconnectMaxSeconds.value * 1000),
+  }
+  if (await config.saveConnectionSettings(value)) {
+    connectionDraft.value = { ...config.connectionSettings }
+    connectionSaved.value = true
+    session.reconnect()
+  } else connectionError.value = '保存失败，请确认引擎已连接'
 }
 
 /** 全局记忆开关同步失败时的行内提示。 */
@@ -96,7 +123,11 @@ function isCurrent(providerId: string, model: string): boolean {
 onMounted(async () => {
   window.addEventListener('coomi:appearance-changed', syncCustomAppearance)
   void config.fetchCustomPrompt()
-  if (await config.fetchConnectionSettings()) connectionDraft.value = { ...config.connectionSettings }
+  if (await config.fetchConnectionSettings()) {
+    connectionDraft.value = { ...config.connectionSettings }
+    reconnectInitialSeconds.value = config.connectionSettings.reconnectInitialDelayMs / 1000
+    reconnectMaxSeconds.value = config.connectionSettings.reconnectMaxDelayMs / 1000
+  }
   try {
     const res = await authedFetch('/api/settings/telemetry')
     if (res.ok) {
@@ -172,15 +203,15 @@ onBeforeUnmount(() => window.removeEventListener('coomi:appearance-changed', syn
           <input v-model.number="connectionDraft.wsRetryCount" type="number" min="0" max="30" step="1" inputmode="numeric" aria-label="WebSocket 重连次数" />
         </label>
         <label class="number-row">
-          <span class="rt"><span class="rmain">首次重连间隔</span><span class="rsub">500 - 60000 毫秒</span></span>
-          <input v-model.number="connectionDraft.reconnectInitialDelayMs" type="number" min="500" max="60000" step="100" inputmode="numeric" aria-label="首次重连间隔（毫秒）" />
+          <span class="rt"><span class="rmain">首次重连间隔</span><span class="rsub">0.5 - 60 秒</span></span>
+          <input v-model.number="reconnectInitialSeconds" type="number" min="0.5" max="60" step="0.5" inputmode="decimal" aria-label="首次重连间隔（秒）" />
         </label>
         <label class="number-row">
-          <span class="rt"><span class="rmain">最大重连间隔</span><span class="rsub">1000 - 120000 毫秒</span></span>
-          <input v-model.number="connectionDraft.reconnectMaxDelayMs" type="number" min="1000" max="120000" step="500" inputmode="numeric" aria-label="最大重连间隔（毫秒）" />
+          <span class="rt"><span class="rmain">最大重连间隔</span><span class="rsub">1 - 120 秒</span></span>
+          <input v-model.number="reconnectMaxSeconds" type="number" min="1" max="120" step="0.5" inputmode="decimal" aria-label="最大重连间隔（秒）" />
         </label>
         <div class="settings-actions">
-          <span class="save-state" :class="{ err: !!connectionError }">{{ connectionError || (connectionSaved ? '已保存，新连接生效' : '') }}</span>
+          <span class="save-state" :class="{ err: !!connectionError }">{{ connectionError || (connectionSaved ? '已保存并重新连接' : '') }}</span>
           <button class="text-action" type="button" @click="resetConnectionSettings">恢复默认</button>
           <button class="primary-action" type="button" @click="saveConnectionSettings">保存</button>
         </div>

@@ -548,7 +548,7 @@ impl HttpModelProvider {
             .send()
             .await
             .map_err(|error| transport_error("request_send", error))?;
-        if response.status().as_u16() != 400 || !has_reasoning_field(body) {
+        if response.status().as_u16() != 400 {
             return Ok(response);
         }
 
@@ -559,7 +559,12 @@ impl HttpModelProvider {
             .text()
             .await
             .map_err(|error| transport_error("response_body", error))?;
-        if !rejects_reasoning_field(&response_body) {
+        let reasoning_rejected =
+            has_reasoning_field(body) && rejects_reasoning_field(&response_body);
+        let capability_rejected = rejects_model_capability(&response_body);
+        let capability_fallback_available = capability_rejected
+            && (has_optional_capability_fields(body) || has_reasoning_field(body));
+        if !reasoning_rejected && !capability_fallback_available {
             return Err(ProviderRequestError {
                 phase: "response_body",
                 kind: ProviderErrorKind::Http,
@@ -573,7 +578,13 @@ impl HttpModelProvider {
         }
 
         let mut fallback = body.clone();
-        remove_reasoning_fields(&mut fallback);
+        if reasoning_rejected {
+            remove_reasoning_fields(&mut fallback);
+        }
+        if capability_fallback_available {
+            remove_optional_capability_fields(&mut fallback);
+            remove_reasoning_fields(&mut fallback);
+        }
         Ok(self
             .authenticated(self.client.post(endpoint))
             .json(&fallback)
@@ -617,6 +628,41 @@ fn rejects_reasoning_field(body: &str) -> bool {
         || text.contains("extra field")
         || text.contains("invalid parameter");
     mentions_field && rejects_field
+}
+
+fn rejects_model_capability(body: &str) -> bool {
+    let text = body.to_ascii_lowercase();
+    text.contains("model_capability_not_supported")
+        || (text.contains("capability")
+            && (text.contains("not supported")
+                || text.contains("unsupported")
+                || text.contains("does not support")))
+}
+
+fn remove_optional_capability_fields(body: &mut Value) {
+    if let Some(object) = body.as_object_mut() {
+        for key in [
+            "tools",
+            "tool_choice",
+            "parallel_tool_calls",
+            "functions",
+            "function_call",
+        ] {
+            object.remove(key);
+        }
+    }
+}
+
+fn has_optional_capability_fields(body: &Value) -> bool {
+    [
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "functions",
+        "function_call",
+    ]
+    .iter()
+    .any(|key| body.get(*key).is_some())
 }
 
 fn openai_responses_tools(tools: &[coomi_engine::ToolSpec], native_web_search: bool) -> Vec<Value> {
@@ -1861,6 +1907,25 @@ mod tests {
         let mut automatic = json!({"model": "m"});
         apply_reasoning_effort(&mut automatic, Some("auto"), false);
         assert!(!has_reasoning_field(&automatic));
+    }
+
+    #[test]
+    fn capability_fallback_is_detected_and_removes_optional_tools() {
+        assert!(rejects_model_capability(
+            r#"{"error":{"code":"MODEL_CAPABILITY_NOT_SUPPORTED"}}"#
+        ));
+        let mut body = json!({
+            "model": "m",
+            "tools": [{"type": "function"}],
+            "tool_choice": "auto",
+            "parallel_tool_calls": true,
+            "messages": []
+        });
+        remove_optional_capability_fields(&mut body);
+        assert!(body.get("tools").is_none());
+        assert!(body.get("tool_choice").is_none());
+        assert!(body.get("parallel_tool_calls").is_none());
+        assert!(body.get("messages").is_some());
     }
 
     #[test]

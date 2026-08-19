@@ -339,12 +339,23 @@
                 android:text="@string/coomi_backup_hint"/>
 
             <!-- ── 状态行 ── -->
+            <ProgressBar
+                android:id="@+id/progress_backup"
+                style="?android:attr/progressBarStyleHorizontal"
+                android:layout_width="match_parent"
+                android:layout_height="4dp"
+                android:layout_marginTop="@dimen/coomi_space_m"
+                android:indeterminateTint="?attr/coomiBlue"
+                android:max="100"
+                android:progressTint="?attr/coomiBlue"
+                android:visibility="gone" />
+
             <TextView
                 android:id="@+id/txt_backup_status"
                 style="@style/Coomi.Text.Caption"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="@dimen/coomi_space_m"
+                android:layout_marginTop="@dimen/coomi_space_s"
                 android:visibility="gone"
                 tools:text="正在导入备份…"/>
         </LinearLayout>

@@ -79,6 +79,8 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use tokio::sync::RwLock;
 use tokio::sync::Semaphore;
+
+const MAX_CONCURRENT_SESSION_TASKS: usize = 5;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
@@ -234,6 +236,7 @@ struct SessionTask {
     phase: StdMutex<String>,
     started_at: AtomicU64,
     current_tool: StdMutex<Option<String>>,
+    download: StdMutex<Option<DownloadTaskState>>,
     processes: StdMutex<Option<Arc<ProcessManager>>>,
     /// 当前活跃连接的推送通道（None = 断线中）。
     conn_tx: StdMutex<Option<mpsc::UnboundedSender<Message>>>,
@@ -245,6 +248,13 @@ struct SessionTask {
     unacked_events: StdMutex<VecDeque<Value>>,
 }
 
+#[derive(Clone)]
+struct DownloadTaskState {
+    label: String,
+    status: String,
+    process_id: Option<String>,
+}
+
 impl SessionTask {
     fn new() -> Self {
         Self {
@@ -254,6 +264,7 @@ impl SessionTask {
             phase: StdMutex::new("idle".into()),
             started_at: AtomicU64::new(0),
             current_tool: StdMutex::new(None),
+            download: StdMutex::new(None),
             processes: StdMutex::new(None),
             conn_tx: StdMutex::new(None),
             input_queue: Arc::new(InputQueue::default()),
@@ -324,6 +335,10 @@ impl SessionTask {
             .current_tool
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        *self
+            .download
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 
     fn set_phase(&self, phase: &str) {
@@ -338,6 +353,10 @@ impl SessionTask {
         self.set_phase(phase);
         *self
             .current_tool
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        *self
+            .download
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
@@ -355,6 +374,100 @@ fn coomi_envelope(kind: &str, id: Option<&str>, payload: Value) -> Value {
         envelope["id"] = Value::String(id.to_owned());
     }
     envelope
+}
+
+fn download_label(call: &coomi_engine::ToolCall) -> Option<String> {
+    if call.name != "local_shell" && call.name != "shell" {
+        return None;
+    }
+    if call.name == "local_shell"
+        && call.arguments.get("action").and_then(Value::as_str) != Some("exec")
+    {
+        return None;
+    }
+    let command = call.arguments.get("command").and_then(Value::as_str)?;
+    let normalized = command.to_ascii_lowercase();
+    let is_download = [
+        "curl ",
+        "wget ",
+        "git clone",
+        "npm install",
+        "npm i ",
+        "pnpm install",
+        "pnpm add",
+        "yarn install",
+        "pip install",
+        "pip3 install",
+        "cargo install",
+        "pkg install",
+        "apt install",
+        "apt-get install",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker));
+    if !is_download {
+        return None;
+    }
+    let compact = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    Some(if compact.chars().count() > 72 {
+        format!("{}...", compact.chars().take(69).collect::<String>())
+    } else {
+        compact
+    })
+}
+
+fn update_download_state(
+    task: &SessionTask,
+    call: &coomi_engine::ToolCall,
+    result: &coomi_engine::ToolResult,
+    started_download: Option<String>,
+) {
+    let action = call.arguments.get("action").and_then(Value::as_str);
+    if let Some(label) = started_download {
+        let process_id = result
+            .output
+            .lines()
+            .find_map(|line| line.strip_prefix("session_id: "))
+            .map(str::trim)
+            .map(str::to_owned);
+        let status = if !result.success {
+            "failed"
+        } else if process_id.is_some() {
+            "downloading"
+        } else {
+            "completed"
+        };
+        *task
+            .download
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(DownloadTaskState {
+            label,
+            status: status.into(),
+            process_id,
+        });
+        return;
+    }
+    if call.name != "local_shell" || action != Some("wait") {
+        return;
+    }
+    let requested_id = call.arguments.get("session_id").and_then(Value::as_str);
+    let mut download = task
+        .download
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(state) = download.as_mut() else {
+        return;
+    };
+    if state.process_id.as_deref() != requested_id {
+        return;
+    }
+    state.status = if !result.success {
+        "failed".into()
+    } else if result.output.contains("process still running") {
+        "downloading".into()
+    } else {
+        "completed".into()
+    };
 }
 
 /// 当前引擎二进制自身的指纹（MD5 十六进制 + 版本号），写进 ~/.coomi/engine.version。
@@ -481,7 +594,7 @@ pub async fn serve(
         token,
         permission,
         tasks: Arc::new(StdMutex::new(restored_tasks)),
-        task_slots: Arc::new(Semaphore::new(2)),
+        task_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_SESSION_TASKS)),
         vision_degraded: Arc::new(StdMutex::new(HashSet::new())),
         registry_cache: Arc::new(StdMutex::new(registry_cache)),
     };
@@ -1251,6 +1364,11 @@ async fn list_tasks(State(state): State<AppState>) -> Json<Value> {
         let session = Uuid::parse_str(session_id)
             .ok()
             .and_then(|id| store.load(id).ok());
+        let download = task
+            .download
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         items.push(json!({
             "task_id": task_id,
             "session_id": session_id,
@@ -1259,9 +1377,16 @@ async fn list_tasks(State(state): State<AppState>) -> Json<Value> {
             "running": running,
             "started_at": task.started_at.load(Ordering::SeqCst),
             "current_tool": task.current_tool.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone(),
+            "task_kind": download.as_ref().map(|_| "download"),
+            "download_label": download.as_ref().map(|value| value.label.as_str()),
+            "download_status": download.as_ref().map(|value| value.status.as_str()),
         }));
     }
-    items.sort_by_key(|item| std::cmp::Reverse(item["started_at"].as_u64().unwrap_or(0)));
+    items.sort_by_key(|item| {
+        let download_priority = item["task_kind"].as_str() == Some("download")
+            && item["running"].as_bool().unwrap_or(false);
+        std::cmp::Reverse((download_priority, item["started_at"].as_u64().unwrap_or(0)))
+    });
     let running_count = items
         .iter()
         .filter(|item| item["running"].as_bool().unwrap_or(false))
@@ -1269,7 +1394,7 @@ async fn list_tasks(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "tasks": items,
         "running_count": running_count,
-        "concurrency_limit": 2,
+        "concurrency_limit": MAX_CONCURRENT_SESSION_TASKS,
     }))
 }
 
@@ -3750,6 +3875,7 @@ struct BrowserObserver {
     reasoning_effort: String,
     turn_started: StdMutex<Instant>,
     started: StdMutex<HashMap<String, Instant>>,
+    download_calls: StdMutex<HashMap<String, String>>,
     usage: StdMutex<BrowserUsageState>,
     context_categories: BTreeMap<String, u64>,
 }
@@ -3788,6 +3914,7 @@ impl BrowserObserver {
             reasoning_effort,
             turn_started: StdMutex::new(Instant::now()),
             started: StdMutex::new(HashMap::new()),
+            download_calls: StdMutex::new(HashMap::new()),
             usage: StdMutex::new(BrowserUsageState {
                 input_tokens,
                 cached_input_tokens,
@@ -4075,6 +4202,22 @@ impl AgentObserver for BrowserObserver {
                     .push_event(json!({"event_type": "reasoning_chunk", "content": content}));
             }
             AgentEvent::ToolStarted(call) => {
+                if let Some(label) = download_label(call) {
+                    self.download_calls
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .insert(call.id.clone(), label.clone());
+                    *self
+                        .task
+                        .download
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                        Some(DownloadTaskState {
+                            label,
+                            status: "downloading".into(),
+                            process_id: None,
+                        });
+                }
                 *self
                     .task
                     .current_tool
@@ -4098,6 +4241,12 @@ impl AgentObserver for BrowserObserver {
                 }));
             }
             AgentEvent::ToolFinished { call, result } => {
+                let started_download = self
+                    .download_calls
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&call.id);
+                update_download_state(&self.task, call, result, started_download);
                 *self
                     .task
                     .current_tool
@@ -4375,6 +4524,12 @@ fn system_prompt(
     );
     prompt.push_str(
         "\n\nCommunication: lead with results, avoid restating the request or narrating obvious steps, and keep progress updates to meaningful milestones, blockers, or decisions. Final responses start with the outcome and verification. Be concise without hiding failures, risks, or unfinished work. Tool recovery: never repeat an unchanged failing call more than once; for permission, policy, invalid-argument, or missing-path errors, change the parameters or approach before retrying.",
+    );
+    prompt.push_str(
+        "\n\nDownloads: when a tool or dependency must be downloaded, start it through local_shell exec with yield-time_ms 0, continue independent todo items while it runs, then call local_shell wait before the first dependent step. Never assume a download succeeded without checking its final exit result.",
+    );
+    prompt.push_str(
+        "\n\nSkills: before any non-trivial task, call list_skills to inspect installed Skills. If a relevant Skill exists, call read_skill and follow it before acting. Do not claim Skill usage without reading it; skip lookup for simple conversation. User requirements and project instructions take precedence over Skill text.",
     );
     match policy {
         AccessMode::ReadOnly => prompt.push_str(
@@ -4744,6 +4899,33 @@ mod tests {
     use coomi_services::MemoryType;
 
     #[test]
+    fn recognizes_background_dependency_downloads() {
+        let call = coomi_engine::ToolCall {
+            id: "download-1".into(),
+            name: "local_shell".into(),
+            arguments: json!({
+                "action": "exec",
+                "command": "pnpm install --frozen-lockfile",
+                "yield-time_ms": 0
+            }),
+        };
+        assert_eq!(
+            download_label(&call).as_deref(),
+            Some("pnpm install --frozen-lockfile")
+        );
+    }
+
+    #[test]
+    fn ordinary_shell_work_is_not_marked_as_download() {
+        let call = coomi_engine::ToolCall {
+            id: "build-1".into(),
+            name: "local_shell".into(),
+            arguments: json!({"action": "exec", "command": "cargo test"}),
+        };
+        assert_eq!(download_label(&call), None);
+    }
+
+    #[test]
     fn provider_json_never_exposes_secret() {
         let provider = ProviderSettings {
             display: "Primary".into(),
@@ -5074,7 +5256,7 @@ mod tests {
             token: "test-token".into(),
             permission: Arc::new(RwLock::new(PermissionMode::Auto)),
             tasks: Arc::new(StdMutex::new(HashMap::new())),
-            task_slots: Arc::new(Semaphore::new(2)),
+            task_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_SESSION_TASKS)),
             vision_degraded: Arc::new(StdMutex::new(HashSet::new())),
             registry_cache: Arc::new(StdMutex::new(None)),
         };

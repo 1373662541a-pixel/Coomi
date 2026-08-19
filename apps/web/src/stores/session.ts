@@ -138,6 +138,15 @@ export const useSessionStore = defineStore('session', () => {
 
   function disconnect() { transport.value?.close(); transport.value = null; connectedSessionId = '' }
 
+  /** Recreate the active socket so newly saved retry settings take effect immediately. */
+  function reconnect() {
+    const previous = transport.value
+    transport.value = null
+    connectedSessionId = ''
+    previous?.close()
+    connect(connection.wsUrl || undefined)
+  }
+
   function onInbound(env: InboundEnvelope) {
     if (env.type === 'event') applyEvent(env.payload)
     else if (env.type === 'error') pushNotice('error', env.payload.message)
@@ -623,7 +632,7 @@ export const useSessionStore = defineStore('session', () => {
     if (notice?.kind === 'notice') Object.assign(notice, patch)
   }
 
-  return { sessionId, timeline, runState, usage, retryConfirmation, cwd, loop, isBusy, pendingApproval, pendingQuestion, connect, disconnect, flushPersistence, sendMessage, cancel, approve, answerQuestion, setPermissionMode, setReasoningEffort, setMaxToolRounds, togglePlanMode, selectModel, retryInterruptedTurn, dismissRetry, completeFileTransfer, newSession, openSession, deleteSession, setSessionCwd, sendGuide, consentToolFailureFeedback, finishToolFailureFeedback }
+  return { sessionId, timeline, runState, usage, retryConfirmation, cwd, loop, isBusy, pendingApproval, pendingQuestion, connect, reconnect, disconnect, flushPersistence, sendMessage, cancel, approve, answerQuestion, setPermissionMode, setReasoningEffort, setMaxToolRounds, togglePlanMode, selectModel, retryInterruptedTurn, dismissRetry, completeFileTransfer, newSession, openSession, deleteSession, setSessionCwd, sendGuide, consentToolFailureFeedback, finishToolFailureFeedback }
 })
 
 function fmtTokens(n: number): string { return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n) }
