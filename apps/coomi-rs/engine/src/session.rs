@@ -21,6 +21,14 @@ use uuid::Uuid;
 
 static SESSION_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMode {
+    #[default]
+    Agent,
+    Life,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Session {
     pub id: Uuid,
@@ -31,6 +39,10 @@ pub struct Session {
     pub updated_at: DateTime<Utc>,
     pub messages: Vec<ChatMessage>,
     pub usage: TokenUsage,
+    /// Versioned conversation mode. Missing values from older session files
+    /// deserialize as Agent so long-term Life memory never enters code sessions.
+    #[serde(default)]
+    pub mode: SessionMode,
     /// 会话标题：首条用户消息的本地推导，供会话列表/检索使用。
     #[serde(default)]
     pub title: String,
@@ -65,6 +77,7 @@ impl Session {
             updated_at: now,
             messages: Vec::new(),
             usage: TokenUsage::default(),
+            mode: SessionMode::Agent,
             title: String::new(),
             title_manually_set: false,
             pinned: false,

@@ -3,6 +3,7 @@ import { ref, computed } from 'vue'
 import { isDemoMode } from '@/bridge/demoMode'
 import { apiGet, apiSend, authedFetch } from '@/bridge/http'
 import type { Timelineitem } from './viewModel'
+import { parseTranscript, transcriptTail } from '@/utils/chatTimeline'
 
 /**
  * 会话历史（纯本机）。
@@ -19,7 +20,6 @@ const META_KEY = 'coomi.sessions.v1'
 const TRANSCRIPT_PREFIX = 'coomi.transcript.'
 /** 只给最近的若干会话留时间线，避免把 localStorage 撑爆。 */
 const KEEP_TRANSCRIPTS = 12
-const MAX_ITEMS_PER_TRANSCRIPT = 400
 
 export interface SessionMeta {
   id: string
@@ -38,6 +38,8 @@ export interface SessionMeta {
   model?: string
   /** 用户手动重命名过：true 时引擎推导的标题不再覆盖。 */
   renamed?: boolean
+  /** Versioned conversation mode; older metadata defaults to agent. */
+  mode?: 'agent' | 'life'
 }
 
 export interface SessionGroup {
@@ -49,13 +51,26 @@ export interface TaskInfo {
   task_id: string
   session_id: string
   session_title: string
-  status: 'queued' | 'running' | 'awaiting_approval' | 'awaiting_input' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
+  status: 'queued' | 'waiting_lock' | 'running' | 'pause_pending' | 'paused' | 'awaiting_approval' | 'awaiting_input' | 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'conflict'
+  priority: 'low' | 'normal' | 'high'
   running: boolean
   started_at: number
   current_tool?: string | null
   task_kind?: 'download' | null
   download_label?: string | null
   download_status?: 'downloading' | 'completed' | 'failed' | null
+  resources?: Array<{ key: { kind: string; identity: string }; access: 'read' | 'write' }>
+  skills?: string[]
+  model?: string | null
+  retries?: number
+  error?: string | null
+  lock_wait_ms?: number
+}
+
+export interface TaskDetail {
+  task: TaskInfo & { kind: string; created_at_ms: number; updated_at_ms: number }
+  events: Array<{ at_ms: number; event: string; status: TaskInfo['status']; summary?: string }>
+  logs: { events: string; output: string }
 }
 
 function readMetas(): SessionMeta[] {
@@ -116,6 +131,24 @@ export const useSessionsStore = defineStore('sessions', () => {
       return true
     } catch {
       return false
+    }
+  }
+
+  async function taskAction(taskId: string, action: 'pause' | 'resume' | 'cancel' | 'retry' | 'priority', priority?: TaskInfo['priority']): Promise<boolean> {
+    try {
+      await apiSend(`/api/task-details/${encodeURIComponent(taskId)}/action`, 'POST', { action, ...(priority ? { priority } : {}) })
+      await refreshTasks()
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  async function taskDetail(taskId: string): Promise<TaskDetail | null> {
+    try {
+      return await apiGet<TaskDetail>(`/api/task-details/${encodeURIComponent(taskId)}`)
+    } catch {
+      return null
     }
   }
 
@@ -264,7 +297,7 @@ export const useSessionsStore = defineStore('sessions', () => {
   function ensure(id: string, title = '新对话'): SessionMeta {
     let m = find(id)
     if (!m) {
-      m = { id, title, createdAt: Date.now(), updatedAt: Date.now(), turns: 0, pinned: false, cwd: currentCwd.value || undefined }
+      m = { id, title, createdAt: Date.now(), updatedAt: Date.now(), turns: 0, pinned: false, cwd: currentCwd.value || undefined, mode: 'agent' }
       metas.value.unshift(m)
       persistMeta()
     }
@@ -282,6 +315,11 @@ export const useSessionsStore = defineStore('sessions', () => {
     // Once the user has renamed a session, that explicit title always wins.
     if (patch.title && !m.renamed) m.title = patch.title
     if (patch.turns != null) m.turns = patch.turns
+    persistMeta()
+  }
+
+  function setMode(id: string, mode: 'agent' | 'life') {
+    ensure(id).mode = mode
     persistMeta()
   }
 
@@ -377,7 +415,7 @@ export const useSessionsStore = defineStore('sessions', () => {
 
   function saveTranscript(id: string, items: Timelineitem[]) {
     if (items.length === 0) return
-    const tail = items.slice(-MAX_ITEMS_PER_TRANSCRIPT)
+    const tail = transcriptTail(items)
     try {
       localStorage.setItem(TRANSCRIPT_PREFIX + id, JSON.stringify(tail))
       pruneTranscripts()
@@ -396,8 +434,7 @@ export const useSessionsStore = defineStore('sessions', () => {
     try {
       const raw = localStorage.getItem(TRANSCRIPT_PREFIX + id)
       if (!raw) return []
-      const parsed = JSON.parse(raw)
-      return Array.isArray(parsed) ? (parsed as Timelineitem[]) : []
+      return parseTranscript(raw)
     } catch {
       return []
     }
@@ -439,6 +476,7 @@ export const useSessionsStore = defineStore('sessions', () => {
         created_at: string
         title_manually_set: boolean
         pinned: boolean
+        mode?: 'agent' | 'life'
       }>
       const localById = new Map(metas.value.map(m => [m.id, m]))
       const legacyMigrations: Array<Promise<unknown>> = []
@@ -469,6 +507,7 @@ export const useSessionsStore = defineStore('sessions', () => {
           preview: r.preview || local?.preview,
           model: r.model || local?.model,
           renamed: r.title_manually_set || Boolean(legacyTitle),
+          mode: r.mode ?? local?.mode ?? 'agent',
         }
       })
       // 本地有而引擎暂无的（旧迁移 ID 等）保留，避免吞掉用户数据
@@ -487,9 +526,9 @@ export const useSessionsStore = defineStore('sessions', () => {
 
   return {
     metas, query, sorted, filtered, groups, currentCwd, setCurrentCwd,
-    tasks, runningIds, taskConcurrencyLimit, refreshTasks, cancelTask,
+    tasks, runningIds, taskConcurrencyLimit, refreshTasks, cancelTask, taskAction, taskDetail,
     syncFromEngine,
-    ensure, touch, rename, togglePin, remove, find, deriveTitle,
+    ensure, touch, setMode, rename, togglePin, remove, find, deriveTitle,
     saveTranscript, loadTranscript, migrateId, clearAll,
     refreshRunning, isRunning,
   }

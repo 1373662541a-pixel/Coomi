@@ -259,6 +259,7 @@ async function copy(text: string) {
             :src="src"
             :alt="`图片 ${i + 1}`"
             loading="lazy"
+            decoding="async"
             @click.stop="openPreview(src)"
           />
         </div>
@@ -320,7 +321,7 @@ async function copy(text: string) {
           @pointercancel="onPreviewPointerEnd"
           @dblclick.prevent="togglePreviewZoom"
         >
-          <img ref="previewImage" :src="previewSrc" class="iv-img" :style="previewTransform" draggable="false" />
+          <img ref="previewImage" :src="previewSrc" class="iv-img" :style="previewTransform" decoding="async" draggable="false" />
         </div>
         <div class="iv-bar">
           <button class="iv-btn primary" @click.stop="savePreview">另存为</button>

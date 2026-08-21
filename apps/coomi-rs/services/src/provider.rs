@@ -55,7 +55,7 @@ impl HttpModelProvider {
             )?,
             "stream": false
         });
-        if !request.tools.is_empty() {
+        if self.config.capabilities.supports_native_tools && !request.tools.is_empty() {
             body["tools"] = Value::Array(
                 request
                     .tools
@@ -73,6 +73,9 @@ impl HttpModelProvider {
                     .collect(),
             );
             body["tool_choice"] = Value::String("auto".into());
+            if self.config.capabilities.supports_parallel_tool_calls {
+                body["parallel_tool_calls"] = Value::Bool(true);
+            }
         }
         apply_reasoning_effort(&mut body, request.reasoning_effort.as_deref(), false);
         let response = self.send_with_reasoning_fallback(&endpoint, &body).await?;
@@ -105,7 +108,7 @@ impl HttpModelProvider {
             )?,
             "stream": true
         });
-        if !request.tools.is_empty() {
+        if self.config.capabilities.supports_native_tools && !request.tools.is_empty() {
             body["tools"] = Value::Array(
                 request
                     .tools
@@ -123,6 +126,9 @@ impl HttpModelProvider {
                     .collect(),
             );
             body["tool_choice"] = Value::String("auto".into());
+            if self.config.capabilities.supports_parallel_tool_calls {
+                body["parallel_tool_calls"] = Value::Bool(true);
+            }
         }
         apply_reasoning_effort(&mut body, request.reasoning_effort.as_deref(), false);
         let response = self.send_with_reasoning_fallback(&endpoint, &body).await?;
@@ -254,11 +260,19 @@ impl HttpModelProvider {
             "input": responses_input(&request.messages, self.config.capabilities.supports_vision)?,
             "stream": false
         });
+        let request_tools = if self.config.capabilities.supports_native_tools {
+            request.tools.as_slice()
+        } else {
+            &[]
+        };
         let provider_tools =
-            openai_responses_tools(&request.tools, self.config.capabilities.supports_web_search);
+            openai_responses_tools(request_tools, self.config.capabilities.supports_web_search);
         if !provider_tools.is_empty() {
             body["tools"] = Value::Array(provider_tools);
             body["tool_choice"] = Value::String("auto".into());
+            if self.config.capabilities.supports_parallel_tool_calls {
+                body["parallel_tool_calls"] = Value::Bool(true);
+            }
         }
         apply_reasoning_effort(&mut body, request.reasoning_effort.as_deref(), true);
         let response = self.send_with_reasoning_fallback(&endpoint, &body).await?;
@@ -315,11 +329,19 @@ impl HttpModelProvider {
             "input": responses_input(&request.messages, self.config.capabilities.supports_vision)?,
             "stream": true
         });
+        let request_tools = if self.config.capabilities.supports_native_tools {
+            request.tools.as_slice()
+        } else {
+            &[]
+        };
         let provider_tools =
-            openai_responses_tools(&request.tools, self.config.capabilities.supports_web_search);
+            openai_responses_tools(request_tools, self.config.capabilities.supports_web_search);
         if !provider_tools.is_empty() {
             body["tools"] = Value::Array(provider_tools);
             body["tool_choice"] = Value::String("auto".into());
+            if self.config.capabilities.supports_parallel_tool_calls {
+                body["parallel_tool_calls"] = Value::Bool(true);
+            }
         }
         apply_reasoning_effort(&mut body, request.reasoning_effort.as_deref(), true);
         let response = self.send_with_reasoning_fallback(&endpoint, &body).await?;
@@ -353,6 +375,7 @@ impl HttpModelProvider {
         let mut provider_tools = request
             .tools
             .iter()
+            .filter(|_| self.config.capabilities.supports_native_tools)
             .filter(|tool| {
                 !(self.config.capabilities.supports_web_search && tool.name == "web_search")
             })
@@ -443,6 +466,7 @@ impl HttpModelProvider {
         let function_declarations = request
             .tools
             .iter()
+            .filter(|_| self.config.capabilities.supports_native_tools)
             .filter(|tool| {
                 !(self.config.capabilities.supports_web_search && tool.name == "web_search")
             })
@@ -585,12 +609,11 @@ impl HttpModelProvider {
             remove_optional_capability_fields(&mut fallback);
             remove_reasoning_fields(&mut fallback);
         }
-        Ok(self
-            .authenticated(self.client.post(endpoint))
+        self.authenticated(self.client.post(endpoint))
             .json(&fallback)
             .send()
             .await
-            .map_err(|error| transport_error("request_send", error))?)
+            .map_err(|error| transport_error("request_send", error))
     }
 }
 
@@ -2121,7 +2144,13 @@ mod tests {
         );
 
         let (_, gemini) = gemini_messages(&history, false).expect("Gemini history");
-        assert_eq!(gemini[1]["parts"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            gemini[1]["parts"]
+                .as_array()
+                .expect("Gemini assistant parts")
+                .len(),
+            1
+        );
         assert!(gemini[1]["parts"][0]["inlineData"].is_null());
     }
 

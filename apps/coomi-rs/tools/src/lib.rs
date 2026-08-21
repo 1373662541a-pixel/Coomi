@@ -24,6 +24,9 @@ use coomi_services::McpRuntime;
 use coomi_services::MemoryManager;
 use coomi_services::MemoryScope;
 use coomi_services::MemoryType;
+use coomi_services::RuntimeBackend;
+use coomi_services::RuntimeBackendKind;
+use coomi_services::RuntimeManager;
 use coomi_services::apply_auto_config;
 use coomi_telemetry::Telemetry;
 use ignore::WalkBuilder;
@@ -104,12 +107,27 @@ impl CoreTools {
         Arc::clone(&self.processes)
     }
 
+    pub fn with_runtime_backend(mut self, backend: Arc<dyn RuntimeBackend>) -> Self {
+        self.processes = Arc::new(ProcessManager::default().with_runtime_backend(backend));
+        self
+    }
+
     pub fn with_skills_directory(mut self, directory: PathBuf) -> Self {
         self.skills_directory = Some(directory);
         self
     }
 
     pub fn with_config_home(mut self, home: PathBuf) -> Self {
+        if let Ok(manager) = RuntimeManager::open(&home)
+            && let Ok(backend) = manager.backend(
+                home.join("files").join("usr"),
+                home.join("files").join("home"),
+            )
+            && backend.kind() == RuntimeBackendKind::ProotLinux
+        {
+            self.processes =
+                Arc::new(ProcessManager::default().with_runtime_backend(Arc::from(backend)));
+        }
         self.config_home = Some(home);
         self
     }

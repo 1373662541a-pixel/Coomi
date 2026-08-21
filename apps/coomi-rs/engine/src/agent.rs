@@ -13,6 +13,7 @@ use crate::Session;
 use crate::ToolConcurrency;
 use crate::ToolResult;
 use crate::ToolRuntime;
+use crate::TurnControl;
 use crate::compacted_history;
 use crate::normalize_history;
 use crate::trim_history_to_fit;
@@ -40,6 +41,7 @@ pub enum AgentError {
     Compaction(anyhow::Error),
     ToolRoundLimit { limit: usize },
     Hook(String),
+    Control(String),
 }
 
 impl fmt::Display for AgentError {
@@ -51,6 +53,7 @@ impl fmt::Display for AgentError {
                 write!(formatter, "tool round limit reached ({limit})")
             }
             Self::Hook(error) => write!(formatter, "hook failed: {error}"),
+            Self::Control(error) => write!(formatter, "task control failed: {error}"),
         }
     }
 }
@@ -75,6 +78,7 @@ pub struct Agent {
     /// 上下文检查点回调：任务执行中的关键节点（用户消息、模型回复、每轮
     /// 工具结果）落盘会话，意外中断/重启后仍能从磁盘恢复完整上下文。
     checkpoint: Option<Arc<dyn Fn(&Session) + Send + Sync>>,
+    turn_control: Option<Arc<dyn TurnControl>>,
 }
 
 impl Agent {
@@ -92,6 +96,7 @@ impl Agent {
             vision_fallback: None,
             reasoning_effort: None,
             checkpoint: None,
+            turn_control: None,
         }
     }
 
@@ -99,6 +104,21 @@ impl Agent {
     pub fn with_checkpoint(mut self, checkpoint: Arc<dyn Fn(&Session) + Send + Sync>) -> Self {
         self.checkpoint = Some(checkpoint);
         self
+    }
+
+    pub fn with_turn_control(mut self, control: Arc<dyn TurnControl>) -> Self {
+        self.turn_control = Some(control);
+        self
+    }
+
+    async fn safe_point(&self) -> Result<(), AgentError> {
+        if let Some(control) = &self.turn_control {
+            control
+                .safe_point()
+                .await
+                .map_err(|error| AgentError::Control(format!("{error:#}")))?;
+        }
+        Ok(())
     }
 
     /// 执行检查点（若已注册）。中断保护：任务执行中的上下文按节点落盘，
@@ -354,6 +374,7 @@ impl Agent {
         let mut tool_failures: HashMap<String, ToolFailureState> = HashMap::new();
 
         'tool_rounds: for round in 1..=self.max_tool_rounds {
+            self.safe_point().await?;
             session.messages = normalize_history(&session.messages);
             session
                 .context

@@ -298,7 +298,10 @@ impl ProviderRegistry {
             && let Some(provider) = self.find_provider(provider_id)
         {
             // declared = model / fast_model 字段，或前端保存的 models 列表（extra.models）
-            let in_models = provider.models.iter().any(|candidate| candidate.eq_ignore_ascii_case(model));
+            let in_models = provider
+                .models
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(model));
             let allowed = provider.model.eq_ignore_ascii_case(model)
                 || provider
                     .fast_model
@@ -460,7 +463,9 @@ mod tests {
             providers: BTreeMap::new(),
             extra: BTreeMap::new(),
         };
-        empty.validate().expect("empty document is valid for presets");
+        empty
+            .validate()
+            .expect("empty document is valid for presets");
 
         let draft = ProviderDocument {
             active: String::new(),

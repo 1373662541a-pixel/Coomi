@@ -137,6 +137,10 @@ function modelContextSelection(model: string): string {
   return CONTEXT_WINDOW_PRESETS.includes(value) ? String(value) : 'custom'
 }
 
+function capabilityFor(model: string) {
+  return provider.value?.capabilities?.find(item => item.key.model === model)
+}
+
 function modelCustomContextWindow(model: string): number {
   return draft.value?.modelContextWindows[model]
     ?? draft.value?.contextWindow
@@ -242,7 +246,11 @@ async function saveProvider(successMessage: string, returnToList = false) {
 }
 
 async function saveConfig() {
-  return saveProvider('配置已保存')
+  const saved = await saveProvider('配置已保存')
+  if (!saved) return false
+  tab.value = 'models'
+  await discover(true)
+  return true
 }
 
 async function saveConfigAndBack() {
@@ -283,7 +291,7 @@ async function revealKey() {
   }
 }
 
-async function discover() {
+async function discover(skipSave = false) {
   if (!draft.value) return
   if (!draft.value.apiKey.trim() && !provider.value?.hasKey) {
     error.value = '请先填写 API Key 后再获取模型'
@@ -293,7 +301,7 @@ async function discover() {
     error.value = '请先填写 API Base URL 后再获取模型'
     return
   }
-  if (!(await saveConfig())) return
+  if (!skipSave && !(await saveProvider('配置已保存'))) return
   discovering.value = true
   error.value = ''
   const models = await config.discoverModels(draft.value.id)
@@ -370,7 +378,7 @@ function openModelConfig() {
   <div class="page">
     <PageHead :title="draft?.name || (isNew ? '新建提供商' : '提供商详情')" @back="back">
       <template #right>
-        <button v-if="tab === 'config'" class="head-save" :disabled="!canSave || saving" @click="saveConfigAndBack">保存</button>
+        <button v-if="tab === 'config'" class="head-save" :disabled="!canSave || saving" @click="saveConfig">保存</button>
       </template>
     </PageHead>
 
@@ -453,12 +461,17 @@ function openModelConfig() {
             <input v-model="manualModel" class="input" placeholder="输入模型 ID" autocomplete="off" autocapitalize="off" @keyup.enter="addManualModel" />
             <button type="button" aria-label="添加模型" @click="addManualModel"><CoomiIcon name="plus" :size="17" /></button>
           </label>
-          <button class="btn btn-soft discover" :disabled="discovering || saving" @click="discover"><CoomiIcon name="refresh" :size="16" />{{ discovering ? '获取中...' : '在线获取' }}</button>
+          <button type="button" class="btn btn-soft discover" :disabled="discovering || saving" @click="discover()"><CoomiIcon name="refresh" :size="16" />{{ discovering ? '获取中...' : '在线获取' }}</button>
         </div>
         <p class="subnote">每个模型可单独设置上下文窗口，选择“默认”时继承供应商配置。</p>
         <div class="model-list">
           <div v-for="model in draft.models" :key="model" class="model-item">
-            <code>{{ model }}</code>
+            <span class="model-id">
+              <code>{{ model }}</code>
+              <small v-if="capabilityFor(model)">
+                {{ capabilityFor(model)!.source }} · {{ capabilityFor(model)!.text.state === 'verified' ? '已验证' : capabilityFor(model)!.text.state === 'inferred' ? '推断' : capabilityFor(model)!.text.state }} · {{ new Date(capabilityFor(model)!.probed_at_ms).toLocaleString() }}
+              </small>
+            </span>
             <select
               class="model-window"
               :value="modelContextSelection(model)"
@@ -547,7 +560,9 @@ function openModelConfig() {
 .model-list { overflow: hidden; border-radius: var(--r-card); background: var(--bg); box-shadow: var(--shadow-1); }
 .model-item { display: flex; align-items: center; gap: 8px; min-height: 52px; padding: 8px 10px 8px 13px; }
 .model-item + .model-item { border-top: 1px solid var(--border); }
-.model-item code { flex: 1; min-width: 0; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 12.5px; color: var(--text); }
+.model-id { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; }
+.model-item code { min-width: 0; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 12.5px; color: var(--text); }
+.model-item small { color: var(--text-3); font-size: 10px; overflow-wrap: anywhere; }
 .model-window { flex: 0 0 88px; min-height: 30px; padding: 0 5px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--bg); color: var(--text-2); font-size: 11px; }
 .model-window-custom { flex: 0 0 58px; min-height: 30px; padding: 0 5px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--bg); color: var(--text-2); font-size: 11px; }
 .model-actions { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }

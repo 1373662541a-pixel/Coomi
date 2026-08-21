@@ -5,7 +5,7 @@
  */
 import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { useConfigStore } from '@/stores/config'
+import { useConfigStore, type CapabilityState } from '@/stores/config'
 import { useSessionStore } from '@/stores/session'
 import { useConnectionStore } from '@/stores/connection'
 import CoomiIcon from './CoomiIcon.vue'
@@ -21,7 +21,24 @@ const usageOpen = ref(false)
 const pathPickerOpen = ref(false)
 const pathInput = ref('')
 const pathNotice = ref('')
-const providerGroups = computed(() => [...config.providers].sort((a, b) => Number(b.id === config.activeId) - Number(a.id === config.activeId)))
+const modelGroups = computed(() => {
+  const groups: Record<'text' | 'vision' | 'image', Array<{ providerId: string; provider: string; model: string; state: CapabilityState }>> = { text: [], vision: [], image: [] }
+  for (const provider of [...config.providers].sort((a, b) => Number(b.id === config.activeId) - Number(a.id === config.activeId))) {
+    for (const model of provider.models) {
+      const profile = provider.capabilities?.find(item => item.key.model === model)
+      const category = profile?.image_generation.state === 'verified' || profile?.image_generation.state === 'inferred'
+        ? 'image'
+        : profile?.vision.state === 'verified' || profile?.vision.state === 'inferred' ? 'vision' : 'text'
+      const evidence = category === 'image' ? profile?.image_generation : category === 'vision' ? profile?.vision : profile?.text
+      groups[category].push({ providerId: provider.id, provider: provider.name, model, state: evidence?.state ?? 'unknown' })
+    }
+  }
+  return [
+    { id: 'text', label: '文本', items: groups.text },
+    { id: 'vision', label: '视觉', items: groups.vision },
+    { id: 'image', label: '生图', items: groups.image },
+  ].filter(group => group.items.length > 0)
+})
 const usagePercent = computed(() => Math.min(100, Math.max(0, Math.round((session.usage?.contextRatio ?? 0) * 100))))
 const usageStroke = computed(() => `${usagePercent.value} ${100 - usagePercent.value}`)
 const effortLabels = { auto: '自动', low: '低', medium: '中', high: '高', xhigh: '超高' } as const
@@ -100,15 +117,17 @@ function browseInFileManager() {
 
     <button v-if="modelOpen" class="model-scrim" aria-label="关闭模型选择" @click="modelOpen = false" />
     <div v-if="modelOpen" class="model-menu">
-      <template v-if="providerGroups.some(p => p.models.length)">
-        <section v-for="p in providerGroups" :key="p.id" class="model-group">
-          <p v-if="p.models.length" class="provider-name">{{ p.name }}<span v-if="p.id === config.activeId">当前</span></p>
+      <template v-if="modelGroups.length">
+        <section v-for="group in modelGroups" :key="group.id" class="model-group">
+          <p class="provider-name">{{ group.label }}</p>
           <button
-            v-for="m in p.models" :key="p.id + ':' + m" class="model-row"
-            :class="{ selected: p.id === config.currentProviderId && m === config.currentModel }"
-            @click="choose(p.id, m)"
+            v-for="item in group.items" :key="item.providerId + ':' + item.model" class="model-row"
+            :class="{ selected: item.providerId === config.currentProviderId && item.model === config.currentModel }"
+            @click="choose(item.providerId, item.model)"
           >
-            <span>{{ m }}</span><CoomiIcon v-if="p.id === config.currentProviderId && m === config.currentModel" name="check" :size="15" />
+            <span><b>{{ item.model }}</b><small>{{ item.provider }}</small></span>
+            <em :class="item.state">{{ item.state === 'verified' ? '已验证' : item.state === 'inferred' ? '推断' : '未知' }}</em>
+            <CoomiIcon v-if="item.providerId === config.currentProviderId && item.model === config.currentModel" name="check" :size="15" />
           </button>
         </section>
       </template>
@@ -259,7 +278,12 @@ function browseInFileManager() {
 .provider-name { display: flex; align-items: center; gap: 6px; padding: 5px 8px 3px; font-size: 11.5px; color: var(--text-3); }
 .provider-name span { padding: 1px 5px; border-radius: var(--r-pill); background: var(--blue-soft); color: var(--blue); }
 .model-row { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 38px; padding: 7px 9px; border: 0; border-radius: var(--r-sm); background: none; color: var(--text); text-align: left; }
-.model-row span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 12.5px; }
+.model-row span { display: flex; flex: 1; min-width: 0; flex-direction: column; overflow: hidden; }
+.model-row b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 12.5px; font-weight: 500; }
+.model-row small { overflow: hidden; color: var(--text-3); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
+.model-row em { flex-shrink: 0; color: var(--text-3); font-size: 10px; font-style: normal; }
+.model-row em.verified { color: var(--ok); }
+.model-row em.inferred { color: var(--orange); }
 .model-row.selected { background: var(--blue-soft); color: var(--blue); }
 .model-row:active { background: var(--fill-press); }
 .model-empty { padding: 16px 10px; text-align: center; font-size: 12.5px; color: var(--text-3); }

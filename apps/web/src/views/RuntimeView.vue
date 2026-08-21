@@ -7,7 +7,7 @@
  */
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { apiGet } from '@/bridge/http'
+import { apiGet, apiSend } from '@/bridge/http'
 import { useConnectionStore } from '@/stores/connection'
 import PageHead from '@/components/PageHead.vue'
 import CoomiIcon from '@/components/CoomiIcon.vue'
@@ -18,6 +18,12 @@ interface Health {
   engine: { initialized: boolean; llm: string | null; tools: number }
   runtime?: string
 }
+interface RuntimeV2 {
+  runtime: { backend: 'legacy_termux' | 'proot_linux'; status: 'not_installed' | 'downloading' | 'initializing' | 'ready' | 'needs_repair' | 'update_available' | 'rolling_back' | 'removing'; active_version?: string; previous_version?: string; error?: string }
+  manifest_available: boolean
+  manifest?: { runtime_version: string; architecture: string; proot_commit: string; rootfs_bytes: number }
+  legacy_available: boolean
+}
 
 const router = useRouter()
 const connection = useConnectionStore()
@@ -25,6 +31,9 @@ const connection = useConnectionStore()
 const health = ref<Health | null>(null)
 const port = ref<number | null>(null)
 const failed = ref(false)
+const runtimeV2 = ref<RuntimeV2 | null>(null)
+const runtimeAction = ref('')
+const runtimeError = ref('')
 const refreshing = ref(false)
 let timer: ReturnType<typeof setInterval> | null = null
 
@@ -37,12 +46,26 @@ async function load(manual = false) {
     health.value = null
     failed.value = true
   }
+  try { runtimeV2.value = await apiGet<RuntimeV2>('/api/runtime/v2') } catch { runtimeV2.value = null }
   try {
     port.value = (await apiGet<{ port: number }>('/api/runtime/port')).port
   } catch {
     /* 端口拿不到不算故障，健康检查已经说明问题了 */
   }
   if (manual) refreshing.value = false
+}
+
+async function runRuntimeAction(action: 'install' | 'update' | 'repair' | 'rollback' | 'remove') {
+  runtimeAction.value = action
+  runtimeError.value = ''
+  try {
+    await apiSend('/api/runtime/v2', 'POST', { action })
+    await load()
+  } catch (error) {
+    runtimeError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    runtimeAction.value = ''
+  }
 }
 
 onMounted(() => {
@@ -101,6 +124,24 @@ function goDashboard() {
         </div>
       </div>
 
+      <template v-if="runtimeV2">
+        <p class="sec-label">ProotLinux</p>
+        <div class="group runtime-v2">
+          <div class="kv"><span class="k">后端</span><span class="v mono">{{ runtimeV2.runtime.backend }}</span></div>
+          <div class="kv"><span class="k">状态</span><span class="v">{{ runtimeV2.runtime.status }}</span></div>
+          <div class="kv"><span class="k">当前版本</span><span class="v mono">{{ runtimeV2.runtime.active_version || '未安装' }}</span></div>
+          <div v-if="runtimeV2.manifest" class="kv"><span class="k">可用版本</span><span class="v mono">{{ runtimeV2.manifest.runtime_version }}</span></div>
+          <div class="runtime-actions">
+            <button v-if="runtimeV2.manifest_available && runtimeV2.runtime.status === 'not_installed'" :disabled="!!runtimeAction" @click="runRuntimeAction('install')">安装</button>
+            <button v-if="runtimeV2.manifest_available && runtimeV2.runtime.status === 'update_available'" :disabled="!!runtimeAction" @click="runRuntimeAction('update')">更新</button>
+            <button v-if="runtimeV2.runtime.status === 'needs_repair'" :disabled="!!runtimeAction" @click="runRuntimeAction('repair')">修复</button>
+            <button v-if="runtimeV2.runtime.previous_version" :disabled="!!runtimeAction" @click="runRuntimeAction('rollback')">回滚</button>
+            <button v-if="runtimeV2.runtime.status !== 'not_installed'" class="danger" :disabled="!!runtimeAction" @click="runRuntimeAction('remove')">删除</button>
+          </div>
+          <p v-if="runtimeError || runtimeV2.runtime.error" class="runtime-error">{{ runtimeError || runtimeV2.runtime.error }}</p>
+        </div>
+      </template>
+
       <button v-if="health && health.status !== 'ok'" class="btn btn-soft wide" @click="router.push('/providers')">
         去配置提供商
       </button>
@@ -145,4 +186,9 @@ function goDashboard() {
 .wide { width: 100%; margin-top: 14px; }
 .note { margin-top: 16px; padding: 0 4px; font-size: 12px; line-height: 1.75; color: var(--text-3); }
 .note code { font-family: var(--font-mono); font-size: 11.2px; }
+.runtime-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--border); }
+.runtime-actions button { min-height: 36px; padding: 0 13px; border-radius: 6px; background: var(--blue); color: #fff; font-size: 13px; }
+.runtime-actions button.danger { background: var(--danger-soft); color: var(--danger); }
+.runtime-actions button:disabled { opacity: .5; }
+.runtime-error { margin: 0; padding: 0 12px 12px; color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
 </style>

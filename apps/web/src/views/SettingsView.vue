@@ -272,6 +272,11 @@ onBeforeUnmount(() => window.removeEventListener('coomi:appearance-changed', syn
       </div>
       <p class="sec-label">配置</p>
       <div class="group">
+        <button class="row" @click="router.push('/life')">
+          <span class="ri"><CoomiIcon name="sparkle" :size="17" /></span>
+          <span class="rt"><span class="rmain">数字生命体（实验）</span><span class="rsub">Coomi Life</span></span>
+          <CoomiIcon name="chevronRight" :size="15" class="arw" />
+        </button>
         <button class="row" @click="router.push('/sessions')">
           <span class="ri"><CoomiIcon name="chat" :size="17" /></span>
           <span class="rt"><span class="rmain">会话历史</span></span>

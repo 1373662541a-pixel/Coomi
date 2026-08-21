@@ -9,68 +9,43 @@
  * 3) 连续的工具调用合并成一个 ToolGroup，避免长任务把时间线冲成一堵卡片墙。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller'
+import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
 import { useSessionStore } from '@/stores/session'
 import { useSessionsStore } from '@/stores/sessions'
 import { useConfigStore } from '@/stores/config'
 import { apiGet } from '@/bridge/http'
 import { DEMO_PROMPT, isUnattended, shouldAutoplay } from '@/bridge/demoMode'
 import { useAutoScroll } from '@/composables/useAutoScroll'
-import type { Timelineitem, ToolCard } from '@/stores/viewModel'
+import type { ToolCard } from '@/stores/viewModel'
+import { buildTimelineBlocks, type TimelineBlockItem } from '@/utils/chatTimeline'
 import type { ApprovalDecision } from '@/protocol/commands'
 import TopBar from '@/components/TopBar.vue'
 import SideDrawer from '@/components/SideDrawer.vue'
 import StatusBar from '@/components/StatusBar.vue'
 import Composer from '@/components/Composer.vue'
 import EmptyState from '@/components/EmptyState.vue'
-import MessageBubble from '@/components/MessageBubble.vue'
-import ToolGroup from '@/components/ToolGroup.vue'
-import ReasoningBlock from '@/components/ReasoningBlock.vue'
-import NoticeItem from '@/components/NoticeItem.vue'
+import TimelineBlock from '@/components/TimelineBlock.vue'
 import LoopProgressBar from '@/components/LoopProgressBar.vue'
 import ApprovalSheet from '@/components/ApprovalSheet.vue'
 import QuestionSheet from '@/components/QuestionSheet.vue'
 import CoomiIcon from '@/components/CoomiIcon.vue'
 import { registerOverlay, unregisterOverlay } from '@/bridge/overlayStack'
 
-type Block =
-  | { t: 'one'; key: string; item: Timelineitem }
-  | { t: 'tools'; key: string; cards: ToolCard[] }
-
 const session = useSessionStore()
 const sessions = useSessionsStore()
 const config = useConfigStore()
 
 const scroller = ref<HTMLElement | null>(null)
+const virtualScroller = ref<InstanceType<typeof DynamicScroller> | null>(null)
 const content = ref<HTMLElement | null>(null)
 const drawerOpen = ref(false)
 /** 全局轮询「后台运行中」状态的定时器（会话列表转圈的数据源）。 */
 let runningPoll: ReturnType<typeof setInterval> | null = null
 
-/** 长会话动态加载：只渲染最近一段，顶部可「加载更早记录」。 */
-const RENDER_WINDOW = 60
-const windowSize = ref(RENDER_WINDOW)
-const hasMore = computed(() => session.timeline.length > windowSize.value)
-function loadMore() { windowSize.value += RENDER_WINDOW }
-// 新消息到达时 slice(-windowSize) 自动包含最新，无需额外 watch
-
 const { following, follow, jumpToBottom } = useAutoScroll(scroller)
 
-function idOf(i: Timelineitem): string { return 'id' in i ? i.id : i.callId }
-
-const blocks = computed<Block[]>(() => {
-  const out: Block[] = []
-  const items = session.timeline.slice(-windowSize.value)
-  for (const item of items) {
-    if (item.kind === 'tool') {
-      const last = out[out.length - 1]
-      if (last && last.t === 'tools') { last.cards.push(item); continue }
-      out.push({ t: 'tools', key: 'g:' + item.callId, cards: [item] })
-      continue
-    }
-    out.push({ t: 'one', key: item.kind + ':' + idOf(item), item })
-  }
-  return out
-})
+const blocks = computed<TimelineBlockItem[]>(() => buildTimelineBlocks(session.timeline))
 
 let ro: ResizeObserver | null = null
 
@@ -155,32 +130,37 @@ watch(() => session.pendingQuestion?.callId, (id, previous) => {
     <div class="shell" :class="{ pushed: drawerOpen }">
       <TopBar @menu="openDrawer" />
 
+      <div class="mode-switch" role="group" aria-label="对话模式">
+        <button :class="{ active: session.mode === 'agent' }" :disabled="session.isBusy" @click="session.setSessionMode('agent')">Agent</button>
+        <button :class="{ active: session.mode === 'life' }" :disabled="session.isBusy" @click="session.setSessionMode('life')">数字生命</button>
+      </div>
+
       <main ref="scroller" class="stream">
-        <div ref="content" class="inner">
+        <div v-if="session.timeline.length === 0" ref="content" class="inner empty-inner">
           <EmptyState v-if="session.timeline.length === 0" />
-
-          <button v-if="hasMore" class="load-more" @click="loadMore">
-            加载更早记录（还有 {{ session.timeline.length - windowSize }} 条）
-          </button>
-
-          <template v-for="b in blocks" :key="b.key">
-            <ToolGroup v-if="b.t === 'tools'" :cards="b.cards" />
-            <template v-else>
-              <MessageBubble
-                v-if="b.item.kind === 'user' || b.item.kind === 'assistant'"
-                :msg="b.item"
-              />
-              <ReasoningBlock v-else-if="b.item.kind === 'reasoning'" :block="b.item" />
-              <NoticeItem v-else-if="b.item.kind === 'notice'" :notice="b.item" />
-              <div
-                v-else-if="b.item.kind === 'question' && b.item.answered"
-                class="q-answered cascade"
-              >
-                <span class="q-label">已回答</span> {{ Object.values(b.item.answers ?? {}).filter(Boolean).join('；') || '已跳过' }}
-              </div>
-            </template>
-          </template>
         </div>
+        <DynamicScroller
+          v-else
+          ref="virtualScroller"
+          :items="blocks"
+          key-field="key"
+          :min-item-size="48"
+          :buffer="640"
+          class="virtual-stream"
+          page-mode
+        >
+          <template #default="{ item, index, active }">
+            <DynamicScrollerItem
+              :item="item"
+              :active="active"
+              :size-dependencies="[item, item.t === 'one' ? item.item : item.cards]"
+              :data-index="index"
+              class="virtual-item"
+            >
+              <TimelineBlock :block="item" />
+            </DynamicScrollerItem>
+          </template>
+        </DynamicScroller>
       </main>
 
       <Transition name="pop">
@@ -247,6 +227,29 @@ watch(() => session.pendingQuestion?.callId, (id, previous) => {
   overflow: hidden;
 }
 
+.mode-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-self: center;
+  width: min(260px, calc(100% - 32px));
+  min-height: 34px;
+  margin: 2px 0 6px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--fill);
+}
+.mode-switch button {
+  min-width: 0;
+  min-height: 28px;
+  border-radius: 5px;
+  color: var(--text-3);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.mode-switch button.active { background: var(--bg); color: var(--text); box-shadow: var(--shadow-1); }
+.mode-switch button:disabled { opacity: .55; }
+
 .stream {
   flex: 1; min-width: 0; min-height: 0; max-width: 100%; overflow-x: hidden; overflow-y: auto;
   -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain;
@@ -255,6 +258,9 @@ watch(() => session.pendingQuestion?.callId, (id, previous) => {
   display: flex; flex-direction: column; gap: 12px;
   width: 100%; min-width: 0; min-height: 100%; padding: 10px 12px 18px; overflow-x: hidden;
 }
+.empty-inner { min-height: 100%; }
+.virtual-stream { width: 100%; min-width: 0; padding: 10px 12px 18px; overflow: visible; }
+.virtual-item { width: 100%; min-width: 0; padding-bottom: 12px; }
 
 .to-bottom {
   position: absolute; left: 50%; bottom: 116px; z-index: 8;
@@ -265,22 +271,9 @@ watch(() => session.pendingQuestion?.callId, (id, previous) => {
   box-shadow: var(--shadow-2);
 }
 .to-bottom:active { background: var(--fill); }
-.load-more {
-  display: block; margin: 4px auto 12px; padding: 7px 16px;
-  border-radius: var(--r-pill); border: 1px dashed var(--border-strong);
-  background: transparent; color: var(--text-3);
-  font-size: 12.5px; font-weight: 550;
-}
-.load-more:active { background: var(--fill); }
 .pop-enter-active, .pop-leave-active { transition: opacity .18s ease, transform .18s ease; }
 .pop-enter-from, .pop-leave-to { opacity: 0; transform: translateY(8px) scale(.9); }
 
-.q-answered {
-  align-self: flex-end; max-width: 84%;
-  padding: 7px 13px; border-radius: var(--r-pill);
-  background: var(--fill); font-size: 12.5px; color: var(--text-2);
-}
-.q-label { color: var(--blue); font-weight: 600; }
 .retry-confirm { margin: 0 12px 6px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); box-shadow: var(--shadow-1); }
 .retry-confirm > div:first-child { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text-2); }
 .retry-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 9px; }

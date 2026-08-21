@@ -12,6 +12,7 @@ export const router = createRouter({
     { path: '/providers/new', name: 'provider-new', component: () => import('@/views/ProviderDetailView.vue') },
     { path: '/providers/:id', name: 'provider-detail', component: () => import('@/views/ProviderDetailView.vue') },
     { path: '/runtime', name: 'runtime', component: () => import('@/views/RuntimeView.vue') },
+    { path: '/life', name: 'life', component: () => import('@/views/LifeView.vue') },
     { path: '/catalog', name: 'catalog', component: () => import('@/views/CatalogView.vue') },
     { path: '/hooks', name: 'hooks', component: () => import('@/views/HooksView.vue') },
     { path: '/memory', name: 'memory', component: () => import('@/views/MemoryView.vue') },

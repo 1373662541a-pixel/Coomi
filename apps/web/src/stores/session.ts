@@ -20,6 +20,7 @@ export const useSessionStore = defineStore('session', () => {
   const sessions = useSessionsStore()
 
   const sessionId = ref(readActiveSessionId())
+  const mode = ref<'agent' | 'life'>(sessions.find(sessionId.value)?.mode ?? 'agent')
   const timeline = ref<Timelineitem[]>(sessions.loadTranscript(sessionId.value))
   const runState = ref<RunState>('idle')
   const usage = ref<{
@@ -111,6 +112,7 @@ export const useSessionStore = defineStore('session', () => {
       connection.setStatus(status)
       if (status.state === 'open') {
         t.send({ command: 'set_permission_mode', mode: config.permissionMode })
+        t.send({ command: 'set_session_mode', mode: mode.value })
         if (config.currentProviderId && config.currentModel) {
           t.send({ command: 'select_model', provider_id: config.currentProviderId, model: config.currentModel })
         }
@@ -324,6 +326,7 @@ export const useSessionStore = defineStore('session', () => {
 
   function activateSession(id: string) {
     sessionId.value = id
+    mode.value = sessions.find(id)?.mode ?? 'agent'
     persistActiveSessionId(id)
   }
 
@@ -392,6 +395,12 @@ export const useSessionStore = defineStore('session', () => {
   function setPermissionMode(mode: 'ask' | 'auto' | 'full') { config.setPermissionMode(mode); transport.value?.send({ command: 'set_permission_mode', mode }) }
   function togglePlanMode() { const entering = !config.planMode; config.togglePlanMode(); transport.value?.send({ command: entering ? 'enter_plan_mode' : 'exit_plan_mode' }) }
   function selectModel(providerId: string, model: string) { config.selectModel(providerId, model); transport.value?.send({ command: 'select_model', provider_id: providerId, model }) }
+  function setSessionMode(value: 'agent' | 'life') {
+    if (isBusy.value || mode.value === value) return
+    mode.value = value
+    sessions.setMode(sessionId.value, value)
+    transport.value?.send({ command: 'set_session_mode', mode: value })
+  }
   function completeFileTransfer(requestId: string, paths: string[]) {
     transport.value?.send({ command: 'file_transfer_result', request_id: requestId, paths })
   }
@@ -410,6 +419,8 @@ export const useSessionStore = defineStore('session', () => {
       const res = await authedFetch(`/api/sessions/${id}`)
       if (!res.ok) return false
       const session = await res.json()
+      mode.value = session.mode === 'life' ? 'life' : 'agent'
+      sessions.setMode(id, mode.value)
       const messages = (session.messages ?? []) as ChatMessageJson[]
       if (messages.length === 0) return false
       if (messages.some(m => m.compaction_summary)) {
@@ -632,7 +643,7 @@ export const useSessionStore = defineStore('session', () => {
     if (notice?.kind === 'notice') Object.assign(notice, patch)
   }
 
-  return { sessionId, timeline, runState, usage, retryConfirmation, cwd, loop, isBusy, pendingApproval, pendingQuestion, connect, reconnect, disconnect, flushPersistence, sendMessage, cancel, approve, answerQuestion, setPermissionMode, setReasoningEffort, setMaxToolRounds, togglePlanMode, selectModel, retryInterruptedTurn, dismissRetry, completeFileTransfer, newSession, openSession, deleteSession, setSessionCwd, sendGuide, consentToolFailureFeedback, finishToolFailureFeedback }
+  return { sessionId, mode, timeline, runState, usage, retryConfirmation, cwd, loop, isBusy, pendingApproval, pendingQuestion, connect, reconnect, disconnect, flushPersistence, sendMessage, cancel, approve, answerQuestion, setPermissionMode, setReasoningEffort, setMaxToolRounds, setSessionMode, togglePlanMode, selectModel, retryInterruptedTurn, dismissRetry, completeFileTransfer, newSession, openSession, deleteSession, setSessionCwd, sendGuide, consentToolFailureFeedback, finishToolFailureFeedback }
 })
 
 function fmtTokens(n: number): string { return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n) }

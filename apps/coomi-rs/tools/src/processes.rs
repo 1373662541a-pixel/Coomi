@@ -1,4 +1,6 @@
 use coomi_engine::ToolResult;
+use coomi_services::RuntimeBackend;
+use coomi_services::RuntimeBackendKind;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -6,6 +8,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Duration;
+use std::time::Instant;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Child;
@@ -16,9 +19,8 @@ use uuid::Uuid;
 
 /// 全局进程注册表：所有 ConnectionContext 共享同一张表，引擎收到终止信号时
 /// 能一次性清理所有由它启动的工具进程（“关闭 app 后全部终止”）。
-static PROCESS_REGISTRY: OnceLock<
-    Mutex<HashMap<String, Arc<AsyncMutex<ManagedProcess>>>>,
-> = OnceLock::new();
+static PROCESS_REGISTRY: OnceLock<Mutex<HashMap<String, Arc<AsyncMutex<ManagedProcess>>>>> =
+    OnceLock::new();
 
 fn registry() -> &'static Mutex<HashMap<String, Arc<AsyncMutex<ManagedProcess>>>> {
     PROCESS_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
@@ -37,8 +39,24 @@ pub async fn terminate_all_managed() {
     }
 }
 
-#[derive(Default)]
-pub struct ProcessManager;
+#[derive(Clone)]
+pub struct ProcessManager {
+    runtime_limit: Duration,
+    output_limit: usize,
+    memory_limit: u64,
+    runtime_backend: Option<Arc<dyn RuntimeBackend>>,
+}
+
+impl Default for ProcessManager {
+    fn default() -> Self {
+        Self {
+            runtime_limit: Duration::from_secs(30 * 60),
+            output_limit: 16 * 1024 * 1024,
+            memory_limit: 512 * 1024 * 1024,
+            runtime_backend: None,
+        }
+    }
+}
 
 struct ManagedProcess {
     child: Child,
@@ -50,6 +68,10 @@ struct ManagedProcess {
     stderr: Arc<AsyncMutex<Vec<u8>>>,
     stdout_offset: usize,
     stderr_offset: usize,
+    started_at: Instant,
+    runtime_limit: Duration,
+    memory_limit: u64,
+    limit_error: Arc<Mutex<Option<String>>>,
 }
 
 /// Best-effort kill of a managed process: first the whole process group (child plus any
@@ -73,6 +95,12 @@ async fn kill_managed(process: &Arc<AsyncMutex<ManagedProcess>>) {
 }
 
 impl ProcessManager {
+    pub fn with_runtime_backend(mut self, backend: Arc<dyn RuntimeBackend>) -> Self {
+        self.runtime_backend =
+            (backend.kind() == RuntimeBackendKind::ProotLinux).then_some(backend);
+        self
+    }
+
     pub async fn execute(&self, cwd: &std::path::Path, arguments: &Value) -> ToolResult {
         let action = arguments
             .get("action")
@@ -96,7 +124,18 @@ impl ProcessManager {
             .and_then(Value::as_u64)
             .unwrap_or(10_000)
             .min(60_000);
-        let mut process = platform_shell(command);
+        let mut process = if let Some(backend) = &self.runtime_backend {
+            match backend.command(cwd, "/bin/sh", &["-lc".into(), command.into()]) {
+                Ok(command) => command.into_tokio(),
+                Err(error) => {
+                    return ToolResult::error(format!(
+                        "failed to prepare runtime shell: {error:#}"
+                    ));
+                }
+            }
+        } else {
+            platform_shell(command)
+        };
         process
             .current_dir(cwd)
             .kill_on_drop(true)
@@ -116,26 +155,35 @@ impl ProcessManager {
         let stdin = child.stdin.take();
         let stdout_buffer = Arc::new(AsyncMutex::new(Vec::new()));
         let stderr_buffer = Arc::new(AsyncMutex::new(Vec::new()));
+        let limit_error = Arc::new(Mutex::new(None));
         if let Some(mut stdout) = child.stdout.take() {
             let buffer = Arc::clone(&stdout_buffer);
+            let error = Arc::clone(&limit_error);
+            let output_limit = self.output_limit;
             tokio::spawn(async move {
                 let mut chunk = [0_u8; 8192];
                 loop {
                     match stdout.read(&mut chunk).await {
                         Ok(0) | Err(_) => break,
-                        Ok(size) => buffer.lock().await.extend_from_slice(&chunk[..size]),
+                        Ok(size) => {
+                            append_limited(&buffer, &error, &chunk[..size], output_limit).await
+                        }
                     }
                 }
             });
         }
         if let Some(mut stderr) = child.stderr.take() {
             let buffer = Arc::clone(&stderr_buffer);
+            let error = Arc::clone(&limit_error);
+            let output_limit = self.output_limit;
             tokio::spawn(async move {
                 let mut chunk = [0_u8; 8192];
                 loop {
                     match stderr.read(&mut chunk).await {
                         Ok(0) | Err(_) => break,
-                        Ok(size) => buffer.lock().await.extend_from_slice(&chunk[..size]),
+                        Ok(size) => {
+                            append_limited(&buffer, &error, &chunk[..size], output_limit).await
+                        }
                     }
                 }
             });
@@ -149,12 +197,19 @@ impl ProcessManager {
             stderr: stderr_buffer,
             stdout_offset: 0,
             stderr_offset: 0,
+            started_at: Instant::now(),
+            runtime_limit: self.runtime_limit,
+            memory_limit: self.memory_limit,
+            limit_error,
         }));
         if yield_time_ms > 0 {
             let deadline = tokio::time::Instant::now() + Duration::from_millis(yield_time_ms);
             loop {
                 {
                     let mut process = managed.lock().await;
+                    if let Some(error) = enforce_limits(&mut process).await {
+                        return ToolResult::error(error);
+                    }
                     match process.child.try_wait() {
                         Ok(Some(status)) => {
                             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -229,15 +284,17 @@ impl ProcessManager {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(yield_time_ms);
         loop {
             let mut process = process.lock().await;
+            if let Some(error) = enforce_limits(&mut process).await {
+                drop(process);
+                registry().lock().expect("process registry lock").remove(id);
+                return ToolResult::error(error);
+            }
             match process.child.try_wait() {
                 Ok(Some(status)) => {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                     let output = read_delta(&mut process).await;
                     drop(process);
-                    registry()
-                        .lock()
-                        .expect("process registry lock")
-                        .remove(id);
+                    registry().lock().expect("process registry lock").remove(id);
                     return if status.success() {
                         ToolResult::success(format!("{output}\nexit: {status}"))
                     } else {
@@ -263,10 +320,7 @@ impl ProcessManager {
         let Some(id) = arguments.get("session_id").and_then(Value::as_str) else {
             return ToolResult::error("missing string argument: session_id");
         };
-        let process = registry()
-            .lock()
-            .expect("process registry lock")
-            .remove(id);
+        let process = registry().lock().expect("process registry lock").remove(id);
         let Some(process) = process else {
             return ToolResult::error(format!("unknown process session: {id}"));
         };
@@ -306,6 +360,69 @@ async fn read_delta(process: &mut ManagedProcess) -> String {
         (true, false) => format!("[stderr]\n{stderr_text}"),
         (false, false) => format!("{stdout_text}\n[stderr]\n{stderr_text}"),
     }
+}
+
+async fn append_limited(
+    buffer: &Arc<AsyncMutex<Vec<u8>>>,
+    error: &Arc<Mutex<Option<String>>>,
+    chunk: &[u8],
+    output_limit: usize,
+) {
+    let mut buffer = buffer.lock().await;
+    let remaining = output_limit.saturating_sub(buffer.len());
+    buffer.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+    if chunk.len() > remaining {
+        *error.lock().unwrap_or_else(|value| value.into_inner()) =
+            Some(format!("process output exceeded {output_limit} bytes"));
+    }
+}
+
+async fn enforce_limits(process: &mut ManagedProcess) -> Option<String> {
+    let output_error = process
+        .limit_error
+        .lock()
+        .unwrap_or_else(|value| value.into_inner())
+        .clone();
+    let error = if let Some(error) = output_error {
+        Some(error)
+    } else if process.started_at.elapsed() > process.runtime_limit {
+        Some(format!(
+            "process runtime exceeded {} seconds",
+            process.runtime_limit.as_secs()
+        ))
+    } else if let Some(pid) = process.child.id()
+        && let Some(bytes) = process_memory_bytes(pid)
+        && bytes > process.memory_limit
+    {
+        Some(format!(
+            "process memory exceeded {} bytes (observed {bytes})",
+            process.memory_limit
+        ))
+    } else {
+        None
+    };
+    if error.is_some() {
+        let _ = process.child.kill().await;
+    }
+    error
+}
+
+#[cfg(any(target_os = "android", target_os = "linux"))]
+fn process_memory_bytes(pid: u32) -> Option<u64> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let kilobytes = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))?
+        .split_whitespace()
+        .next()?
+        .parse::<u64>()
+        .ok()?;
+    Some(kilobytes.saturating_mul(1024))
+}
+
+#[cfg(not(any(target_os = "android", target_os = "linux")))]
+fn process_memory_bytes(_pid: u32) -> Option<u64> {
+    None
 }
 
 #[cfg(windows)]

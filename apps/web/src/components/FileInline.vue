@@ -75,7 +75,7 @@ function copyPath() {
       <p v-if="notice" class="notice">{{ notice }}</p>
 
       <div class="body">
-        <img v-if="isImage(activeName)" :src="previewSrc" class="img" alt="" />
+        <img v-if="isImage(activeName)" :src="previewSrc" class="img" alt="" loading="lazy" decoding="async" />
         <pre v-else-if="isTextFile(activeName)" class="text">{{ previewText }}</pre>
         <div v-else class="other">
           <p>该类型不支持内联预览。</p>
