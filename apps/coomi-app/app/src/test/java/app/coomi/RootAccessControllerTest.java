@@ -1,5 +1,9 @@
 package app.coomi;
 
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+
 import org.junit.Test;
 
 import static org.junit.Assert.assertFalse;
@@ -23,5 +27,22 @@ public class RootAccessControllerTest {
     public void rejectsNullOrUnrelatedOutput() {
         assertFalse(RootAccessController.hasRootIdentity(null));
         assertFalse(RootAccessController.hasRootIdentity("permission denied"));
+    }
+
+    @Test
+    public void findsExecutableFromPath() throws IOException {
+        File directory = Files.createTempDirectory("coomi-root-path").toFile();
+        File executable = new File(directory, "su");
+        assertTrue(executable.createNewFile());
+        assertTrue(executable.setExecutable(true));
+
+        assertTrue(RootAccessController.findExecutableOnPath(
+            directory.getAbsolutePath(), "su").equals(executable));
+    }
+
+    @Test
+    public void ignoresMissingPathExecutable() {
+        assertTrue(RootAccessController.findExecutableOnPath(null, "su") == null);
+        assertTrue(RootAccessController.findExecutableOnPath("", "su") == null);
     }
 }

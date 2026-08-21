@@ -17,11 +17,11 @@ import java.io.File;
  */
 public final class RootAccessController {
 
-    private static final long TIMEOUT_MILLIS = 10_000L;
+    private static final long TIMEOUT_MILLIS = 30_000L;
     private static final long FAILURE_COOLDOWN_MILLIS = 30_000L;
     private static final String[] SU_CANDIDATES = {
-        "/system_ext/bin/su",
         "su",
+        "/system_ext/bin/su",
         "/system/bin/su",
         "/system/xbin/su",
         "/sbin/su"
@@ -70,8 +70,17 @@ public final class RootAccessController {
 
     /** Starts one user-requested check. A second check is ignored while active. */
     public void check(Callback callback) {
+        check(callback, false);
+    }
+
+    /** Re-runs a previously granted check while retaining the short failure cooldown. */
+    public void refresh(Callback callback) {
+        check(callback, true);
+    }
+
+    private void check(Callback callback, boolean refreshGranted) {
         Result granted = cachedGranted;
-        if (granted != null) {
+        if (!refreshGranted && granted != null) {
             if (callback != null) mainHandler.post(() -> callback.onComplete(granted));
             return;
         }
@@ -134,8 +143,10 @@ public final class RootAccessController {
         String cached = resolvedCandidate;
         if (cached != null) return cached;
         for (String candidate : SU_CANDIDATES) {
-            if (!candidate.startsWith("/")) continue;
-            File file = new File(candidate);
+            File file = candidate.startsWith("/")
+                ? new File(candidate)
+                : findExecutableOnPath(System.getenv("PATH"), candidate);
+            if (file == null) continue;
             if (file.isFile() && file.canExecute()) {
                 try {
                     resolvedCandidate = file.getCanonicalPath();
@@ -147,6 +158,18 @@ public final class RootAccessController {
         }
         resolvedCandidate = "su";
         return resolvedCandidate;
+    }
+
+    static File findExecutableOnPath(String path, String executable) {
+        if (path == null || path.isEmpty() || executable == null || executable.isEmpty()) {
+            return null;
+        }
+        for (String directory : path.split(File.pathSeparator)) {
+            if (directory.isEmpty()) continue;
+            File candidate = new File(directory, executable);
+            if (candidate.isFile() && candidate.canExecute()) return candidate;
+        }
+        return null;
     }
 
     /** Runs one fixed su candidate and returns null only when the shell itself cannot start. */

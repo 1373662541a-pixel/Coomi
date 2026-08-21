@@ -50,6 +50,8 @@ public class CoomiLauncherActivity extends Activity {
     private static final String PREFS_NAME = "coomi_launcher";
     private static final String PREF_CONTINUE = "onboarding_continue";
     private static final String PREF_SETUP_COMPLETED = "setup_completed";
+    // Keep the legacy key so upgrades that already confirmed Root keep refreshing its status.
+    private static final String PREF_ROOT_CHECK_ENABLED = "root_granted_hint";
 
     public static void markSetupCompleted(Context context) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -210,11 +212,17 @@ public class CoomiLauncherActivity extends Activity {
 
     /** Root is an optional capability check and never gates bootstrap installation. */
     private void checkRootPermission() {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .edit().putBoolean(PREF_ROOT_CHECK_ENABLED, true).apply();
+        refreshRootStatus();
+    }
+
+    private void refreshRootStatus() {
         if (mRootCheckInFlight || mRootAccessController == null) return;
         mRootCheckInFlight = true;
         mRootButton.setEnabled(false);
         mRootButton.setText(R.string.coomi_root_checking);
-        mRootAccessController.check(result -> {
+        mRootAccessController.refresh(result -> {
             if (isFinishing()
                 || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1 && isDestroyed())) {
                 return;
@@ -301,6 +309,12 @@ public class CoomiLauncherActivity extends Activity {
 
         if (mShizukuAccessController != null) {
             updateShizukuButton(mShizukuAccessController.getStatus());
+        }
+
+        boolean rootCheckEnabled = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .getBoolean(PREF_ROOT_CHECK_ENABLED, false);
+        if (rootCheckEnabled) {
+            refreshRootStatus();
         }
 
         // 演示包不为权限拦人：这两个开关只影响引擎常驻，而演示包没有引擎。
