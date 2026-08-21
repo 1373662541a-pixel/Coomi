@@ -799,10 +799,7 @@ fn transport_error(phase: &'static str, error: reqwest::Error) -> anyhow::Error 
     } else {
         ProviderErrorKind::Request
     };
-    let retryable = matches!(
-        kind,
-        ProviderErrorKind::Timeout | ProviderErrorKind::Connect | ProviderErrorKind::Dns
-    );
+    let retryable = retryable_transport_kind(kind);
     let detail = error.without_url().to_string();
     ProviderRequestError {
         phase,
@@ -814,6 +811,16 @@ fn transport_error(phase: &'static str, error: reqwest::Error) -> anyhow::Error 
         detail,
     }
     .into()
+}
+
+fn retryable_transport_kind(kind: ProviderErrorKind) -> bool {
+    matches!(
+        kind,
+        ProviderErrorKind::Timeout
+            | ProviderErrorKind::Connect
+            | ProviderErrorKind::Dns
+            | ProviderErrorKind::Request
+    )
 }
 
 async fn read_sse(
@@ -1876,6 +1883,20 @@ mod tests {
 
         headers.insert("x-request-id", "unsafe request id".parse().expect("header"));
         assert_eq!(response_request_id(&headers), None);
+    }
+
+    #[test]
+    fn request_send_failures_are_retryable() {
+        for kind in [
+            ProviderErrorKind::Timeout,
+            ProviderErrorKind::Connect,
+            ProviderErrorKind::Dns,
+            ProviderErrorKind::Request,
+        ] {
+            assert!(retryable_transport_kind(kind), "{kind:?} should retry");
+        }
+        assert!(!retryable_transport_kind(ProviderErrorKind::RequestBuild));
+        assert!(!retryable_transport_kind(ProviderErrorKind::RequestBody));
     }
 
     #[test]

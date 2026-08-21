@@ -1587,7 +1587,11 @@ impl CoreTools {
         if output.len() <= self.max_output {
             return output;
         }
-        output.truncate(self.max_output);
+        let mut end = self.max_output;
+        while !output.is_char_boundary(end) {
+            end = end.saturating_sub(1);
+        }
+        output.truncate(end);
         output.push_str("\n[output truncated]");
         output
     }
@@ -2557,6 +2561,20 @@ mod tests {
             )
             .await;
         assert!(!result.success);
+    }
+
+    #[test]
+    fn truncates_tool_output_at_utf8_boundary() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let policy =
+            SecurityPolicy::new(workspace.path(), AccessMode::ReadOnly).expect("security policy");
+        let mut tools = CoreTools::new(workspace.path().to_path_buf(), policy);
+
+        tools.max_output = 4;
+        assert_eq!(tools.truncate("abc中文".into()), "abc\n[output truncated]");
+
+        tools.max_output = 5;
+        assert_eq!(tools.truncate("a😀b".into()), "a😀\n[output truncated]");
     }
 
     #[tokio::test]
