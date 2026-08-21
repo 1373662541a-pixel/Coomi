@@ -58,3 +58,5 @@ docs/总结文档/
 build_log*.txt
 java_pid*.hprof
 scripts/__pycache__/
+__pycache__/
+*.py[cod]

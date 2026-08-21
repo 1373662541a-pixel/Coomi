@@ -668,6 +668,13 @@ pub trait AgentObserver: Send + Sync {
     fn on_event(&self, event: &AgentEvent);
 }
 
+#[async_trait]
+pub trait TurnControl: Send + Sync {
+    /// Wait at a resumable boundary. Implementations must not report a running
+    /// model request or tool subprocess as paused before this method is reached.
+    async fn safe_point(&self) -> Result<()>;
+}
+
 pub struct NoopObserver;
 
 impl AgentObserver for NoopObserver {
