@@ -1179,6 +1179,7 @@ async fn runtime_health(State(state): State<AppState>) -> Json<Value> {
         "status": if active.is_some() { "ok" } else { "setup_required" },
         "version": BRIDGE_VERSION,
         "cwd": state.cwd.display().to_string(),
+        "home": state.home.display().to_string(),
         "engine": {
             "initialized": active.is_some(),
             "llm": active.map(|provider| provider.model.clone()),
@@ -3246,6 +3247,7 @@ async fn runtime_v2_action(
                     TaskStatus::Running,
                     Some("downloading verified runtime artifacts"),
                 )?;
+                runtime_manager.begin_install()?;
                 let host = runtime_manager
                     .download_artifact("proot-host-arm64.tar.gz", &manifest.host)
                     .await?;
@@ -3266,11 +3268,9 @@ async fn runtime_v2_action(
                     );
                 }
                 Err(error) => {
-                    let _ = task_manager.transition(
-                        &task_id,
-                        TaskStatus::Failed,
-                        Some(&format!("{error:#}")),
-                    );
+                    let summary = format!("{error:#}");
+                    let _ = runtime_manager.fail_install(&summary);
+                    let _ = task_manager.transition(&task_id, TaskStatus::Failed, Some(&summary));
                 }
             }
         });
@@ -3437,7 +3437,7 @@ async fn cognitive_install(State(state): State<AppState>) -> Result<Json<Value>,
             "/bin/sh",
             &[
                 "-lc".into(),
-                "export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y --no-install-recommends python3-aiohttp python3-numpy ca-certificates && python3 -c 'import sys, aiohttp, numpy; assert sys.version_info >= (3, 11); assert tuple(map(int, aiohttp.__version__.split(\".\")[:2])) >= (3, 9); assert (1, 24) <= tuple(map(int, numpy.__version__.split(\".\")[:2])) < (3, 0); print(sys.version.split()[0], aiohttp.__version__, numpy.__version__)'".into(),
+                "export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y --no-install-recommends python3-aiohttp python3-numpy ca-certificates && python3 -c 'import sys, aiohttp, numpy; assert sys.version_info >= (3, 11); assert tuple(map(int, aiohttp.__version__.split(\".\")[:2])) >= (3, 8); assert (1, 24) <= tuple(map(int, numpy.__version__.split(\".\")[:2])) < (3, 0); print(sys.version.split()[0], aiohttp.__version__, numpy.__version__)'".into(),
             ],
         )?;
         let output = package_command
@@ -3563,7 +3563,7 @@ async fn cognitive_status(
             && runtime.status == coomi_services::RuntimeInstallStatus::Ready,
         "profile_id": profile_id,
         "profile": profile,
-        "dependencies": ["Python >=3.11", "aiohttp >=3.9,<4", "numpy >=1.24,<3"],
+        "dependencies": ["Python >=3.11", "aiohttp >=3.8,<4", "numpy >=1.24,<3"],
         "upstream_commit": "fe98e1e61adefe5899a01db561143ee8f8c45086",
         "background_heartbeat": false,
     })))

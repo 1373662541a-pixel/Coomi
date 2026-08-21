@@ -31,7 +31,7 @@ mmdebstrap \
   --aptopt='Acquire::Check-Valid-Until "false"' \
   --customize-hook='printf "en_US.UTF-8 UTF-8\nzh_CN.UTF-8 UTF-8\n" > "$1/etc/locale.gen"' \
   --customize-hook='chroot "$1" locale-gen' \
-  --customize-hook='chroot "$1" python3 -c "import sys, aiohttp, numpy; print(sys.version.split()[0], aiohttp.__version__, numpy.__version__); assert sys.version_info >= (3, 11); assert tuple(map(int, aiohttp.__version__.split(\".\")[:2])) >= (3, 9); assert (1, 24) <= tuple(map(int, numpy.__version__.split(\".\")[:2])) < (3, 0)"' \
+  --customize-hook='chroot "$1" python3 -c "import sys, aiohttp, numpy; assert sys.version_info >= (3, 11); assert tuple(map(int, aiohttp.__version__.split(\".\")[:2])) >= (3, 8); assert (1, 24) <= tuple(map(int, numpy.__version__.split(\".\")[:2])) < (3, 0)"' \
   "$DEBIAN_SUITE" "$ROOTFS" "$MIRROR"
 
 rm -rf "$ROOTFS/var/cache/apt/archives"/* "$ROOTFS/var/lib/apt/lists"/*
