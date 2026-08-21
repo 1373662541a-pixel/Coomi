@@ -38,6 +38,8 @@ local.properties
 
 # ---- Coomi runtime data ----
 .coomi/
+.runtime-v2-work/
+runtime-v2-dist/
 
 # ---- OS ----
 .DS_Store
