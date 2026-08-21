@@ -24,6 +24,7 @@ MIRROR="deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/$D
 PACKAGES="apt,ca-certificates,curl,git,locales,nodejs,python3,python3-aiohttp,python3-numpy"
 mmdebstrap \
   --architectures=arm64 \
+  --keyring=/usr/share/keyrings/debian-archive-keyring.gpg \
   --variant=minbase \
   --include="$PACKAGES" \
   --components=main \

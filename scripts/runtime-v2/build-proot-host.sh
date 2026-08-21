@@ -58,7 +58,10 @@ PY
 
 export TERMUX_BUILDER_IMAGE_NAME="$TERMUX_BUILDER_IMAGE"
 export CI=true
-"$PACKAGES/scripts/run-docker.sh" "$PACKAGES/build-package.sh" -a aarch64 proot
+(
+  cd "$PACKAGES"
+  ./scripts/run-docker.sh ./build-package.sh -a aarch64 proot
+)
 
 DEB="$(find "$PACKAGES/output" -maxdepth 1 -type f -name 'proot_*_aarch64.deb' -print | sort | tail -n 1)"
 test -n "$DEB"
