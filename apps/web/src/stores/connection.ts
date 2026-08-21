@@ -32,7 +32,7 @@ export const useConnectionStore = defineStore('connection', () => {
     retryDelayMs.value = status.delayMs ?? 0
     retryMessage.value = status.state === 'reconnecting'
       ? `第 ${retryAttempt.value}/${retryMax.value} 次重连，${Math.ceil(retryDelayMs.value / 1000)} 秒后尝试`
-      : status.reason ?? null
+      : status.state === 'open' ? null : status.reason ?? null
   }
   function setState(s: ConnectionState) { setStatus({ state: s }) }
   function setRetry(msg: string | null) { retryMessage.value = msg }

@@ -119,16 +119,24 @@ function onFileExported(event: Event) {
   const detail = (event as CustomEvent<{ requestId?: string; path?: string }>).detail ?? {}
   if (detail.requestId) session.completeFileTransfer(detail.requestId, detail.path ? [detail.path] : [])
 }
+function onPrefillDraft(event: Event) {
+  const detail = (event as CustomEvent<{ sessionId?: string; text?: string }>).detail ?? {}
+  if (detail.sessionId !== session.sessionId || typeof detail.text !== 'string') return
+  text.value = detail.text
+  void nextTick(autoGrow)
+}
 onMounted(() => {
   window.addEventListener('coomi:file-transfer-progress', onTransferProgress)
   window.addEventListener('coomi:files-imported', onFilesImported)
   window.addEventListener('coomi:file-exported', onFileExported)
+  window.addEventListener('coomi:prefill-draft', onPrefillDraft)
   loadDraft()
 })
 onBeforeUnmount(() => {
   window.removeEventListener('coomi:file-transfer-progress', onTransferProgress)
   window.removeEventListener('coomi:files-imported', onFilesImported)
   window.removeEventListener('coomi:file-exported', onFileExported)
+  window.removeEventListener('coomi:prefill-draft', onPrefillDraft)
   saveDraft()
 })
 
@@ -185,6 +193,9 @@ watch(text, () => {
     </div>
 
     <div class="field" :class="{ busy: session.isBusy }">
+      <span v-if="config.digitalLifeEnabled" class="life-orbit" aria-label="数字生命模式">
+        <i class="orbit outer" /><i class="orbit inner" />
+      </span>
       <div class="input-clip">
         <textarea
           ref="textarea"
@@ -237,11 +248,35 @@ watch(text, () => {
 .transfer progress { width: 76px; height: 4px; accent-color: var(--blue); }
 
 .field {
+  position: relative;
   padding: 4px 6px 6px 8px;
   border: 1px solid var(--border);
   border-radius: 26px;
   background: var(--fill);
   transition: border-color .16s;
+}
+.life-orbit {
+  position: absolute; z-index: 2; top: -13px; left: 50%;
+  width: 27px; height: 27px; margin-left: -13.5px;
+  border-radius: 50%; background: var(--bg);
+  box-shadow: 0 0 0 3px var(--bg), 0 0 13px color-mix(in srgb, var(--blue) 38%, transparent);
+  pointer-events: none;
+}
+.orbit { position: absolute; inset: 3px; border-radius: 50%; }
+.orbit.outer {
+  border: 2px solid transparent; border-top-color: var(--blue); border-right-color: var(--blue);
+  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--blue) 70%, transparent));
+  animation: life-spin 1.8s linear infinite;
+}
+.orbit.inner {
+  inset: 7px; border: 2px solid transparent; border-bottom-color: var(--orange); border-left-color: var(--orange);
+  filter: drop-shadow(0 0 2px color-mix(in srgb, var(--orange) 65%, transparent));
+  animation: life-spin-reverse 1.15s linear infinite;
+}
+@keyframes life-spin { to { transform: rotate(360deg); } }
+@keyframes life-spin-reverse { to { transform: rotate(-360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .orbit.outer, .orbit.inner { animation-duration: 6s; }
 }
 .field:focus-within { border-color: var(--blue-border); background: var(--bg); }
 .field.busy { border-color: var(--border-strong); }

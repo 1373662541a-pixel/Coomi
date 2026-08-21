@@ -1,11 +1,19 @@
 apply plugin: 'com.android.library'
 apply plugin: 'maven-publish'
 
+def coomiDevBuild = System.getenv("COOMI_DEV_BUILD") == "1"
+def coomiTermuxPackageName = coomiDevBuild ? "com.coomidev.android" : "com.coomi.android"
+def coomiNdkHomeOverride = System.getenv("COOMI_NDK_HOME")
+
 android {
     namespace = "com.termux.shared"
 
     compileSdkVersion project.properties.compileSdkVersion.toInteger()
-    ndkVersion = System.getenv("JITPACK_NDK_VERSION") ?: project.properties.ndkVersion
+    if (coomiNdkHomeOverride) {
+        ndkPath = coomiNdkHomeOverride
+    } else {
+        ndkVersion = System.getenv("JITPACK_NDK_VERSION") ?: project.properties.ndkVersion
+    }
 
     dependencies {
         implementation "androidx.appcompat:appcompat:1.6.1"
@@ -35,6 +43,7 @@ android {
         compileSdkVersion project.properties.compileSdkVersion.toInteger()
         minSdkVersion project.properties.minSdkVersion.toInteger()
         targetSdkVersion project.properties.targetSdkVersion.toInteger()
+        buildConfigField "String", "COOMI_TERMUX_PACKAGE_NAME", "\"${coomiTermuxPackageName}\""
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         externalNativeBuild {
             ndkBuild {
@@ -56,6 +65,10 @@ android {
 
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    buildFeatures {
+        buildConfig true
     }
 
     externalNativeBuild {

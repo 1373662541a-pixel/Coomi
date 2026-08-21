@@ -43,8 +43,6 @@ use coomi_engine::UserInputResponse;
 use coomi_security::AccessMode;
 use coomi_security::HookRunner;
 use coomi_security::SecurityPolicy;
-use coomi_services::CapabilityCacheKey;
-use coomi_services::CapabilityRegistry;
 use coomi_services::CognitiveRuntime;
 use coomi_services::CognitiveTurnContext;
 use coomi_services::EndpointResolver;
@@ -53,9 +51,7 @@ use coomi_services::McpRuntime;
 use coomi_services::MemoryManager;
 use coomi_services::MemoryScope;
 use coomi_services::MemoryType;
-use coomi_services::ModelCapabilityProfile;
 use coomi_services::ProviderDocument;
-use coomi_services::ProviderKind;
 use coomi_services::ProviderProtocol;
 use coomi_services::ProviderRegistry;
 use coomi_services::ProviderSettings;
@@ -73,10 +69,9 @@ use coomi_services::TaskPriority;
 use coomi_services::TaskStatus;
 use coomi_services::generate_cognitive_token;
 use coomi_services::list_installed_skills;
-use coomi_services::probe_model_capabilities;
-use coomi_services::resolve_reasoning_effort;
 use coomi_telemetry::Telemetry;
 use coomi_tools::AgentScheduler;
+use coomi_tools::ConfiguredSubAgent;
 use coomi_tools::CoreTools;
 use coomi_tools::ProcessManager;
 use futures_util::SinkExt;
@@ -106,7 +101,7 @@ use tokio::sync::Notify;
 use tokio::sync::RwLock;
 use tokio::sync::Semaphore;
 
-const MAX_CONCURRENT_SESSION_TASKS: usize = 5;
+const DEFAULT_MAX_CONCURRENT_SESSION_TASKS: usize = 5;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
@@ -711,6 +706,7 @@ pub async fn serve(
     let registry_cache = load_registry_disk_cache(&home);
     let task_manager = Arc::new(TaskManager::open(&home)?);
     let restored_tasks = load_task_checkpoints(&home, &task_manager);
+    let configured_task_limit = configured_connection_settings(&home).max_concurrent_tasks;
     let state = AppState {
         home,
         cwd,
@@ -718,7 +714,7 @@ pub async fn serve(
         token,
         permission,
         tasks: Arc::new(StdMutex::new(restored_tasks)),
-        task_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_SESSION_TASKS)),
+        task_slots: Arc::new(Semaphore::new(configured_task_limit)),
         task_manager,
         vision_degraded: Arc::new(StdMutex::new(HashSet::new())),
         registry_cache: Arc::new(StdMutex::new(registry_cache)),
@@ -743,6 +739,10 @@ pub async fn serve(
             "/api/settings/connection",
             get(get_connection_settings).put(set_connection_settings),
         )
+        .route(
+            "/api/settings/subagents",
+            get(get_subagent_settings).put(set_subagent_settings),
+        )
         .route("/api/runtime/hooks", get(get_hooks).put(set_hooks))
         .route("/api/memory", get(list_memory).post(create_memory))
         .route(
@@ -752,6 +752,10 @@ pub async fn serve(
         .route("/api/providers", get(list_providers).post(upsert_provider))
         .route("/api/providers/{id}", delete(delete_provider))
         .route("/api/providers/{id}/activate", post(activate_provider))
+        .route(
+            "/api/providers/{id}/select-model",
+            post(select_provider_model),
+        )
         .route("/api/providers/{id}/copy", post(copy_provider))
         .route("/api/providers/{id}/reveal", post(reveal_provider_key))
         .route(
@@ -778,6 +782,10 @@ pub async fn serve(
         .route("/api/fs/copy", post(fs_copy))
         .route("/api/fs/write", post(fs_write))
         .route("/api/catalog", get(catalog_index))
+        .route(
+            "/api/custom-iteration/bootstrap",
+            post(custom_iteration_bootstrap),
+        )
         .route("/api/catalog/mcp/install", post(install_mcp_catalog))
         .route("/api/catalog/mcp/{id}", delete(uninstall_mcp_catalog))
         .route(
@@ -1021,6 +1029,12 @@ struct ConnectionSettings {
     ws_retry_count: u8,
     reconnect_initial_delay_ms: u64,
     reconnect_max_delay_ms: u64,
+    #[serde(default = "default_max_concurrent_tasks")]
+    max_concurrent_tasks: usize,
+}
+
+const fn default_max_concurrent_tasks() -> usize {
+    DEFAULT_MAX_CONCURRENT_SESSION_TASKS
 }
 
 impl Default for ConnectionSettings {
@@ -1030,6 +1044,7 @@ impl Default for ConnectionSettings {
             ws_retry_count: DEFAULT_WS_RETRY_COUNT,
             reconnect_initial_delay_ms: DEFAULT_RECONNECT_INITIAL_DELAY_MS,
             reconnect_max_delay_ms: DEFAULT_RECONNECT_MAX_DELAY_MS,
+            max_concurrent_tasks: DEFAULT_MAX_CONCURRENT_SESSION_TASKS,
         }
     }
 }
@@ -1062,6 +1077,12 @@ fn configured_connection_settings(home: &Path) -> ConnectionSettings {
             .unwrap_or(defaults.reconnect_max_delay_ms)
             .clamp(1_000, 120_000)
             .max(initial),
+        max_concurrent_tasks: settings
+            .get("max_concurrent_tasks")
+            .and_then(Value::as_u64)
+            .and_then(|v| usize::try_from(v).ok())
+            .unwrap_or(defaults.max_concurrent_tasks)
+            .clamp(1, 20),
     }
 }
 
@@ -1095,13 +1116,212 @@ async fn set_connection_settings(
             "reconnectMaxDelayMs must be between 1000 and 120000 and not below the initial delay",
         ));
     }
+    if !(1..=20).contains(&body.max_concurrent_tasks) {
+        return Err(ApiError::bad_request(
+            "maxConcurrentTasks must be between 1 and 20",
+        ));
+    }
     let mut settings = read_settings(&state.home);
     settings["provider_retry_count"] = json!(body.provider_retry_count);
     settings["ws_retry_count"] = json!(body.ws_retry_count);
     settings["reconnect_initial_delay_ms"] = json!(body.reconnect_initial_delay_ms);
     settings["reconnect_max_delay_ms"] = json!(body.reconnect_max_delay_ms);
+    settings["max_concurrent_tasks"] = json!(body.max_concurrent_tasks);
     write_settings(&state.home, &settings)?;
     Ok(Json(body))
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SubAgentEntry {
+    id: String,
+    provider_id: String,
+    model: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    description: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SubAgentSettings {
+    #[serde(default)]
+    agents: Vec<SubAgentEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fallback_id: Option<String>,
+}
+
+fn read_subagent_settings(home: &Path) -> SubAgentSettings {
+    let settings = read_settings(home);
+    let agents = settings
+        .get("sub_agents")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
+    let fallback_id = settings
+        .get("fallback_sub_agent_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    SubAgentSettings {
+        agents,
+        fallback_id,
+    }
+}
+
+fn resolve_configured_subagents(
+    home: &Path,
+    registry: &ProviderRegistry,
+) -> (Vec<ConfiguredSubAgent>, Option<String>) {
+    let settings = read_subagent_settings(home);
+    let mut resolved = Vec::new();
+    for entry in settings.agents {
+        let selector = format!("{}:{}", entry.provider_id, entry.model);
+        let Ok(provider) = registry.resolve(Some(&selector)) else {
+            continue;
+        };
+        resolved.push(ConfiguredSubAgent {
+            id: entry.id,
+            provider,
+            description: entry.description,
+        });
+    }
+    let fallback = settings
+        .fallback_id
+        .filter(|id| resolved.iter().any(|entry| entry.id == *id))
+        .or_else(|| resolved.first().map(|entry| entry.id.clone()));
+    (resolved, fallback)
+}
+
+fn validate_subagent_settings(
+    home: &Path,
+    mut value: SubAgentSettings,
+) -> Result<SubAgentSettings, ApiError> {
+    if value.agents.len() > 20 {
+        return Err(ApiError::bad_request(
+            "at most 20 sub-agents may be configured",
+        ));
+    }
+    let document = read_provider_document(home).map_err(ApiError::from)?;
+    let mut ids = HashSet::new();
+    for entry in &mut value.agents {
+        entry.id = entry.id.trim().to_owned();
+        entry.provider_id = entry.provider_id.trim().to_owned();
+        entry.model = entry.model.trim().to_owned();
+        entry.description = entry.description.trim().to_owned();
+        if entry.id.is_empty() || !ids.insert(entry.id.clone()) {
+            return Err(ApiError::bad_request(
+                "sub-agent IDs must be non-empty and unique",
+            ));
+        }
+        if entry.description.chars().count() > 500 {
+            return Err(ApiError::bad_request("sub-agent description is too long"));
+        }
+        let provider = document.providers.get(&entry.provider_id).ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "sub-agent provider `{}` is not configured",
+                entry.provider_id
+            ))
+        })?;
+        if provider.api_key.trim().is_empty() {
+            return Err(ApiError::bad_request(format!(
+                "sub-agent provider `{}` has no API key",
+                entry.provider_id
+            )));
+        }
+        if !provider_models(provider)
+            .iter()
+            .any(|model| model == &entry.model)
+        {
+            return Err(ApiError::bad_request(format!(
+                "model `{}` is not configured for provider `{}`",
+                entry.model, entry.provider_id
+            )));
+        }
+    }
+    if value.agents.is_empty() {
+        value.fallback_id = None;
+        return Ok(value);
+    }
+    let fallback_id = value
+        .fallback_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| ApiError::bad_request("a fallback sub-agent is required"))?
+        .to_owned();
+    if !ids.contains(&fallback_id) {
+        return Err(ApiError::bad_request("fallback sub-agent does not exist"));
+    }
+    value.fallback_id = Some(fallback_id.clone());
+    value.agents.sort_by_key(|entry| entry.id != fallback_id);
+    Ok(value)
+}
+
+fn persist_subagent_settings(home: &Path, value: &SubAgentSettings) -> Result<(), ApiError> {
+    let mut settings = read_settings(home);
+    settings["sub_agents"] = serde_json::to_value(&value.agents)
+        .map_err(|error| ApiError::internal(format!("failed to serialize sub-agents: {error}")))?;
+    settings["fallback_sub_agent_id"] = value
+        .fallback_id
+        .as_ref()
+        .map_or(Value::Null, |id| json!(id));
+    write_settings(home, &settings)
+}
+
+fn migrate_legacy_subagent_settings(home: &Path) -> Result<SubAgentSettings, ApiError> {
+    let raw_settings = read_settings(home);
+    if raw_settings.get("sub_agents").is_some() {
+        return Ok(read_subagent_settings(home));
+    }
+    let path = providers_path(home);
+    let mut document = read_provider_document(home).unwrap_or_else(|_| empty_provider_document());
+    let mut migrated = SubAgentSettings::default();
+    for provider in document.providers.values() {
+        let Some(entries) = provider.extra.get("subAgents").cloned() else {
+            continue;
+        };
+        let Ok(agents) = serde_json::from_value::<Vec<SubAgentEntry>>(entries) else {
+            continue;
+        };
+        if agents.is_empty() {
+            continue;
+        }
+        migrated.agents = agents;
+        migrated.fallback_id = provider
+            .extra
+            .get("fallbackSubAgentId")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| migrated.agents.first().map(|entry| entry.id.clone()));
+        break;
+    }
+    if !migrated.agents.is_empty() {
+        migrated = validate_subagent_settings(home, migrated)?;
+    }
+    persist_subagent_settings(home, &migrated)?;
+    let mut changed = false;
+    for provider in document.providers.values_mut() {
+        changed |= provider.extra.remove("subAgents").is_some();
+        changed |= provider.extra.remove("fallbackSubAgentId").is_some();
+    }
+    if changed {
+        document.save(&path).map_err(ApiError::from)?;
+    }
+    Ok(migrated)
+}
+
+async fn get_subagent_settings(
+    State(state): State<AppState>,
+) -> Result<Json<SubAgentSettings>, ApiError> {
+    Ok(Json(migrate_legacy_subagent_settings(&state.home)?))
+}
+
+async fn set_subagent_settings(
+    State(state): State<AppState>,
+    Json(body): Json<SubAgentSettings>,
+) -> Result<Json<SubAgentSettings>, ApiError> {
+    let value = validate_subagent_settings(&state.home, body)?;
+    persist_subagent_settings(&state.home, &value)?;
+    Ok(Json(value))
 }
 
 /// 定制身份提示词的最大长度（字符）。防止超大文本挤占每次对话的上下文。
@@ -1584,7 +1804,7 @@ async fn list_tasks(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "tasks": items,
         "running_count": running_count,
-        "concurrency_limit": MAX_CONCURRENT_SESSION_TASKS,
+        "concurrency_limit": configured_connection_settings(&state.home).max_concurrent_tasks,
     }))
 }
 
@@ -2047,6 +2267,42 @@ async fn install_skill_catalog(
     Ok(Json(
         json!({ "ok": true, "id": id, "path": path.display().to_string() }),
     ))
+}
+
+/// Install the bundled custom-iteration Skill and return the isolated workspace
+/// path used by the GitHub setup guide.
+async fn custom_iteration_bootstrap(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, ApiError> {
+    let home = state.home.clone();
+    let path = tokio::task::spawn_blocking(move || {
+        let installer = coomi_catalogs::CatalogInstaller::new(&home);
+        let skill = installer.install_custom_iteration_skill()?;
+        let runtime_home = home.join("runtime-v2").join("home");
+        fs::create_dir_all(&runtime_home)?;
+        let workspace = runtime_home.join("custom_coomi");
+        let legacy_workspace = home.join("custom_coomi");
+        if legacy_workspace.is_dir() && !workspace.exists() {
+            fs::rename(&legacy_workspace, &workspace)?;
+        }
+        fs::create_dir_all(&workspace)?;
+        let build_kit = installer.install_custom_iteration_buildkit()?;
+        Ok::<(PathBuf, PathBuf, PathBuf), anyhow::Error>((skill, workspace, build_kit))
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("custom iteration bootstrap task failed: {e}")))?
+    .map_err(|e| ApiError::internal(format!("failed to bootstrap custom iteration: {e:#}")))?;
+    SkillRouter::load(&state.home).map_err(|e| {
+        ApiError::internal(format!("failed to index custom iteration Skill: {e:#}"))
+    })?;
+    Ok(Json(json!({
+        "ok": true,
+        "skill": "coomi-custom-iteration",
+        "skill_path": path.0.display().to_string(),
+        "workspace": path.1.display().to_string(),
+        "build_kit": path.2.display().to_string(),
+        "build_kit_ready": path.2.join("current/buildkit.json").is_file(),
+    })))
 }
 
 /// 安装社区注册表条目（市场）：{ "id", "name", "description", "repository", "ref", "subdir" }。
@@ -2930,17 +3186,10 @@ async fn fs_write(
 async fn list_providers(State(state): State<AppState>) -> Json<Value> {
     let document =
         read_provider_document(&state.home).unwrap_or_else(|_| empty_provider_document());
-    let capability_registry = CapabilityRegistry::load(&state.home).ok();
     let providers = document
         .providers
         .iter()
-        .map(|(id, provider)| {
-            let capabilities = capability_registry
-                .as_ref()
-                .map(|registry| registry.profiles_for_provider(id))
-                .unwrap_or_default();
-            provider_json(id, provider, id == &document.active, &capabilities)
-        })
+        .map(|(id, provider)| provider_json(id, provider, id == &document.active))
         .collect::<Vec<_>>();
     Json(json!({"providers": providers, "active": document.active}))
 }
@@ -3016,6 +3265,15 @@ async fn upsert_provider(
     if let Some(enabled) = input.get("supportsVision").and_then(Value::as_bool) {
         settings.supports_vision = enabled;
     }
+    for key in [
+        "modelDescriptions",
+        "modelParameters",
+        "capabilityOverrides",
+    ] {
+        if let Some(value) = input.get(key) {
+            settings.extra.insert(key.to_owned(), value.clone());
+        }
+    }
     if settings.model.is_empty() {
         // 允许先保存配置（模型可稍后通过“检索模型”填入）。
         // 注意：模型未填时不设为当前 provider，避免激活后对话报“无模型”。
@@ -3030,22 +3288,12 @@ async fn upsert_provider(
         .unwrap_or(false);
     if wants_activate {
         validate_provider_activation(&settings)?;
+        verify_provider_credentials(&settings).await?;
         document.active = id.clone();
     }
-    let probe_settings = settings.clone();
-    let selected = wants_activate || document.active == id;
     document.providers.insert(id.clone(), settings);
     document.save(&path).map_err(ApiError::from)?;
-    let mut capability_registry = CapabilityRegistry::load(&state.home).map_err(ApiError::from)?;
-    capability_registry
-        .invalidate_provider(&id)
-        .map_err(ApiError::from)?;
-    let capabilities = if selected && !probe_settings.model.is_empty() {
-        Some(refresh_selected_capabilities(&state.home, &id, &probe_settings).await?)
-    } else {
-        None
-    };
-    Ok(Json(json!({"ok": true, "capabilities": capabilities})))
+    Ok(Json(json!({"ok": true})))
 }
 
 async fn delete_provider(
@@ -3055,7 +3303,8 @@ async fn delete_provider(
     let path = providers_path(&state.home);
     let mut document = read_provider_document(&state.home).map_err(ApiError::from)?;
     if !document.providers.contains_key(&id) {
-        return Err(ApiError::not_found("provider not found"));
+        // 删除草稿/已被前端移除的提供商保持幂等，避免“删除无效”假错误。
+        return Ok(Json(json!({"ok": true, "deleted": false})));
     }
     document.providers.remove(&id);
     if document.active == id {
@@ -3067,6 +3316,19 @@ async fn delete_provider(
             .unwrap_or_default();
     }
     document.save(&path).map_err(ApiError::from)?;
+    let mut subagents = read_subagent_settings(&state.home);
+    let previous_len = subagents.agents.len();
+    subagents.agents.retain(|entry| entry.provider_id != id);
+    if subagents.agents.len() != previous_len {
+        if subagents
+            .fallback_id
+            .as_deref()
+            .is_none_or(|fallback| !subagents.agents.iter().any(|entry| entry.id == fallback))
+        {
+            subagents.fallback_id = subagents.agents.first().map(|entry| entry.id.clone());
+        }
+        persist_subagent_settings(&state.home, &subagents)?;
+    }
     Ok(Json(json!({"ok": true})))
 }
 
@@ -3079,11 +3341,61 @@ async fn activate_provider(
     let provider = document
         .providers
         .get(&id)
+        .cloned()
         .ok_or_else(|| ApiError::not_found("provider not found"))?;
-    validate_provider_activation(provider)?;
+    validate_provider_activation(&provider)?;
+    verify_provider_credentials(&provider).await?;
     document.active = id;
     document.save(&path).map_err(ApiError::from)?;
     Ok(Json(json!({"ok": true})))
+}
+
+async fn select_provider_model(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::bad_request("model is required"))?;
+    let path = providers_path(&state.home);
+    let mut document = read_provider_document(&state.home).map_err(ApiError::from)?;
+    let mut provider = document
+        .providers
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| ApiError::not_found("provider not found"))?;
+    if !provider_models(&provider).iter().any(|item| item == model) {
+        return Err(ApiError::bad_request(
+            "model is not declared for this provider",
+        ));
+    }
+    provider.model = model.to_owned();
+    validate_provider_activation(&provider)?;
+    verify_provider_credentials(&provider).await?;
+    document.providers.insert(id.clone(), provider);
+    document.active = id;
+    document.save(&path).map_err(ApiError::from)?;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn verify_provider_credentials(provider: &ProviderSettings) -> Result<(), ApiError> {
+    let models = fetch_provider_models(provider).await.map_err(|error| {
+        ApiError::bad_gateway(format!(
+            "provider credential verification failed: {}",
+            error.message
+        ))
+    })?;
+    let selected = provider.model.trim();
+    if !selected.is_empty() && !models.iter().any(|model| model == selected) {
+        return Err(ApiError::bad_gateway(format!(
+            "provider credential verification succeeded, but model `{selected}` is not available"
+        )));
+    }
+    Ok(())
 }
 
 async fn copy_provider(
@@ -3150,19 +3462,7 @@ async fn discover_provider_models(
         }
         document.save(&path).map_err(ApiError::from)?;
     }
-    let capabilities = document
-        .providers
-        .get(&id)
-        .filter(|settings| !settings.model.is_empty())
-        .cloned();
-    let capabilities = if let Some(settings) = capabilities {
-        Some(refresh_selected_capabilities(&state.home, &id, &settings).await?)
-    } else {
-        None
-    };
-    Ok(Json(
-        json!({"models": models, "capabilities": capabilities}),
-    ))
+    Ok(Json(json!({"models": models})))
 }
 
 async fn runtime_v2_state(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -3172,6 +3472,12 @@ async fn runtime_v2_state(State(state): State<AppState>) -> Result<Json<Value>, 
     let manifest = fs::read(&manifest_path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<coomi_services::RuntimeManifest>(&bytes).ok());
+    let downloads = manifest.as_ref().map(|value| {
+        json!({
+            "proot-host-arm64.tar.gz": manager.download_progress("proot-host-arm64.tar.gz", &value.host),
+            "debian-rootfs-arm64.tar.gz": manager.download_progress("debian-rootfs-arm64.tar.gz", &value.rootfs),
+        })
+    });
     Ok(Json(json!({
         "runtime": runtime,
         "manifest_available": manifest.is_some(),
@@ -3181,6 +3487,7 @@ async fn runtime_v2_state(State(state): State<AppState>) -> Result<Json<Value>, 
             "proot_commit": value.proot_commit,
             "rootfs_bytes": value.rootfs.size,
         })),
+        "downloads": downloads,
         "legacy_available": std::env::var_os("PREFIX").is_some(),
     })))
 }
@@ -3208,6 +3515,33 @@ async fn runtime_v2_action(
         manifest.validate().map_err(|error| {
             ApiError::bad_request(format!("invalid runtime manifest: {error:#}"))
         })?;
+        let current = manager.state().map_err(ApiError::from)?;
+        if current.status == coomi_services::RuntimeInstallStatus::Ready
+            && current.active_version.as_deref() == Some(manifest.runtime_version.as_str())
+        {
+            let backend = coomi_services::ProotLinuxBackend {
+                runtime_root: state.home.join("runtime-v2"),
+                version: manifest.runtime_version.clone(),
+            };
+            if coomi_services::RuntimeBackend::health_check(&backend)
+                .await
+                .is_ok()
+            {
+                return Ok(Json(json!({"runtime": current, "already_ready": true})));
+            }
+            manager
+                .fail_install("bundled ProotLinux health check failed; redeploying")
+                .map_err(ApiError::from)?;
+        }
+        if matches!(
+            current.status,
+            coomi_services::RuntimeInstallStatus::Downloading
+                | coomi_services::RuntimeInstallStatus::Initializing
+        ) {
+            return Ok(Json(
+                json!({"runtime": current, "already_installing": true}),
+            ));
+        }
         let record = state
             .task_manager
             .create(
@@ -3278,7 +3612,11 @@ async fn runtime_v2_action(
     }
     let runtime = match request.action.as_str() {
         "rollback" => manager.rollback(),
-        "remove" => manager.remove(),
+        "remove" => {
+            return Err(ApiError::bad_request(
+                "ProotLinux is a required Coomi runtime and cannot be removed",
+            ));
+        }
         "repair" => {
             let current = manager.state()?;
             let Some(version) = current.active_version.clone() else {
@@ -3823,25 +4161,6 @@ async fn fetch_provider_models(provider: &ProviderSettings) -> Result<Vec<String
     Ok(models)
 }
 
-async fn refresh_selected_capabilities(
-    home: &Path,
-    id: &str,
-    provider: &ProviderSettings,
-) -> Result<ModelCapabilityProfile, ApiError> {
-    let key = CapabilityCacheKey::new(
-        id,
-        &provider.model,
-        provider_protocol_settings(provider),
-        &provider.base_url,
-        &provider.api_key,
-    );
-    let inferred = ModelCapabilityProfile::inferred(key);
-    let profile = probe_model_capabilities(inferred, &provider.api_key).await;
-    let mut registry = CapabilityRegistry::load(home).map_err(ApiError::from)?;
-    registry.upsert(profile.clone()).map_err(ApiError::from)?;
-    Ok(profile)
-}
-
 fn provider_protocol_settings(provider: &ProviderSettings) -> ProviderProtocol {
     let value = provider
         .tool_protocol
@@ -4281,15 +4600,29 @@ async fn handle_command(
                 let path = providers_path(&state.home);
                 match read_provider_document(&state.home) {
                     Ok(mut document) if document.providers.contains_key(provider) => {
-                        if let Some(settings) = document.providers.get_mut(provider) {
-                            settings.model = model.to_owned();
-                            let models = provider_models(settings);
-                            if !models.iter().any(|item| item == model) {
-                                let mut expanded = models;
-                                expanded.push(model.to_owned());
-                                settings.extra.insert("models".into(), json!(expanded));
-                            }
+                        let mut candidate = document
+                            .providers
+                            .get(provider)
+                            .cloned()
+                            .expect("checked above");
+                        let models = provider_models(&candidate);
+                        if !models.iter().any(|item| item == model) {
+                            context
+                                .send_error(envelope_id, "model is not declared for this provider");
+                            return;
                         }
+                        candidate.model = model.to_owned();
+                        if let Err(error) = validate_provider_activation(&candidate) {
+                            context.send_error(envelope_id, error.message);
+                            return;
+                        }
+                        if let Err(error) = verify_provider_credentials(&candidate).await {
+                            context.send_error(envelope_id, error.message);
+                            return;
+                        }
+                        document
+                            .providers
+                            .insert(provider.to_owned(), candidate.clone());
                         document.active = provider.to_owned();
                         if let Err(error) = document.save(&path) {
                             context.send_error(
@@ -4297,10 +4630,6 @@ async fn handle_command(
                                 format!("failed to persist model: {error}"),
                             );
                             return;
-                        }
-                        if let Some(settings) = document.providers.get(provider).cloned() {
-                            let _ = refresh_selected_capabilities(&state.home, provider, &settings)
-                                .await;
                         }
                     }
                     Ok(_) => {
@@ -4646,7 +4975,7 @@ async fn run_turn(
             (!session.provider_id.is_empty()).then_some(session.provider_id.as_str())
         })
     });
-    let mut provider_config = registry.resolve(selector)?;
+    let provider_config = registry.resolve(selector)?;
     let mut session = load_or_create_web_session(
         &store,
         requested_id,
@@ -4729,6 +5058,7 @@ async fn run_turn(
             prompt_context.push_str(&memory_context);
         }
     }
+    let (sub_agents, fallback_sub_agent_id) = resolve_configured_subagents(&state.home, &registry);
     let scheduler = AgentScheduler::new(
         cwd.clone(),
         state.home.clone(),
@@ -4736,6 +5066,7 @@ async fn run_turn(
         policy_mode,
         prompt_context.clone(),
     )
+    .with_sub_agents(sub_agents, fallback_sub_agent_id)
     .without_persistent_memory();
     let tools = CoreTools::new(cwd.clone(), policy)
         .with_skills_directory(state.home.join("skills"))
@@ -4750,34 +5081,8 @@ async fn run_turn(
         .processes
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(tools.process_manager());
-    let capability_key = CapabilityCacheKey::new(
-        &provider_config.id,
-        &provider_config.model,
-        provider_protocol(provider_config.kind),
-        &provider_config.base_url,
-        &provider_config.api_key,
-    );
-    let mut capability_registry = CapabilityRegistry::load(&state.home)?;
-    let capability_profile = capability_registry.get_or_infer(capability_key)?;
-    if capability_profile.vision.state == coomi_services::CapabilityState::Unsupported {
-        provider_config.capabilities.supports_vision = false;
-    }
-    if capability_profile.native_tools.state == coomi_services::CapabilityState::Unsupported {
-        provider_config.capabilities.supports_native_tools = false;
-    }
-    if capability_profile.parallel_tools.state == coomi_services::CapabilityState::Unsupported {
-        provider_config.capabilities.supports_parallel_tool_calls = false;
-    }
-    if capability_profile.web_search.state == coomi_services::CapabilityState::Unsupported {
-        provider_config.capabilities.supports_web_search = false;
-    }
     let requested_effort = context.reasoning_effort.read().await.clone();
-    let reasoning_effort = resolve_reasoning_effort(
-        &requested_effort,
-        &capability_profile.reasoning_efforts,
-        prompt.chars().count(),
-    )
-    .unwrap_or(requested_effort);
+    let reasoning_effort = requested_effort;
     let _ = state.task_manager.set_context(
         &task_id,
         Some(format!("{}:{}", provider_config.id, provider_config.model)),
@@ -5644,11 +5949,46 @@ fn system_prompt(
         ),
     }
     prompt.push_str(&format!(
-        "\n\nFilesystem layout:\n- Working directory: {}\n- Coomi home: {}\nAccess policy: {}",
-        cwd.display(),
-        home.display(),
-        policy.label(),
+        "\n\nEnvironment directory architecture:\n\
+- Android host working directory (file tools and exports): {cwd}\n\
+- Android host Coomi engine home: {home}\n\
+- Engine configuration: {home}/config (providers.json, mcp_servers.json, skills.json, settings.json)\n\
+- Installed Skills: {home}/skills; Skill tools read this host directory\n\
+- Sessions, memory, cache and tasks: {home}/sessions, {home}/memory, {home}/cache and {home}/tasks\n\
+- Runtime state and verified archives: {home}/runtime-v2/state.json and {home}/runtime-v2/downloads\n\
+- Runtime versions/rootfs: {home}/runtime-v2/versions/<version>\n\
+- Persistent ProotLinux guest home on the host: {home}/runtime-v2/home\n\
+- Inside ProotLinux, /workspace maps exactly to the Android host working directory above\n\
+- Inside ProotLinux, /home/coomi maps to {home}/runtime-v2/home and is the persistent guest home\n\
+- Inside ProotLinux, /tmp maps to {home}/runtime-v2/tmp and /usr/local/bin/proot is the verified launcher\n\
+- Custom Coomi development checkout: /home/coomi/custom_coomi in shell commands, backed by {home}/runtime-v2/home/custom_coomi on the host\n\
+- MCP definitions live at {home}/config/mcp_servers.json. MCP stdio processes are started by the Android host engine unless their configuration explicitly launches through ProotLinux\n\
+Path rules: shell commands use guest paths such as /workspace and /home/coomi; built-in file tools and file export use the corresponding Android host absolute paths. Never treat a legacy Termux path as proof that ProotLinux is unavailable.\n\
+Access policy: {policy}",
+        cwd = cwd.display(),
+        home = home.display(),
+        policy = policy.label(),
     ));
+    prompt.push_str(
+        "\n\nCoomi source checkout architecture (when the current repository is Coomi):\n\
+- apps/coomi-app: native Android shell, dashboard, lifecycle, APK assets and Gradle packaging\n\
+- apps/coomi-rs: Rust engine, provider bridge, tools, Skills/MCP catalogs, runtime manager and local Web API\n\
+- apps/web: Vue conversation UI and console secondary pages\n\
+- runtime-v2-dist: pinned ARM64 PRoot host, Debian rootfs and signed manifest used for offline APK bundling\n\
+- assets: shared product/developer artwork\n\
+- references: pinned third-party bootstrap/reference payloads\n\
+- Gradle wrapper and root build files: Android orchestration; never edit generated build or target directories as source.\n\
+This map is shared with the main Agent and sub-agents. Skills add task-specific instructions but do not change these ownership boundaries or path mappings.",
+    );
+    if let Ok(runtime) = RuntimeManager::open(home).and_then(|manager| manager.state()) {
+        if runtime.backend == RuntimeBackendKind::ProotLinux
+            && runtime.status == coomi_services::RuntimeInstallStatus::Ready
+        {
+            prompt.push_str(
+                "\n\nRuntime: shell commands run inside the active Debian ProotLinux guest. The verified PRoot launcher is available as `/usr/local/bin/proot` and `COOMI_PROOT_HOST=/usr/local/bin/proot`; do not infer the backend from legacy Termux paths.",
+            );
+        }
+    }
     prompt.push_str(
         "\nAll file references shown to the user and every path passed to file export must be normalized absolute paths. Never return a relative path for a created, edited, downloaded, referenced, or exported file. Resolve relative tool output against the working directory before presenting it. Use request_file_export only with an absolute path.",
     );
@@ -5670,15 +6010,6 @@ fn system_prompt(
         );
     }
     prompt
-}
-
-fn provider_protocol(kind: ProviderKind) -> ProviderProtocol {
-    match kind {
-        ProviderKind::OpenAiCompatible => ProviderProtocol::OpenAiCompatible,
-        ProviderKind::OpenAiResponses => ProviderProtocol::OpenAiResponses,
-        ProviderKind::AnthropicMessages => ProviderProtocol::Anthropic,
-        ProviderKind::GeminiNative => ProviderProtocol::Gemini,
-    }
 }
 
 fn project_types_for(cwd: &Path) -> Vec<String> {
@@ -5724,12 +6055,7 @@ fn ensure_provider_document(home: &Path) -> Result<()> {
     Ok(())
 }
 
-fn provider_json(
-    id: &str,
-    provider: &ProviderSettings,
-    active: bool,
-    capabilities: &[ModelCapabilityProfile],
-) -> Value {
+fn provider_json(id: &str, provider: &ProviderSettings, active: bool) -> Value {
     let models = provider_models(provider);
     json!({
         "id": id,
@@ -5746,7 +6072,9 @@ fn provider_json(
         "modelContextWindows": provider.model_context_windows,
         "supportsWebSearch": provider.supports_web_search,
         "supportsVision": provider.supports_vision,
-        "capabilities": capabilities,
+        "modelDescriptions": provider.extra.get("modelDescriptions").cloned().unwrap_or_else(|| json!({})),
+        "modelParameters": provider.extra.get("modelParameters").cloned().unwrap_or_else(|| json!({})),
+        "capabilityOverrides": provider.extra.get("capabilityOverrides").cloned().unwrap_or_else(|| json!({})),
         "active": active,
     })
 }
@@ -6109,11 +6437,61 @@ mod tests {
             fast_model: Some("fast".into()),
             ..ProviderSettings::default()
         };
-        let value = provider_json("primary", &provider, true, &[]);
+        let value = provider_json("primary", &provider, true);
         assert_eq!(value["apiKeyMasked"], "****3456");
         assert_eq!(value["models"], json!(["main", "fast"]));
         assert_eq!(value["contextWindow"], 256_000);
         assert!(!value.to_string().contains("secret-123456"));
+    }
+
+    #[test]
+    fn global_subagents_require_configured_provider_models_and_fallback() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let provider = ProviderSettings {
+            display: "Worker Provider".into(),
+            api_key: "secret".into(),
+            base_url: "https://example.test/v1".into(),
+            model: "worker-a".into(),
+            extra: BTreeMap::from([(String::from("models"), json!(["worker-a", "worker-b"]))]),
+            ..ProviderSettings::default()
+        };
+        ProviderDocument {
+            active: "workers".into(),
+            providers: BTreeMap::from([(String::from("workers"), provider)]),
+            extra: BTreeMap::new(),
+        }
+        .save(&providers_path(home.path()))
+        .expect("save provider document");
+
+        let valid = validate_subagent_settings(
+            home.path(),
+            SubAgentSettings {
+                agents: vec![SubAgentEntry {
+                    id: "fallback".into(),
+                    provider_id: "workers".into(),
+                    model: "worker-b".into(),
+                    description: "Code worker".into(),
+                }],
+                fallback_id: Some("fallback".into()),
+            },
+        )
+        .expect("valid global sub-agent settings");
+        assert_eq!(valid.agents[0].model, "worker-b");
+
+        let invalid = validate_subagent_settings(
+            home.path(),
+            SubAgentSettings {
+                agents: vec![SubAgentEntry {
+                    id: "broken".into(),
+                    provider_id: "workers".into(),
+                    model: "missing".into(),
+                    description: String::new(),
+                }],
+                fallback_id: Some("broken".into()),
+            },
+        )
+        .expect_err("undeclared sub-agent model must be rejected");
+        assert!(invalid.message.contains("not configured"));
     }
 
     #[test]
@@ -6378,8 +6756,17 @@ mod tests {
         );
         assert!(!prompt.contains("CROSS_SESSION_SENTINEL"));
         assert!(!prompt.contains("Persistent memory:"));
-        assert!(prompt.contains(&format!("Working directory: {}", project.path().display())));
-        assert!(prompt.contains(&format!("Coomi home: {}", home.path().display())));
+        assert!(prompt.contains(&format!(
+            "Android host working directory (file tools and exports): {}",
+            project.path().display()
+        )));
+        assert!(prompt.contains(&format!(
+            "Android host Coomi engine home: {}",
+            home.path().display()
+        )));
+        assert!(prompt.contains("Inside ProotLinux, /workspace maps exactly"));
+        assert!(prompt.contains("MCP definitions live at"));
+        assert!(prompt.contains("apps/coomi-app: native Android shell"));
         assert!(prompt.contains("normalized absolute paths"));
         // 全局会话记忆关闭时，系统提示必须包含隐私禁令。
         let locked = system_prompt(
@@ -6431,7 +6818,9 @@ mod tests {
             token: "test-token".into(),
             permission: Arc::new(RwLock::new(PermissionMode::Auto)),
             tasks: Arc::new(StdMutex::new(HashMap::new())),
-            task_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_SESSION_TASKS)),
+            task_slots: Arc::new(Semaphore::new(
+                configured_connection_settings(&home).max_concurrent_tasks,
+            )),
             task_manager: Arc::clone(&task_manager),
             vision_degraded: Arc::new(StdMutex::new(HashSet::new())),
             registry_cache: Arc::new(StdMutex::new(None)),

@@ -24,11 +24,13 @@ export function installSystemBackHandler(router: Router): void {
     if (closeTopOverlay()) return true
     const route = router.currentRoute.value.path
     if (route === '/') return false
-    if (route === '/persona') goBack(router, '/settings')
+    if (route === '/appearance' || route === '/persona') goBack(router, '/settings')
     else if (
       route === '/hooks'
+      || route === '/life'
       || route === '/memory'
       || route === '/runtime'
+      || route === '/custom-iteration'
       || route === '/files'
       || route === '/catalog'
       || route === '/providers'

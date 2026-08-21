@@ -428,9 +428,7 @@ public class CoomiActivity extends Activity {
     private void applyThemeToWebView() {
         if (mWebView == null) return;
         String mode = CoomiTheme.getMode(this);
-        String webTheme = isDark() ? "dark"
-            : CoomiTheme.MODE_BOOK.equals(mode) ? "book"
-            : CoomiTheme.MODE_ORANGE.equals(mode) ? "orange" : "light";
+        String webTheme = CoomiTheme.MODE_SYSTEM.equals(mode) ? (isDark() ? "dark" : "light") : mode;
         String appearance = CoomiTheme.appearanceJson(this);
         runOnUiThread(() -> evaluateJavascript(
             "document.documentElement.setAttribute('data-theme','" + webTheme + "');"
@@ -693,6 +691,16 @@ public class CoomiActivity extends Activity {
                     emitFileExported(requestId, null);
                 }
             });
+        }
+
+        @JavascriptInterface
+        public boolean getDigitalLifeEnabled() {
+            return CoomiTheme.isDigitalLifeEnabled(CoomiActivity.this);
+        }
+
+        @JavascriptInterface
+        public void setDigitalLifeEnabled(boolean enabled) {
+            CoomiTheme.setDigitalLifeEnabled(CoomiActivity.this, enabled);
         }
     }
 

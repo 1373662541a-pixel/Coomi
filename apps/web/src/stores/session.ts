@@ -42,6 +42,7 @@ export const useSessionStore = defineStore('session', () => {
   let turnToolTrace: ToolDiagnosticTrace[] = []
   let consecutiveToolFailures = 0
   let maxConsecutiveToolFailures = 0
+  let failureNoticeCreated = false
   const transport = shallowRef<Transport | null>(null)
 
   const isBusy = computed(() => runState.value !== 'idle')
@@ -157,9 +158,10 @@ export const useSessionStore = defineStore('session', () => {
   function applyEvent(ev: AgentEvent) {
     switch (ev.event_type) {
       // 兜底：turn_end 之后又开始吐字（引擎续了一轮），状态得跟着回到忙。
-      case 'text_chunk': if (runState.value === 'idle') runState.value = 'thinking'; appendAssistant(ev.content); break
+      case 'text_chunk': connection.setRetry(null); if (runState.value === 'idle') runState.value = 'thinking'; appendAssistant(ev.content); break
       case 'reasoning_chunk': if (runState.value === 'idle') runState.value = 'thinking'; appendReasoning(ev.content); break
       case 'tool_start':
+        connection.setRetry(null)
         endAssistantStream()
         timeline.value.push({ kind: 'tool', callId: ev.call_id, toolName: ev.tool_name, arguments: ev.arguments, status: 'starting', expanded: ev.tool_name === 'show_image' })
         turnToolTrace.push({
@@ -194,6 +196,16 @@ export const useSessionStore = defineStore('session', () => {
               maxConsecutiveToolFailures = Math.max(maxConsecutiveToolFailures, consecutiveToolFailures)
               trace.category = classifyToolError(ev.result_preview)
               trace.errorSummary = sanitizeDiagnosticText(ev.result_preview)
+              if (maxConsecutiveToolFailures >= 3 && !failureNoticeCreated) {
+                failureNoticeCreated = true
+                const noticeId = nextId()
+                timeline.value.push({
+                  kind: 'notice', id: noticeId, tone: 'warn', analysisStatus: 'consent', feedbackEligible: true,
+                  text: `同一任务链连续 ${maxConsecutiveToolFailures} 次工具调用未恢复，建议反馈脱敏错误记录。`,
+                  analysisTrace: turnToolTrace.map(item => ({ ...item, callId: undefined })),
+                  failureCount: turnToolTrace.filter(item => item.status === 'error').length,
+                })
+              }
             } else consecutiveToolFailures = 0
           }
         }
@@ -278,7 +290,7 @@ export const useSessionStore = defineStore('session', () => {
         endAssistantStream(); cancelRunningTools(); connection.setRetry(null); runState.value = 'idle'
         {
           const failures = turnToolTrace.filter(item => item.status === 'error').length
-          if (maxConsecutiveToolFailures >= 3) {
+          if (maxConsecutiveToolFailures >= 3 && !failureNoticeCreated) {
             const trace = turnToolTrace.map(item => ({ ...item, callId: undefined }))
             const noticeId = nextId()
             timeline.value.push({
@@ -292,6 +304,7 @@ export const useSessionStore = defineStore('session', () => {
         turnToolTrace = []
         consecutiveToolFailures = 0
         maxConsecutiveToolFailures = 0
+        failureNoticeCreated = false
         persistSoon()
         break
       case 'session_state': {
@@ -394,7 +407,13 @@ export const useSessionStore = defineStore('session', () => {
   }
   function setPermissionMode(mode: 'ask' | 'auto' | 'full') { config.setPermissionMode(mode); transport.value?.send({ command: 'set_permission_mode', mode }) }
   function togglePlanMode() { const entering = !config.planMode; config.togglePlanMode(); transport.value?.send({ command: entering ? 'enter_plan_mode' : 'exit_plan_mode' }) }
-  function selectModel(providerId: string, model: string) { config.selectModel(providerId, model); transport.value?.send({ command: 'select_model', provider_id: providerId, model }) }
+  async function selectModel(providerId: string, model: string) {
+    if (!(await config.validateAndSelectModel(providerId, model))) {
+      pushNotice('error', config.lastError || '模型凭据验证失败，未切换模型')
+      return
+    }
+    transport.value?.send({ command: 'select_model', provider_id: providerId, model })
+  }
   function setSessionMode(value: 'agent' | 'life') {
     if (isBusy.value || mode.value === value) return
     mode.value = value

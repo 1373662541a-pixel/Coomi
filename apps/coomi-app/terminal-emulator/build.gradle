@@ -1,11 +1,17 @@
 apply plugin: 'com.android.library'
+
+def coomiNdkHomeOverride = System.getenv("COOMI_NDK_HOME")
 apply plugin: 'maven-publish'
 
 android {
     namespace "com.termux.emulator"
 
     compileSdkVersion project.properties.compileSdkVersion.toInteger()
-    ndkVersion = System.getenv("JITPACK_NDK_VERSION") ?: project.properties.ndkVersion
+    if (coomiNdkHomeOverride) {
+        ndkPath = coomiNdkHomeOverride
+    } else {
+        ndkVersion = System.getenv("JITPACK_NDK_VERSION") ?: project.properties.ndkVersion
+    }
 
     defaultConfig {
         minSdkVersion project.properties.minSdkVersion.toInteger()

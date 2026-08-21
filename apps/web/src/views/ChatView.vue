@@ -47,6 +47,11 @@ const { following, follow, jumpToBottom } = useAutoScroll(scroller)
 
 const blocks = computed<TimelineBlockItem[]>(() => buildTimelineBlocks(session.timeline))
 
+function syncDigitalLifeMode() {
+  config.syncDigitalLifeEnabled()
+  if (!session.isBusy) session.setSessionMode(config.digitalLifeEnabled ? 'life' : 'agent')
+}
+
 let ro: ResizeObserver | null = null
 
 onMounted(() => {
@@ -61,6 +66,8 @@ onMounted(() => {
   if (config.providers.length === 0) void config.fetchProviders()
   // 全局记忆开关以引擎为权威：启动即同步，避免「开关显示关、引擎实际开」的脱节。
   void config.syncGlobalMemoryFromEngine()
+  syncDigitalLifeMode()
+  window.addEventListener('focus', syncDigitalLifeMode)
   // 全局轮询各会话的「后台运行中」状态：切走会话后任务在引擎侧继续跑，
   // 抽屉/会话页据此显示转圈。轮询常驻（本地 API 开销极小），不依赖抽屉打开。
   void sessions.refreshRunning()
@@ -80,6 +87,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('coomi:flush-persistence', session.flushPersistence)
+  window.removeEventListener('focus', syncDigitalLifeMode)
   session.flushPersistence()
   if (runningPoll) { clearInterval(runningPoll); runningPoll = null }
   ro?.disconnect(); ro = null
@@ -109,6 +117,9 @@ if (isUnattended()) {
 
 // ResizeObserver 不可用时的兜底：至少条目增减能跟上。
 watch(() => session.timeline.length, () => nextTick(follow))
+watch([() => config.digitalLifeEnabled, () => session.isBusy], ([enabled, busy]) => {
+  if (!busy) session.setSessionMode(enabled ? 'life' : 'agent')
+})
 
 function onDecide(callId: string, decision: ApprovalDecision) { session.approve(callId, decision) }
 function onAnswer(callId: string, answers: Record<string, string>) { session.answerQuestion(callId, answers) }
@@ -129,11 +140,6 @@ watch(() => session.pendingQuestion?.callId, (id, previous) => {
   <div class="chat">
     <div class="shell" :class="{ pushed: drawerOpen }">
       <TopBar @menu="openDrawer" />
-
-      <div class="mode-switch" role="group" aria-label="对话模式">
-        <button :class="{ active: session.mode === 'agent' }" :disabled="session.isBusy" @click="session.setSessionMode('agent')">Agent</button>
-        <button :class="{ active: session.mode === 'life' }" :disabled="session.isBusy" @click="session.setSessionMode('life')">数字生命</button>
-      </div>
 
       <main ref="scroller" class="stream">
         <div v-if="session.timeline.length === 0" ref="content" class="inner empty-inner">
@@ -226,29 +232,6 @@ watch(() => session.pendingQuestion?.callId, (id, previous) => {
   border-radius: 20px;
   overflow: hidden;
 }
-
-.mode-switch {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  align-self: center;
-  width: min(260px, calc(100% - 32px));
-  min-height: 34px;
-  margin: 2px 0 6px;
-  padding: 3px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--fill);
-}
-.mode-switch button {
-  min-width: 0;
-  min-height: 28px;
-  border-radius: 5px;
-  color: var(--text-3);
-  font-size: 12.5px;
-  font-weight: 600;
-}
-.mode-switch button.active { background: var(--bg); color: var(--text); box-shadow: var(--shadow-1); }
-.mode-switch button:disabled { opacity: .55; }
 
 .stream {
   flex: 1; min-width: 0; min-height: 0; max-width: 100%; overflow-x: hidden; overflow-y: auto;

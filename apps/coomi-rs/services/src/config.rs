@@ -57,6 +57,8 @@ pub struct ProviderConfig {
     pub models: Vec<String>,
     /// 模型级上下文窗口覆盖；未命中时使用供应商默认值。
     pub model_context_windows: BTreeMap<String, u64>,
+    /// 用户在提供商页面为各模型手动配置的图像理解能力。
+    pub model_vision_support: BTreeMap<String, bool>,
     pub capabilities: coomi_engine::ModelCapabilities,
     pub remote_compaction_mode: RemoteCompactionMode,
 }
@@ -73,6 +75,7 @@ impl std::fmt::Debug for ProviderConfig {
             .field("model", &self.model)
             .field("fast_model", &self.fast_model)
             .field("model_context_windows", &self.model_context_windows)
+            .field("model_vision_support", &self.model_vision_support)
             .field("capabilities", &self.capabilities)
             .field("remote_compaction_mode", &self.remote_compaction_mode)
             .finish()
@@ -180,6 +183,38 @@ impl ProviderRegistry {
             } else {
                 provider.display
             };
+            let mut model_vision_support = provider
+                .extra
+                .get("capabilityOverrides")
+                .and_then(Value::as_object)
+                .into_iter()
+                .flatten()
+                .filter_map(|(model, value)| {
+                    value
+                        .get("vision")
+                        .and_then(Value::as_bool)
+                        .map(|enabled| (model.clone(), enabled))
+                })
+                .collect::<BTreeMap<_, _>>();
+            for model in provider
+                .extra
+                .get("models")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
+                model_vision_support
+                    .entry(model.to_owned())
+                    .or_insert(provider.supports_vision);
+            }
+            model_vision_support
+                .entry(provider.model.clone())
+                .or_insert(provider.supports_vision);
+            let manual_vision = model_vision_support
+                .get(&provider.model)
+                .copied()
+                .unwrap_or(provider.supports_vision);
             let mut capabilities = coomi_engine::ModelCapabilities {
                 context_window: provider.context_window.unwrap_or(256_000),
                 effective_context_window_percent: provider
@@ -193,7 +228,7 @@ impl ProviderRegistry {
                 supports_remote_compaction: provider
                     .supports_remote_compaction
                     .unwrap_or(kind == ProviderKind::OpenAiResponses),
-                supports_vision: provider.supports_vision,
+                supports_vision: manual_vision,
                 supports_native_tools: provider.supports_native_tools,
                 supports_web_search: provider.supports_web_search,
                 supports_parallel_tool_calls: provider.supports_parallel_tool_calls,
@@ -221,6 +256,7 @@ impl ProviderRegistry {
                         .map(str::to_string)
                         .collect(),
                     model_context_windows: provider.model_context_windows,
+                    model_vision_support,
                     capabilities,
                     remote_compaction_mode: provider.remote_compaction_mode,
                 },
@@ -335,6 +371,9 @@ impl ProviderRegistry {
 fn apply_model_context_window(provider: &mut ProviderConfig) {
     if let Some(window) = provider.model_context_windows.get(&provider.model) {
         provider.capabilities.context_window = *window;
+    }
+    if let Some(enabled) = provider.model_vision_support.get(&provider.model) {
+        provider.capabilities.supports_vision = *enabled;
     }
 }
 

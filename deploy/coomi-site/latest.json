@@ -1,12 +1,12 @@
 {
-  "version": "1.3.2",
-  "versionCode": 28,
+  "version": "1.4.0",
+  "versionCode": 30,
   "platform": "android",
   "arch": "arm64-v8a",
   "minAndroid": "7.0",
-  "file": "Coomi-Android-arm64-v1.3.2.apk",
-  "size": 42086589,
-  "sha256": "c7a0705dcc1f57f43fee4b146435e8dadffc4cb1f135e42508f5495c23a90868",
-  "publishedAt": "2026-08-19T13:15:26Z",
-  "notes": "v1.3.2 更新说明【稳定】：\n• 多任务并行上限提升至 5 条，新增下载任务状态和置顶显示\n• 修复连接与重试设置，重连次数和间隔可正常保存并立即生效\n• 修复持久记忆无法删除，增加确认和执行状态\n• 手动与自动备份增加阶段、进度、完成及失败提示\n• Provider 能力不支持时自动降级恢复，避免 HTTP 400 终止会话\n• MCP 配置修改后立即热重载，无需重启引擎\n• Agent 在非简单任务前主动检查并读取相关 Skill"
+  "file": "Coomi-Android-arm64-v1.4.0.apk",
+  "size": 206869162,
+  "sha256": "757550e3fe16759187228afa3fd6bfc5a387ce1b65ad2efaa9346604345b6de9",
+  "publishedAt": "2026-08-21T19:26:15Z",
+  "notes": "v1.4.0 更新说明【重要更新】：\n• Runtime V2 内置离线 ARM64 ProotLinux，新增下载进度、状态恢复与统一目录架构\n• 新增自定义迭代（实验），内置专用 Skill、隔离工作区和 CoomiDev 手机构建流程\n• Provider 改为手动配置文本模型、图像理解、图像生成能力，完善模型参数与密钥验证\n• 子代理配置独立为跨 Provider 全局模型池，支持最多 20 个模型和保底模型\n• 数字生命与 ProotLinux 迁入控制台，修复安装、就绪检测和 Agent 环境识别\n• 新增墨玉、深海、炭褐、青瓷、亚麻五套主题，外观设置升级为独立二级页面\n• 修复 UTF-8 长输出截断 Panic，并让瞬时请求错误正确进入自动重试\n• 优化连接恢复提示、工具失败反馈、问询窗口和顶部模型分类同步"
 }

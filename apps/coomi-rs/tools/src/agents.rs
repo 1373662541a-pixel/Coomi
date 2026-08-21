@@ -34,6 +34,13 @@ pub struct AgentSnapshot {
     pub elapsed_ms: u128,
 }
 
+#[derive(Clone)]
+pub struct ConfiguredSubAgent {
+    pub id: String,
+    pub provider: ProviderConfig,
+    pub description: String,
+}
+
 struct AgentRecord {
     task: String,
     status: String,
@@ -46,6 +53,8 @@ pub struct AgentScheduler {
     cwd: PathBuf,
     home: PathBuf,
     provider: ProviderConfig,
+    sub_agents: Vec<ConfiguredSubAgent>,
+    fallback_sub_agent_id: Option<String>,
     policy: AccessMode,
     system_prompt: String,
     persistent_memory: bool,
@@ -65,12 +74,56 @@ impl AgentScheduler {
             cwd,
             home,
             provider,
+            sub_agents: Vec::new(),
+            fallback_sub_agent_id: None,
             policy,
             system_prompt,
             persistent_memory: true,
             max_agents: 3,
             agents: Mutex::new(BTreeMap::new()),
         })
+    }
+
+    pub fn with_sub_agents(
+        mut self: Arc<Self>,
+        sub_agents: Vec<ConfiguredSubAgent>,
+        fallback_sub_agent_id: Option<String>,
+    ) -> Arc<Self> {
+        let scheduler = Arc::get_mut(&mut self)
+            .expect("agent scheduler must be configured before it is shared");
+        scheduler.sub_agents = sub_agents;
+        scheduler.fallback_sub_agent_id = fallback_sub_agent_id;
+        self
+    }
+
+    pub fn sub_agent_summary(&self) -> String {
+        if self.sub_agents.is_empty() {
+            return "No dedicated sub-agent models are configured; omit sub_agent_id to use the main model.".into();
+        }
+        let entries = self
+            .sub_agents
+            .iter()
+            .map(|entry| {
+                let fallback = self
+                    .fallback_sub_agent_id
+                    .as_deref()
+                    .is_some_and(|id| id == entry.id);
+                let description = if entry.description.is_empty() {
+                    format!("{}:{}", entry.provider.id, entry.provider.model)
+                } else {
+                    entry.description.clone()
+                };
+                format!(
+                    "{}{} ({description})",
+                    entry.id,
+                    if fallback { " [fallback]" } else { "" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "Configured sub-agent IDs: {entries}. Use sub_agent_id to select one; omit it to use the fallback."
+        )
     }
 
     pub fn without_persistent_memory(mut self: Arc<Self>) -> Arc<Self> {
@@ -85,6 +138,7 @@ impl AgentScheduler {
         task: String,
         parent_messages: &[ChatMessage],
         fork_turns: Option<&str>,
+        sub_agent_id: Option<&str>,
     ) -> Result<String, String> {
         if task.trim().is_empty() {
             return Err("agent task must not be empty".into());
@@ -108,11 +162,17 @@ impl AgentScheduler {
         let messages = fork_history(parent_messages, fork_turns)?;
         let scheduler = Arc::clone(self);
         let task_for_run = task.clone();
+        let sub_agent_id = sub_agent_id.map(str::to_owned);
         let id_for_run = id.clone();
         let output_for_run = Arc::clone(&output);
         let join = tokio::spawn(async move {
             let result = scheduler
-                .run_agent(messages, task_for_run, Arc::clone(&output_for_run))
+                .run_agent(
+                    messages,
+                    task_for_run,
+                    Arc::clone(&output_for_run),
+                    sub_agent_id.as_deref(),
+                )
                 .await;
             let mut agents = scheduler.agents.lock().await;
             if let Some(record) = agents.get_mut(&id_for_run) {
@@ -149,10 +209,31 @@ impl AgentScheduler {
         messages: Vec<ChatMessage>,
         task: String,
         output: Arc<Mutex<String>>,
+        sub_agent_id: Option<&str>,
     ) -> anyhow::Result<()> {
-        let mut session = Session::new(&self.provider.id, &self.provider.model, self.cwd.clone());
+        let selected = if self.sub_agents.is_empty() {
+            None
+        } else {
+            let requested = sub_agent_id.or(self.fallback_sub_agent_id.as_deref());
+            let id =
+                requested.ok_or_else(|| anyhow::anyhow!("no fallback sub-agent is configured"))?;
+            Some(
+                self.sub_agents
+                    .iter()
+                    .find(|entry| entry.id == id)
+                    .ok_or_else(|| anyhow::anyhow!("unknown configured sub-agent: {id}"))?,
+            )
+        };
+        let provider_config = selected
+            .map(|entry| entry.provider.clone())
+            .unwrap_or_else(|| self.provider.clone());
+        let mut session = Session::new(
+            &provider_config.id,
+            &provider_config.model,
+            self.cwd.clone(),
+        );
         session.messages = messages;
-        let provider = HttpModelProvider::new(self.provider.clone())?;
+        let provider = HttpModelProvider::new(provider_config)?;
         let security = SecurityPolicy::new(&self.cwd, self.policy)?;
         let mut tools = CoreTools::new(self.cwd.clone(), security)
             .with_skills_directory(self.home.join("skills"))
@@ -162,8 +243,12 @@ impl AgentScheduler {
             tools = tools.with_memory(Arc::new(MemoryManager::new(&self.home, &self.cwd)));
         }
         let observer = AgentOutputObserver { output };
+        let role = selected
+            .filter(|entry| !entry.description.is_empty())
+            .map(|entry| format!(" Your configured role is: {}.", entry.description))
+            .unwrap_or_default();
         Agent::new(format!(
-            "{}\n\nYou are a delegated Coomi sub-agent. Complete the assigned task independently and return a concise result to the parent agent.",
+            "{}\n\nYou are a delegated Coomi sub-agent.{role} Complete the assigned task independently and return a concise result to the parent agent.",
             self.system_prompt
         ))
         .run_turn(

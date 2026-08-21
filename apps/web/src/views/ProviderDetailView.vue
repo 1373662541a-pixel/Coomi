@@ -10,6 +10,7 @@ import {
   type ProviderConfig,
   type ProviderInput,
   type ProviderProtocol,
+  type ModelParameters, type CapabilityOverride,
 } from '@/stores/config'
 
 type Tab = 'config' | 'models'
@@ -24,7 +25,9 @@ interface ProviderDraft {
   protocol: ProviderProtocol
   contextWindow: number
   supportsWebSearch: boolean
-  supportsVision: boolean
+  modelDescriptions: Record<string, string>
+  modelParameters: Record<string, ModelParameters>
+  capabilityOverrides: Record<string, CapabilityOverride>
 }
 
 const route = useRoute()
@@ -32,6 +35,7 @@ const router = useRouter()
 const config = useConfigStore()
 
 const tab = ref<Tab>('config')
+const modelCategory = ref<'text' | 'vision' | 'image'>('text')
 const draft = ref<ProviderDraft | null>(null)
 const original = ref<ProviderDraft | null>(null)
 const isNew = computed(() => route.name === 'provider-new')
@@ -95,7 +99,7 @@ function emptyDraft(id = '', name = ''): ProviderDraft {
     protocol: preset?.protocol || 'openai_compatible',
     contextWindow: 256000,
     supportsWebSearch: false,
-    supportsVision: false,
+    modelDescriptions: {}, modelParameters: {}, capabilityOverrides: {},
   }
 }
 
@@ -111,7 +115,8 @@ function draftFromProvider(value: ProviderConfig | null): ProviderDraft {
     protocol: normalizeProtocol(value.toolProtocol || value.type),
     contextWindow: value.contextWindow || 256000,
     supportsWebSearch: !!value.supportsWebSearch,
-    supportsVision: !!value.supportsVision,
+    modelDescriptions: { ...(value.modelDescriptions ?? {}) }, modelParameters: { ...(value.modelParameters ?? {}) },
+    capabilityOverrides: { ...(value.capabilityOverrides ?? {}) },
   }
 }
 
@@ -120,6 +125,7 @@ function clone(value: ProviderDraft): ProviderDraft {
     ...value,
     models: [...value.models],
     modelContextWindows: { ...value.modelContextWindows },
+    modelDescriptions: { ...value.modelDescriptions }, modelParameters: { ...value.modelParameters }, capabilityOverrides: { ...value.capabilityOverrides },
   }
 }
 
@@ -137,8 +143,30 @@ function modelContextSelection(model: string): string {
   return CONTEXT_WINDOW_PRESETS.includes(value) ? String(value) : 'custom'
 }
 
-function capabilityFor(model: string) {
-  return provider.value?.capabilities?.find(item => item.key.model === model)
+function capabilityEnabled(model: string, key: 'text' | 'vision' | 'image_generation'): boolean {
+  const override = draft.value?.capabilityOverrides[model]?.[key]
+  if (override !== undefined) return override
+  return key === 'text'
+}
+const visibleModels = computed(() => {
+  if (!draft.value) return []
+  return draft.value.models.filter(model => {
+    if (modelCategory.value === 'vision') return capabilityEnabled(model, 'vision')
+    if (modelCategory.value === 'image') return capabilityEnabled(model, 'image_generation')
+    return capabilityEnabled(model, 'text')
+  })
+})
+function modelParams(model: string): ModelParameters {
+  if (!draft.value) return {}
+  draft.value.modelParameters[model] ||= {}
+  return draft.value.modelParameters[model]
+}
+function setOverride(model: string, key: keyof CapabilityOverride, event: Event) {
+  if (!draft.value) return
+  const next = { ...(draft.value.capabilityOverrides[model] ?? {}) }
+  const checked = (event.target as HTMLInputElement).checked
+  next[key] = checked
+  draft.value.capabilityOverrides[model] = next
 }
 
 function modelCustomContextWindow(model: string): number {
@@ -202,6 +230,14 @@ function discardAndBack() {
 }
 
 function providerInput(value: ProviderDraft): ProviderInput {
+  const capabilityOverrides = { ...value.capabilityOverrides }
+  for (const model of value.models) {
+    capabilityOverrides[model] = {
+      text: capabilityOverrides[model]?.text ?? true,
+      vision: capabilityOverrides[model]?.vision ?? false,
+      image_generation: capabilityOverrides[model]?.image_generation ?? false,
+    }
+  }
   return {
     id: value.id.trim(),
     name: value.name.trim(),
@@ -215,7 +251,7 @@ function providerInput(value: ProviderDraft): ProviderInput {
       ? Math.max(32, Math.min(1048, Math.round(customContextWindow.value || 64))) * 1000
       : value.contextWindow,
     supportsWebSearch: value.supportsWebSearch,
-    supportsVision: value.supportsVision,
+    modelDescriptions: { ...value.modelDescriptions }, modelParameters: { ...value.modelParameters }, capabilityOverrides,
     activate: false,
   }
 }
@@ -273,7 +309,7 @@ async function activateCurrentProvider() {
     error.value = config.lastError || '设为当前提供商失败'
     return
   }
-  message.value = '已设为当前提供商'
+  message.value = '密钥和模型验证通过，已设为当前提供商'
 }
 
 async function revealKey() {
@@ -319,6 +355,7 @@ function addManualModel() {
   const value = manualModel.value.trim()
   if (!value || draft.value.models.includes(value)) return
   draft.value.models.push(value)
+  draft.value.capabilityOverrides[value] = { text: true, vision: false, image_generation: false }
   manualModel.value = ''
 }
 
@@ -360,6 +397,9 @@ function onPickerConfirm(models: string[]) {
   const next = normalizeModels(models)
   if (draft.value) draft.value.models = next
   if (draft.value) {
+    for (const model of next) {
+      draft.value.capabilityOverrides[model] ||= { text: true, vision: false, image_generation: false }
+    }
     const windows = { ...draft.value.modelContextWindows }
     for (const model of Object.keys(windows)) {
       if (!next.includes(model)) delete windows[model]
@@ -442,7 +482,6 @@ function openModelConfig() {
           <input v-if="draft.contextWindow === 0" v-model.number="customContextWindow" class="input" type="number" min="32" max="1048" placeholder="单位：k" />
         </label>
         <label class="toggle"><input v-model="draft.supportsWebSearch" type="checkbox" /><span>使用供应商原生 Web Search</span></label>
-        <label class="toggle"><input v-model="draft.supportsVision" type="checkbox" /><span>支持图像理解</span></label>
         <button class="btn btn-primary wide" type="submit" :disabled="!canSave || saving">{{ saving ? '保存中...' : '保存配置' }}</button>
         <button
           v-if="message && draft.models.length === 0"
@@ -455,7 +494,12 @@ function openModelConfig() {
         </button>
       </form>
 
-      <section v-else class="models-panel">
+      <section v-else-if="tab === 'models'" class="models-panel">
+        <div class="tabs model-categories" role="tablist">
+          <button :class="{ on: modelCategory === 'text' }" type="button" @click="modelCategory = 'text'">文本模型</button>
+          <button :class="{ on: modelCategory === 'vision' }" type="button" @click="modelCategory = 'vision'">图像理解</button>
+          <button :class="{ on: modelCategory === 'image' }" type="button" @click="modelCategory = 'image'">图像生成</button>
+        </div>
         <div class="model-tools">
           <label class="input-action add-model">
             <input v-model="manualModel" class="input" placeholder="输入模型 ID" autocomplete="off" autocapitalize="off" @keyup.enter="addManualModel" />
@@ -465,35 +509,49 @@ function openModelConfig() {
         </div>
         <p class="subnote">每个模型可单独设置上下文窗口，选择“默认”时继承供应商配置。</p>
         <div class="model-list">
-          <div v-for="model in draft.models" :key="model" class="model-item">
-            <span class="model-id">
-              <code>{{ model }}</code>
-              <small v-if="capabilityFor(model)">
-                {{ capabilityFor(model)!.source }} · {{ capabilityFor(model)!.text.state === 'verified' ? '已验证' : capabilityFor(model)!.text.state === 'inferred' ? '推断' : capabilityFor(model)!.text.state }} · {{ new Date(capabilityFor(model)!.probed_at_ms).toLocaleString() }}
-              </small>
-            </span>
-            <select
-              class="model-window"
-              :value="modelContextSelection(model)"
-              :aria-label="`${model} 上下文窗口`"
-              @change="updateModelContextWindow(model, $event)"
-            >
-              <option value="default">默认 {{ formatContextWindow(draft.contextWindow) }}</option>
-              <option v-for="value in CONTEXT_WINDOW_PRESETS" :key="value" :value="value">{{ formatContextWindow(value) }}</option>
-              <option value="custom">自定义</option>
-            </select>
-            <input
-              v-if="modelContextSelection(model) === 'custom'"
-              class="model-window-custom"
-              type="number"
-              min="32"
-              max="1048"
-              :value="Math.round(modelCustomContextWindow(model) / 1000)"
-              aria-label="自定义上下文窗口（千 token）"
-              @change="updateModelCustomContextWindow(model, $event)"
-            />
-            <div class="model-actions">
+          <div v-for="model in visibleModels" :key="model" class="model-item">
+            <div class="model-head">
+              <code :title="model">{{ model }}</code>
+              <input class="model-description" v-model="draft.modelDescriptions[model]" placeholder="模型描述（可选）" />
+            </div>
+            <div class="model-controls">
+              <label class="model-param"><span>温度</span>
+                <input type="number" min="0" max="2" step="0.1" placeholder="默认" v-model.number="modelParams(model).temperature" />
+              </label>
+              <label class="model-param"><span>推理</span>
+                <select v-model="modelParams(model).reasoningEffort"><option value="">默认</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">超高</option></select>
+              </label>
+              <label class="model-param model-context"><span>上下文窗口</span>
+                <span class="context-fields">
+                  <select
+                    class="model-window"
+                    :value="modelContextSelection(model)"
+                    :aria-label="`${model} 上下文窗口`"
+                    @change="updateModelContextWindow(model, $event)"
+                  >
+                    <option value="default">默认 {{ formatContextWindow(draft.contextWindow) }}</option>
+                    <option v-for="value in CONTEXT_WINDOW_PRESETS" :key="value" :value="value">{{ formatContextWindow(value) }}</option>
+                    <option value="custom">自定义</option>
+                  </select>
+                  <input
+                    v-if="modelContextSelection(model) === 'custom'"
+                    class="model-window-custom"
+                    type="number"
+                    min="32"
+                    max="1048"
+                    :value="Math.round(modelCustomContextWindow(model) / 1000)"
+                    aria-label="自定义上下文窗口（千 token）"
+                    @change="updateModelCustomContextWindow(model, $event)"
+                  />
+                </span>
+              </label>
               <button class="icon-btn danger-icon" aria-label="移除模型" @click="removeModel(model)"><CoomiIcon name="close" :size="15" /></button>
+            </div>
+            <div class="capability-overrides">
+              <span>模型能力</span>
+              <label><input type="checkbox" :checked="capabilityEnabled(model, 'text')" @change="setOverride(model, 'text', $event)" />文本</label>
+              <label><input type="checkbox" :checked="capabilityEnabled(model, 'vision')" @change="setOverride(model, 'vision', $event)" />视觉</label>
+              <label><input type="checkbox" :checked="capabilityEnabled(model, 'image_generation')" @change="setOverride(model, 'image_generation', $event)" />生图</label>
             </div>
           </div>
           <p v-if="draft.models.length === 0" class="empty">还没有模型。可以手动添加，或在线获取。</p>
@@ -503,7 +561,7 @@ function openModelConfig() {
 
       <div class="danger-area">
         <button v-if="isBuiltin" class="danger-link" @click="pendingClear = true">清空配置</button>
-        <button v-else class="danger-link" :disabled="isCurrent" @click="pendingDelete = true">删除供应商</button>
+        <button v-else class="danger-link" :disabled="isCurrent" @click="pendingDelete = true">删除提供商</button>
       </div>
     </main>
 
@@ -512,7 +570,7 @@ function openModelConfig() {
     <div v-if="pendingBack || pendingClear || pendingDelete" class="mask" @click.self="pendingBack = pendingClear = pendingDelete = false">
       <section class="confirm-sheet">
         <div class="grip" />
-        <h2>{{ pendingBack ? '放弃未保存的修改？' : pendingClear ? '清空供应商配置？' : '删除供应商？' }}</h2>
+        <h2>{{ pendingBack ? '放弃未保存的修改？' : pendingClear ? '清空提供商配置？' : '删除提供商？' }}</h2>
         <p>{{ pendingBack ? '当前修改还没有保存，离开后会丢失。' : pendingClear ? '只会删除已保存的配置，内置供应商仍会保留在列表中。' : '该供应商的 API Key 和模型配置也会一并删除。' }}</p>
         <div class="confirm-actions">
           <button class="btn btn-ghost" @click="pendingBack = pendingClear = pendingDelete = false">取消</button>
@@ -558,15 +616,23 @@ function openModelConfig() {
 .discover { flex-shrink: 0; min-height: 44px; padding: 0 12px; }
 .subnote { margin: 8px 3px 12px; color: var(--text-3); font-size: 12px; line-height: 1.55; }
 .model-list { overflow: hidden; border-radius: var(--r-card); background: var(--bg); box-shadow: var(--shadow-1); }
-.model-item { display: flex; align-items: center; gap: 8px; min-height: 52px; padding: 8px 10px 8px 13px; }
+.model-item { min-height: 52px; padding: 10px 11px; }
 .model-item + .model-item { border-top: 1px solid var(--border); }
-.model-id { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; }
-.model-item code { min-width: 0; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 12.5px; color: var(--text); }
-.model-item small { color: var(--text-3); font-size: 10px; overflow-wrap: anywhere; }
-.model-window { flex: 0 0 88px; min-height: 30px; padding: 0 5px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--bg); color: var(--text-2); font-size: 11px; }
-.model-window-custom { flex: 0 0 58px; min-height: 30px; padding: 0 5px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--bg); color: var(--text-2); font-size: 11px; }
-.model-actions { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }
-.danger-icon { width: 30px; height: 30px; color: var(--danger); }
+.model-head { display: grid; grid-template-columns: minmax(0, 1fr) minmax(84px, 38%); align-items: center; gap: 7px; }
+.model-head code { min-width: 0; overflow: hidden; color: var(--text); font-family: var(--font-mono); font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
+.model-description { width: 100%; min-width: 0; min-height: 28px; padding: 0 7px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--text-2); font-size: 10.5px; }
+.model-controls { display: grid; grid-template-columns: 64px 76px minmax(0, 1fr) 28px; align-items: end; gap: 6px; margin-top: 9px; }
+.model-param { display: flex; min-width: 0; flex-direction: column; gap: 3px; color: var(--text-3); font-size: 9.5px; }
+.model-param input, .model-param select { width: 100%; min-width: 0; min-height: 30px; padding: 0 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--text-2); font-size: 11px; }
+.context-fields { display: flex; min-width: 0; gap: 4px; }
+.capability-overrides { display: grid; grid-template-columns: auto repeat(3, minmax(0, 1fr)); align-items: center; gap: 8px; margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--border); color: var(--text-2); font-size: 11px; }
+.capability-overrides > span { color: var(--text-3); font-size: 9.5px; }
+.capability-overrides label { display: inline-flex; align-items: center; justify-content: center; gap: 4px; white-space: nowrap; }
+.capability-overrides input { width: 14px; height: 14px; margin: 0; accent-color: var(--blue); }
+.model-categories { margin-top: 0; }
+.model-window { flex: 1; }
+.model-window-custom { flex: 0 0 45px; }
+.danger-icon { width: 28px; height: 30px; color: var(--danger); }
 .empty { padding: 20px 12px; text-align: center; color: var(--text-3); font-size: 13px; }
 .danger-area { display: flex; justify-content: center; margin-top: 24px; }
 .danger-link { min-height: 36px; padding: 0 12px; color: var(--danger); font-size: 13px; }

@@ -12,6 +12,10 @@ const custom = reactive<Record<string, string>>({})
 const customMode = ref(false)
 const current = computed(() => props.card.questions[index.value])
 const isLast = computed(() => index.value === props.card.questions.length - 1)
+const currentAnswered = computed(() => {
+  const question = current.value
+  return !!question && !!(answers[question.id] ?? '').trim()
+})
 
 watch(() => props.card.callId, () => {
   index.value = 0
@@ -32,10 +36,9 @@ function chooseCustom() {
   customMode.value = true
 }
 
-function saveCustom() {
+function updateCustom() {
   const question = current.value
-  const value = question ? (custom[question.id] ?? '').trim() : ''
-  if (question && value) choose(value)
+  if (question) answers[question.id] = (custom[question.id] ?? '').trim()
 }
 
 function previous() {
@@ -77,22 +80,18 @@ function submit() {
         </button>
         <button class="opt" :class="{ selected: customMode }" @click="chooseCustom">
           <span><b>自定义</b><small>填写其他答案</small></span>
-          <CoomiIcon name="edit" :size="16" />
         </button>
       </div>
 
       <div v-if="current && customMode" class="free">
-        <input v-model="custom[current.id]" class="finput" placeholder="输入自定义答案" @keydown.enter="saveCustom" />
-        <button class="send" :disabled="!(custom[current.id] ?? '').trim()" @click="saveCustom">
-          <CoomiIcon name="check" :size="18" />
-        </button>
+        <input v-model="custom[current.id]" class="finput" placeholder="输入自定义答案" @input="updateCustom" />
       </div>
 
       <div class="actions">
         <button class="nav ghost" :disabled="index === 0" @click="previous">上一题</button>
         <button v-if="current" class="nav ghost" @click="choose('')">跳过</button>
-        <button v-if="!isLast" class="nav primary" @click="next">下一题</button>
-        <button v-else class="nav primary" @click="submit">提交全部</button>
+        <button v-if="!isLast" class="nav primary" :disabled="!currentAnswered" @click="next">下一题</button>
+        <button v-else class="nav primary" :disabled="!currentAnswered" @click="submit">提交全部</button>
       </div>
     </div>
   </div>
@@ -112,8 +111,7 @@ function submit() {
 .opt small { font-size: 11.5px; line-height: 1.4; color: var(--text-3); }
 .free { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
 .finput { flex: 1; min-width: 0; height: 44px; padding: 0 13px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg); color: var(--text); }
-.send { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%; background: var(--blue); color: #fff; }
-.send:disabled, .nav:disabled { opacity: .45; }
+.nav:disabled { opacity: .45; }
 .actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 16px; }
 .nav { min-height: 42px; border-radius: var(--r-md); font-size: 13.5px; font-weight: 600; }
 .nav.ghost { background: var(--fill-strong); color: var(--text-2); }

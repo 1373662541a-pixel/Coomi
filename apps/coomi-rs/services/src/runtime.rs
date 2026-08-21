@@ -134,6 +134,14 @@ struct DownloadState {
     expected_sha256: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RuntimeDownloadProgress {
+    pub downloaded: u64,
+    pub total: u64,
+    pub percent: u8,
+    pub status: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct RuntimeCommand {
     pub program: PathBuf,
@@ -346,11 +354,14 @@ impl RuntimeBackend for ProotLinuxBackend {
             "guest rootfs is incomplete"
         );
         let home = self.runtime_root.join("home");
+        let build_kit = home.join(".coomi-dev");
         let tmp = self.runtime_root.join("tmp");
         fs::create_dir_all(&home)?;
+        fs::create_dir_all(&build_kit)?;
         fs::create_dir_all(&tmp)?;
         let workspace = canonical_existing(workspace)?;
         let home = canonical_existing(&home)?;
+        let build_kit = canonical_existing(&build_kit)?;
         let tmp = canonical_existing(&tmp)?;
         let mut proot_args = vec![
             "--kill-on-exit".into(),
@@ -362,7 +373,14 @@ impl RuntimeBackend for ProotLinuxBackend {
             "-b".into(),
             format!("{}:/home/coomi", home.display()),
             "-b".into(),
+            format!("{}:/opt/coomi-dev", build_kit.display()),
+            "-b".into(),
             format!("{}:/tmp", tmp.display()),
+            // Expose the same verified host launcher inside the guest so
+            // `which proot` and tools that explicitly invoke PRoot resolve to
+            // the Runtime V2 binary instead of falling back to Termux.
+            "-b".into(),
+            format!("{}:/usr/local/bin/proot", self.proot().display()),
             "-b".into(),
             "/proc".into(),
             "-b".into(),
@@ -372,8 +390,11 @@ impl RuntimeBackend for ProotLinuxBackend {
             "/usr/bin/env".into(),
             "-i".into(),
             "HOME=/home/coomi".into(),
-            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into(),
+            "PATH=/opt/coomi-dev/current/bin:/opt/coomi-dev/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into(),
             "TMPDIR=/tmp".into(),
+            "COOMI_RUNTIME_BACKEND=proot_linux".into(),
+            "COOMI_BUILD_KIT=/opt/coomi-dev".into(),
+            "COOMI_PROOT_HOST=/usr/local/bin/proot".into(),
             "LANG=C.UTF-8".into(),
             "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt".into(),
         ];
@@ -395,6 +416,13 @@ impl RuntimeBackend for ProotLinuxBackend {
             arguments: proot_args,
             environment: {
                 let mut environment = minimal_environment(&home, &tmp);
+                // PRoot otherwise falls back to the compile-time Termux temp
+                // path (/data/data/com.termux/...), which does not exist in
+                // the standalone Coomi package.
+                environment.insert(
+                    "PROOT_TMP_DIR".into(),
+                    tmp.to_string_lossy().into_owned(),
+                );
                 environment.insert(
                     "LD_LIBRARY_PATH".into(),
                     self.version_root()
@@ -456,6 +484,39 @@ impl RuntimeManager {
             "unsupported runtime state version"
         );
         Ok(state)
+    }
+
+    pub fn download_progress(
+        &self,
+        name: &str,
+        artifact: &RuntimeArtifact,
+    ) -> RuntimeDownloadProgress {
+        let target = self.root.join("downloads").join(name);
+        let partial = target.with_extension("partial");
+        let downloaded = if target.is_file() {
+            artifact.size
+        } else {
+            fs::metadata(partial).map(|value| value.len()).unwrap_or(0)
+        };
+        let downloaded = downloaded.min(artifact.size);
+        let status = if target.is_file() {
+            "completed"
+        } else if downloaded > 0 {
+            "downloading"
+        } else {
+            "pending"
+        };
+        let percent = if artifact.size == 0 {
+            0
+        } else {
+            ((downloaded.saturating_mul(100)) / artifact.size).min(100) as u8
+        };
+        RuntimeDownloadProgress {
+            downloaded,
+            total: artifact.size,
+            percent,
+            status: status.into(),
+        }
     }
 
     pub fn begin_install(&self) -> Result<RuntimeState> {
@@ -521,6 +582,12 @@ impl RuntimeManager {
             "invalid runtime artifact name"
         );
         let target = self.root.join("downloads").join(name);
+        if target.is_file() {
+            if verify_artifact(&target, artifact).is_ok() {
+                return Ok(target);
+            }
+            fs::remove_file(&target)?;
+        }
         let partial = target.with_extension("partial");
         let state_path = target.with_extension("download.json");
         let mut offset = fs::metadata(&partial).map(|value| value.len()).unwrap_or(0);
@@ -619,27 +686,13 @@ impl RuntimeManager {
             fs::remove_dir_all(&staging)?;
         }
         fs::create_dir_all(&staging)?;
-        let mut host_archive = tar::Archive::new(open_archive(host_file)?);
-        for entry in host_archive.entries()? {
-            let mut entry = entry?;
-            anyhow::ensure!(
-                entry.unpack_in(&staging)?,
-                "PRoot host archive path escaped destination"
-            );
-        }
+        unpack_archive(open_archive(host_file)?, &staging)?;
         let host = staging.join("bin").join("proot");
         anyhow::ensure!(host.is_file(), "PRoot host archive has no bin/proot");
         set_executable(&host)?;
         let rootfs = staging.join("rootfs");
         fs::create_dir_all(&rootfs)?;
-        let mut archive = tar::Archive::new(open_archive(rootfs_tar)?);
-        for entry in archive.entries()? {
-            let mut entry = entry?;
-            anyhow::ensure!(
-                entry.unpack_in(&rootfs)?,
-                "rootfs archive path escaped destination"
-            );
-        }
+        unpack_archive(open_archive(rootfs_tar)?, &rootfs)?;
         anyhow::ensure!(rootfs.join("bin/sh").is_file(), "rootfs has no /bin/sh");
         let destination = self.root.join("versions").join(&manifest.runtime_version);
         if destination.exists() {
@@ -740,6 +793,60 @@ fn open_archive(path: &Path) -> Result<Box<dyn Read>> {
     } else {
         Ok(Box::new(file))
     }
+}
+
+/// Android's app-private filesystem rejects hard-link creation. Expand tar
+/// hard-link entries into ordinary file copies while retaining tar's normal
+/// handling for directories, files and symlinks.
+fn unpack_archive(reader: Box<dyn Read>, destination: &Path) -> Result<()> {
+    let mut archive = tar::Archive::new(reader);
+    let mut hard_links = Vec::new();
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        if entry.header().entry_type().is_hard_link() {
+            let path = archive_path(entry.path()?)?;
+            let link = archive_path(entry.link_name()?.context("hard link has no target")?)?;
+            hard_links.push((path, link));
+            continue;
+        }
+        anyhow::ensure!(
+            entry.unpack_in(destination)?,
+            "archive path escaped destination"
+        );
+    }
+    for (path, link) in hard_links {
+        let target = destination.join(&link);
+        let output = destination.join(&path);
+        anyhow::ensure!(target.is_file(), "hard link target is missing: {}", link.display());
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&target, &output).with_context(|| {
+            format!("failed to expand hard link {} -> {}", path.display(), link.display())
+        })?;
+        if let Ok(permissions) = fs::metadata(&target).map(|metadata| metadata.permissions()) {
+            let _ = fs::set_permissions(&output, permissions);
+        }
+    }
+    Ok(())
+}
+
+fn archive_path(path: impl AsRef<Path>) -> Result<PathBuf> {
+    let path = path.as_ref();
+    let mut clean = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(value) => clean.push(value),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => {
+                anyhow::bail!("archive path escapes destination")
+            }
+        }
+    }
+    anyhow::ensure!(!clean.as_os_str().is_empty(), "archive path is empty");
+    Ok(clean)
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
@@ -914,6 +1021,12 @@ mod tests {
         let joined = command.arguments.join(" ");
         assert!(joined.contains(":/workspace"));
         assert!(joined.contains(":/home/coomi"));
+        assert!(joined.contains(":/opt/coomi-dev"));
+        assert!(joined.contains(":/usr/local/bin/proot"));
+        assert!(
+            joined.contains("PATH=/opt/coomi-dev/current/bin:/opt/coomi-dev/bin:/usr/local/sbin")
+        );
+        assert!(command.environment.contains_key("PROOT_TMP_DIR"));
         assert!(!joined.contains("/storage/emulated"));
     }
 }

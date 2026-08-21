@@ -5,7 +5,7 @@
  */
 import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { useConfigStore, type CapabilityState } from '@/stores/config'
+import { useConfigStore } from '@/stores/config'
 import { useSessionStore } from '@/stores/session'
 import { useConnectionStore } from '@/stores/connection'
 import CoomiIcon from './CoomiIcon.vue'
@@ -21,24 +21,26 @@ const usageOpen = ref(false)
 const pathPickerOpen = ref(false)
 const pathInput = ref('')
 const pathNotice = ref('')
+const activeModelCategory = ref<'text' | 'vision' | 'image'>('text')
+const pathQuickOptions = computed(() => session.cwd ? [session.cwd] : [])
 const modelGroups = computed(() => {
-  const groups: Record<'text' | 'vision' | 'image', Array<{ providerId: string; provider: string; model: string; state: CapabilityState }>> = { text: [], vision: [], image: [] }
+  const groups: Record<'text' | 'vision' | 'image', Array<{ providerId: string; provider: string; model: string }>> = { text: [], vision: [], image: [] }
   for (const provider of [...config.providers].sort((a, b) => Number(b.id === config.activeId) - Number(a.id === config.activeId))) {
     for (const model of provider.models) {
-      const profile = provider.capabilities?.find(item => item.key.model === model)
-      const category = profile?.image_generation.state === 'verified' || profile?.image_generation.state === 'inferred'
-        ? 'image'
-        : profile?.vision.state === 'verified' || profile?.vision.state === 'inferred' ? 'vision' : 'text'
-      const evidence = category === 'image' ? profile?.image_generation : category === 'vision' ? profile?.vision : profile?.text
-      groups[category].push({ providerId: provider.id, provider: provider.name, model, state: evidence?.state ?? 'unknown' })
+      const capabilities = provider.capabilityOverrides?.[model]
+      const item = { providerId: provider.id, provider: provider.name, model }
+      if (capabilities?.text ?? true) groups.text.push(item)
+      if (capabilities?.vision ?? false) groups.vision.push(item)
+      if (capabilities?.image_generation ?? false) groups.image.push(item)
     }
   }
   return [
-    { id: 'text', label: '文本', items: groups.text },
-    { id: 'vision', label: '视觉', items: groups.vision },
-    { id: 'image', label: '生图', items: groups.image },
-  ].filter(group => group.items.length > 0)
+    { id: 'text' as const, label: '文本模型', items: groups.text },
+    { id: 'vision' as const, label: '图像理解', items: groups.vision },
+    { id: 'image' as const, label: '图像生成', items: groups.image },
+  ]
 })
+const activeModelGroup = computed(() => modelGroups.value.find(group => group.id === activeModelCategory.value)!)
 const usagePercent = computed(() => Math.min(100, Math.max(0, Math.round((session.usage?.contextRatio ?? 0) * 100))))
 const usageStroke = computed(() => `${usagePercent.value} ${100 - usagePercent.value}`)
 const effortLabels = { auto: '自动', low: '低', medium: '中', high: '高', xhigh: '超高' } as const
@@ -69,6 +71,12 @@ function choose(providerId: string, model: string) {
 function toggleModel() {
   modelOpen.value = !modelOpen.value
   usageOpen.value = false
+  if (modelOpen.value) {
+    const selected = modelGroups.value.find(group => group.items.some(item => (
+      item.providerId === config.currentProviderId && item.model === config.currentModel
+    )))
+    activeModelCategory.value = selected?.id ?? 'text'
+  }
 }
 
 function toggleUsage() {
@@ -117,21 +125,27 @@ function browseInFileManager() {
 
     <button v-if="modelOpen" class="model-scrim" aria-label="关闭模型选择" @click="modelOpen = false" />
     <div v-if="modelOpen" class="model-menu">
-      <template v-if="modelGroups.length">
-        <section v-for="group in modelGroups" :key="group.id" class="model-group">
-          <p class="provider-name">{{ group.label }}</p>
-          <button
-            v-for="item in group.items" :key="item.providerId + ':' + item.model" class="model-row"
-            :class="{ selected: item.providerId === config.currentProviderId && item.model === config.currentModel }"
-            @click="choose(item.providerId, item.model)"
-          >
-            <span><b>{{ item.model }}</b><small>{{ item.provider }}</small></span>
-            <em :class="item.state">{{ item.state === 'verified' ? '已验证' : item.state === 'inferred' ? '推断' : '未知' }}</em>
-            <CoomiIcon v-if="item.providerId === config.currentProviderId && item.model === config.currentModel" name="check" :size="15" />
-          </button>
-        </section>
-      </template>
-      <p v-else class="model-empty">当前 Provider 没有可用模型</p>
+      <div class="model-tabs" role="tablist" aria-label="模型分类">
+        <button
+          v-for="group in modelGroups"
+          :key="group.id"
+          role="tab"
+          :aria-selected="activeModelCategory === group.id"
+          :class="{ active: activeModelCategory === group.id }"
+          @click="activeModelCategory = group.id"
+        >{{ group.label }}</button>
+      </div>
+      <section class="model-list" role="tabpanel">
+        <button
+          v-for="item in activeModelGroup.items" :key="item.providerId + ':' + item.model" class="model-row"
+          :class="{ selected: item.providerId === config.currentProviderId && item.model === config.currentModel }"
+          @click="choose(item.providerId, item.model)"
+        >
+          <span><b>{{ item.model }}</b><small>{{ item.provider }}</small></span>
+          <CoomiIcon v-if="item.providerId === config.currentProviderId && item.model === config.currentModel" name="check" :size="15" />
+        </button>
+        <p v-if="activeModelGroup.items.length === 0" class="model-empty">该分类暂无可用模型</p>
+      </section>
     </div>
 
     <button class="usage-button" :aria-expanded="usageOpen" aria-label="上下文用量" @click="toggleUsage">
@@ -177,9 +191,9 @@ function browseInFileManager() {
       <div class="path-sheet" @click.stop>
         <p class="path-title">会话标记路径</p>
         <p class="path-desc">绑定为当前会话的执行目录，coomi 将在此目录下工作。</p>
-        <input v-model="pathInput" class="path-input" placeholder="/data/user/0/com.coomi.android/files" spellcheck="false" @keyup.enter="savePath" />
+        <input v-model="pathInput" class="path-input" placeholder="输入运行时路径" spellcheck="false" @keyup.enter="savePath" />
         <div class="path-quick">
-          <button v-for="p in ['/data/user/0/com.coomi.android/files', '/data/user/0/com.coomi.android/files/coomi']" :key="p" class="chip" @click="pickPath(p)">{{ p.split('/').pop() || p }}</button>
+          <button v-for="p in pathQuickOptions" :key="p" class="chip" @click="pickPath(p)">当前工作目录</button>
           <button class="chip" @click="browseInFileManager">在文件管理器中浏览…</button>
         </div>
         <p v-if="pathNotice" class="path-notice">{{ pathNotice }}</p>
@@ -208,6 +222,20 @@ function browseInFileManager() {
   transform: translateX(-50%); padding: 6px; border: 1px solid var(--border);
   border-radius: var(--r-card); background: var(--bg); box-shadow: var(--shadow-2);
 }
+.model-tabs {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  min-height: 42px; border-bottom: 1px solid var(--border);
+}
+.model-tabs button {
+  position: relative; min-width: 0; padding: 0 3px;
+  color: var(--text-3); font-size: 12px; font-weight: 600;
+}
+.model-tabs button.active { color: var(--blue); }
+.model-tabs button.active::after {
+  content: ''; position: absolute; right: 18%; bottom: -1px; left: 18%;
+  height: 2px; border-radius: 2px; background: var(--blue);
+}
+.model-list { max-height: min(43vh, 322px); overflow-y: auto; padding-top: 5px; }
 .usage-scrim { position: fixed; inset: 0; z-index: 19; border: 0; background: transparent; }
 .usage-menu {
   position: absolute; z-index: 20; top: calc(var(--safe-top) + 49px); right: 8px;
@@ -274,16 +302,10 @@ function browseInFileManager() {
 .path-actions .btn { flex: 1; }
 .btn.primary { background: var(--blue); color: #fff; }
 .btn.ghost { background: var(--fill-strong); color: var(--text); }
-.model-group + .model-group { border-top: 1px solid var(--border); margin-top: 5px; padding-top: 5px; }
-.provider-name { display: flex; align-items: center; gap: 6px; padding: 5px 8px 3px; font-size: 11.5px; color: var(--text-3); }
-.provider-name span { padding: 1px 5px; border-radius: var(--r-pill); background: var(--blue-soft); color: var(--blue); }
 .model-row { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 38px; padding: 7px 9px; border: 0; border-radius: var(--r-sm); background: none; color: var(--text); text-align: left; }
 .model-row span { display: flex; flex: 1; min-width: 0; flex-direction: column; overflow: hidden; }
 .model-row b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 12.5px; font-weight: 500; }
 .model-row small { overflow: hidden; color: var(--text-3); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
-.model-row em { flex-shrink: 0; color: var(--text-3); font-size: 10px; font-style: normal; }
-.model-row em.verified { color: var(--ok); }
-.model-row em.inferred { color: var(--orange); }
 .model-row.selected { background: var(--blue-soft); color: var(--blue); }
 .model-row:active { background: var(--fill-press); }
 .model-empty { padding: 16px 10px; text-align: center; font-size: 12.5px; color: var(--text-3); }

@@ -14,24 +14,15 @@ export interface ProviderConfig {
   active?: boolean
   builtin?: boolean
   status?: ProviderStatus
-  capabilities?: ModelCapabilityProfile[]
+  modelDescriptions?: Record<string, string>
+  modelParameters?: Record<string, ModelParameters>
+  capabilityOverrides?: Record<string, CapabilityOverride>
 }
 
-export type CapabilityState = 'verified' | 'inferred' | 'unsupported' | 'unknown'
-export interface CapabilityEvidence { state: CapabilityState; checked_at_ms: number; error?: string }
-export interface ModelCapabilityProfile {
-  key: { provider: string; model: string; protocol: string; base_url: string; key_version_fingerprint: string }
-  text: CapabilityEvidence
-  vision: CapabilityEvidence
-  image_generation: CapabilityEvidence
-  native_tools: CapabilityEvidence
-  parallel_tools: CapabilityEvidence
-  web_search: CapabilityEvidence
-  streaming: CapabilityEvidence
-  reasoning_efforts: string[]
-  source: string
-  probed_at_ms: number
-}
+export interface ModelParameters { temperature?: number; topP?: number; maxOutputTokens?: number; reasoningEffort?: string }
+export interface CapabilityOverride { text?: boolean; vision?: boolean; image_generation?: boolean; reasoning?: boolean }
+export interface SubAgentConfig { id: string; providerId: string; model: string; description?: string }
+export interface SubAgentSettings { agents: SubAgentConfig[]; fallbackId?: string }
 
 export type ProviderProtocol = 'openai_compatible' | 'openai_responses' | 'anthropic_messages' | 'gemini_native'
 export type ProviderStatus = 'unconfigured' | 'configured' | 'current'
@@ -41,6 +32,7 @@ export interface ConnectionSettings {
   wsRetryCount: number
   reconnectInitialDelayMs: number
   reconnectMaxDelayMs: number
+  maxConcurrentTasks: number
 }
 
 export const DEFAULT_CONNECTION_SETTINGS: ConnectionSettings = {
@@ -48,6 +40,7 @@ export const DEFAULT_CONNECTION_SETTINGS: ConnectionSettings = {
   wsRetryCount: 10,
   reconnectInitialDelayMs: 500,
   reconnectMaxDelayMs: 10_000,
+  maxConcurrentTasks: 5,
 }
 
 export interface ProviderPreset {
@@ -72,6 +65,8 @@ export interface ProviderInput {
   baseUrl?: string; type?: string; toolProtocol?: string; contextWindow?: number
   modelContextWindows?: Record<string, number>
   fastModel?: string | null; activate?: boolean; supportsWebSearch?: boolean; supportsVision?: boolean
+  modelDescriptions?: Record<string, string>; modelParameters?: Record<string, ModelParameters>
+  capabilityOverrides?: Record<string, CapabilityOverride>
 }
 
 export function providerStatus(provider: ProviderConfig, activeId: string): ProviderStatus {
@@ -100,7 +95,9 @@ export function mergeProviderList(configured: ProviderConfig[], activeId: string
       modelContextWindows: { ...(saved?.modelContextWindows ?? {}) },
       supportsWebSearch: saved?.supportsWebSearch ?? false,
       supportsVision: saved?.supportsVision ?? false,
-      capabilities: saved?.capabilities ?? [],
+      modelDescriptions: { ...(saved?.modelDescriptions ?? {}) },
+      modelParameters: { ...(saved?.modelParameters ?? {}) },
+      capabilityOverrides: { ...(saved?.capabilityOverrides ?? {}) },
       active: activeId === preset.id,
       builtin: true,
     }
@@ -119,14 +116,19 @@ export const PERMISSION_MODES: { mode: PermissionMode; label: string; desc: stri
   { mode: 'full', label: '放行', desc: '全部自动执行（仅信任场景）' },
 ]
 
-/** 主题三档：system 跟随系统、light 明亮、dark 夜间。 */
-export type ThemeMode = 'system' | 'light' | 'dark' | 'book' | 'orange'
+export type ThemeMode = 'system' | 'light' | 'dark' | 'book' | 'orange' | 'ink' | 'abyss' | 'ember' | 'celadon' | 'linen'
+const THEME_VALUES: ThemeMode[] = ['system', 'light', 'dark', 'book', 'orange', 'ink', 'abyss', 'ember', 'celadon', 'linen']
 export const THEME_MODES: { mode: ThemeMode; label: string; desc: string }[] = [
   { mode: 'system', label: '跟随系统', desc: '与手机系统深浅色保持一致' },
   { mode: 'light', label: '明亮模式', desc: '始终使用浅色界面' },
   { mode: 'dark', label: '夜间模式', desc: '始终使用深色界面' },
   { mode: 'book', label: '书卷纸', desc: '柔和纸张底色与墨绿色点缀' },
   { mode: 'orange', label: '橙白', desc: '明快白色底面与暖橙色点缀' },
+  { mode: 'ink', label: '墨玉', desc: '墨黑底面与温润玉绿色点缀' },
+  { mode: 'abyss', label: '深海', desc: '深海蓝黑底面与清冷青蓝点缀' },
+  { mode: 'ember', label: '炭褐', desc: '炭黑褐底面与余烬铜色点缀' },
+  { mode: 'celadon', label: '青瓷', desc: '青瓷浅灰底面与釉绿色点缀' },
+  { mode: 'linen', label: '亚麻', desc: '自然亚麻白底面与沉静靛色点缀' },
 ]
 
 export const REASONING_EFFORTS: { value: ReasoningEffort; label: string }[] = [
@@ -143,18 +145,18 @@ export function readThemeMode(): ThemeMode {
   if (bridge && typeof bridge.getThemeMode === 'function') {
     try {
       const v = String(bridge.getThemeMode() ?? '')
-      if (['light', 'dark', 'system', 'book', 'orange'].includes(v)) return v as ThemeMode
+      if (THEME_VALUES.includes(v as ThemeMode)) return v as ThemeMode
     } catch { /* 桥未就绪时走 localStorage */ }
   }
   const saved = localStorage.getItem('coomi.themeMode')
-  return ['light', 'dark', 'system', 'book', 'orange'].includes(saved ?? '') ? saved as ThemeMode : 'system'
+  return THEME_VALUES.includes(saved as ThemeMode) ? saved as ThemeMode : 'system'
 }
 
 /** 写入 <html data-theme>，前端 global.css 据此切换暗色主题。 */
 export function applyTheme(mode: ThemeMode) {
   const dark = mode === 'dark'
     || (mode === 'system' && window.matchMedia?.('(prefers-color-scheme: dark)').matches)
-  document.documentElement.setAttribute('data-theme', dark ? 'dark' : mode === 'book' || mode === 'orange' ? mode : 'light')
+  document.documentElement.setAttribute('data-theme', dark ? 'dark' : mode === 'system' ? 'light' : mode)
 }
 
 // 浏览器独立开发时的兜底数据（后端不可达时使用）
@@ -172,11 +174,13 @@ export const useConfigStore = defineStore('config', () => {
   const reasoningEffort = ref<ReasoningEffort>(REASONING_EFFORTS.some(item => item.value === savedEffort) ? savedEffort! : 'auto')
   const savedRounds = Number(localStorage.getItem('coomi.maxToolRounds'))
   const maxToolRounds = ref([192, 256, 512].includes(savedRounds) ? savedRounds : 192)
+  const subAgentSettings = ref<SubAgentSettings>({ agents: [] })
   const connectionSettings = ref<ConnectionSettings>({
     providerRetryCount: readStoredInt('coomi.providerRetryCount', 0, 10, DEFAULT_CONNECTION_SETTINGS.providerRetryCount),
     wsRetryCount: readStoredInt('coomi.wsRetryCount', 0, 30, DEFAULT_CONNECTION_SETTINGS.wsRetryCount),
     reconnectInitialDelayMs: readStoredInt('coomi.reconnectInitialDelayMs', 500, 60_000, DEFAULT_CONNECTION_SETTINGS.reconnectInitialDelayMs),
     reconnectMaxDelayMs: readStoredInt('coomi.reconnectMaxDelayMs', 1_000, 120_000, DEFAULT_CONNECTION_SETTINGS.reconnectMaxDelayMs),
+    maxConcurrentTasks: readStoredInt('coomi.maxConcurrentTasks', 1, 20, DEFAULT_CONNECTION_SETTINGS.maxConcurrentTasks),
   })
 
   const providers = ref<ProviderConfig[]>([])
@@ -248,6 +252,7 @@ export const useConfigStore = defineStore('config', () => {
     localStorage.setItem('coomi.wsRetryCount', String(value.wsRetryCount))
     localStorage.setItem('coomi.reconnectInitialDelayMs', String(value.reconnectInitialDelayMs))
     localStorage.setItem('coomi.reconnectMaxDelayMs', String(value.reconnectMaxDelayMs))
+    localStorage.setItem('coomi.maxConcurrentTasks', String(value.maxConcurrentTasks))
   }
 
   async function fetchConnectionSettings(): Promise<boolean> {
@@ -266,11 +271,13 @@ export const useConfigStore = defineStore('config', () => {
       wsRetryCount: Math.trunc(value.wsRetryCount),
       reconnectInitialDelayMs: Math.trunc(value.reconnectInitialDelayMs),
       reconnectMaxDelayMs: Math.trunc(value.reconnectMaxDelayMs),
+      maxConcurrentTasks: Math.trunc(value.maxConcurrentTasks),
     }
     if (normalized.providerRetryCount < 0 || normalized.providerRetryCount > 10
       || normalized.wsRetryCount < 0 || normalized.wsRetryCount > 30
       || normalized.reconnectInitialDelayMs < 500 || normalized.reconnectInitialDelayMs > 60_000
       || normalized.reconnectMaxDelayMs < 1_000 || normalized.reconnectMaxDelayMs > 120_000
+      || normalized.maxConcurrentTasks < 1 || normalized.maxConcurrentTasks > 20
       || normalized.reconnectMaxDelayMs < normalized.reconnectInitialDelayMs) return false
     try {
       const saved = await apiSend<ConnectionSettings>('/api/settings/connection', 'PUT', normalized)
@@ -311,6 +318,71 @@ export const useConfigStore = defineStore('config', () => {
    * 引擎 settings.json 是权威值；localStorage 只是 UI 缓存，启动时以引擎为准。
    */
   const globalMemory = ref(localStorage.getItem('coomi.globalMemory') === '1')
+  const digitalLifeEnabled = ref(localStorage.getItem('coomi.digitalLifeEnabled') === '1')
+
+  function syncDigitalLifeEnabled() {
+    const bridge = (window as any).CoomiAndroid
+    if (bridge && typeof bridge.getDigitalLifeEnabled === 'function') {
+      try { digitalLifeEnabled.value = !!bridge.getDigitalLifeEnabled() } catch { /* 使用本地缓存 */ }
+    }
+    localStorage.setItem('coomi.digitalLifeEnabled', digitalLifeEnabled.value ? '1' : '0')
+  }
+
+  async function fetchSubAgentSettings(): Promise<boolean> {
+    if (usingMock.value) return true
+    try {
+      const data = await apiGet<SubAgentSettings>('/api/settings/subagents')
+      subAgentSettings.value = {
+        agents: (data.agents ?? []).map(agent => ({ ...agent })),
+        fallbackId: data.fallbackId,
+      }
+      return true
+    } catch (e) {
+      lastError.value = String(e)
+      return false
+    }
+  }
+
+  async function saveSubAgentSettings(value: SubAgentSettings): Promise<boolean> {
+    if (usingMock.value) {
+      subAgentSettings.value = {
+        agents: value.agents.map(agent => ({ ...agent })),
+        fallbackId: value.fallbackId,
+      }
+      return true
+    }
+    try {
+      const saved = await apiSend<SubAgentSettings>('/api/settings/subagents', 'PUT', value)
+      subAgentSettings.value = {
+        agents: (saved.agents ?? []).map(agent => ({ ...agent })),
+        fallbackId: saved.fallbackId,
+      }
+      return true
+    } catch (e) {
+      lastError.value = String(e)
+      return false
+    }
+  }
+  async function validateAndSelectModel(providerId: string, model: string): Promise<boolean> {
+    try {
+      await apiSend(`/api/providers/${encodeURIComponent(providerId)}/select-model`, 'POST', { model })
+      selectModel(providerId, model)
+      activeId.value = providerId
+      return true
+    } catch (e) {
+      lastError.value = String(e)
+      return false
+    }
+  }
+
+  function setDigitalLifeEnabled(enabled: boolean) {
+    digitalLifeEnabled.value = enabled
+    localStorage.setItem('coomi.digitalLifeEnabled', enabled ? '1' : '0')
+    const bridge = (window as any).CoomiAndroid
+    if (bridge && typeof bridge.setDigitalLifeEnabled === 'function') {
+      try { bridge.setDigitalLifeEnabled(enabled) } catch { /* 本地状态仍可用 */ }
+    }
+  }
   /** 从引擎拉取权威值（应用启动时调用），覆盖本地缓存与开关显示。 */
   async function syncGlobalMemoryFromEngine() {
     try {
@@ -381,6 +453,8 @@ export const useConfigStore = defineStore('config', () => {
           contextWindow: input.contextWindow, fastModel: input.fastModel,
           modelContextWindows: { ...(input.modelContextWindows ?? {}) },
           supportsWebSearch: input.supportsWebSearch, supportsVision: input.supportsVision,
+          modelDescriptions: { ...(input.modelDescriptions ?? {}) }, modelParameters: { ...(input.modelParameters ?? {}) },
+          capabilityOverrides: { ...(input.capabilityOverrides ?? {}) },
           model: input.models[0],
         })
       } else {
@@ -390,6 +464,8 @@ export const useConfigStore = defineStore('config', () => {
           contextWindow: input.contextWindow, fastModel: input.fastModel,
           modelContextWindows: { ...(input.modelContextWindows ?? {}) },
           supportsWebSearch: input.supportsWebSearch, supportsVision: input.supportsVision,
+          modelDescriptions: { ...(input.modelDescriptions ?? {}) }, modelParameters: { ...(input.modelParameters ?? {}) },
+          capabilityOverrides: { ...(input.capabilityOverrides ?? {}) },
           model: input.models[0],
         })
       }
@@ -411,6 +487,9 @@ export const useConfigStore = defineStore('config', () => {
         fastModel: input.fastModel,
         supportsWebSearch: input.supportsWebSearch,
         supportsVision: input.supportsVision,
+        modelDescriptions: input.modelDescriptions,
+        modelParameters: input.modelParameters,
+        capabilityOverrides: input.capabilityOverrides,
         activate: input.activate,
       })
       await fetchProviders()
@@ -503,11 +582,11 @@ export const useConfigStore = defineStore('config', () => {
   }
 
   return {
-    permissionMode, planMode, themeMode, reasoningEffort, maxToolRounds, connectionSettings, globalMemory, customPrompt, providers, activeId, loading, usingMock, lastError,
+    permissionMode, planMode, themeMode, reasoningEffort, maxToolRounds, connectionSettings, globalMemory, digitalLifeEnabled, customPrompt, providers, activeId, loading, usingMock, lastError, subAgentSettings,
     currentProviderId, currentModel, currentProvider, mergedProviders,
-    fetchProviders, selectModel, setPermissionMode, setThemeMode, setReasoningEffort, setMaxToolRounds, fetchConnectionSettings, saveConnectionSettings, cyclePermissionMode, togglePlanMode,
-    toggleGlobalMemory, syncGlobalMemoryFromEngine, fetchCustomPrompt, saveCustomPrompt,
-    upsertProvider, deleteProvider, activateProvider, copyProvider, revealProviderKey, discoverModels,
+    fetchProviders, selectModel, validateAndSelectModel, setPermissionMode, setThemeMode, setReasoningEffort, setMaxToolRounds, fetchConnectionSettings, saveConnectionSettings, cyclePermissionMode, togglePlanMode,
+    toggleGlobalMemory, syncGlobalMemoryFromEngine, setDigitalLifeEnabled, syncDigitalLifeEnabled, fetchCustomPrompt, saveCustomPrompt,
+    upsertProvider, deleteProvider, activateProvider, copyProvider, revealProviderKey, discoverModels, fetchSubAgentSettings, saveSubAgentSettings,
   }
 })
 

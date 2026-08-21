@@ -14,11 +14,16 @@ import com.termux.shared.termux.TermuxConstants;
 
 import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.FileWriter;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
+import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -110,7 +115,18 @@ public class CoomiService extends Service {
     }
 
     @Override public IBinder onBind(Intent intent) { return mBinder; }
-    @Override public void onCreate() { Logger.logInfo(LOG_TAG, "Native service created"); }
+    @Override
+    public void onCreate() {
+        Logger.logInfo(LOG_TAG, "Native service created");
+        mExecutor.execute(() -> {
+            try {
+                ensureRuntimeManifestCurrent();
+                ensureBundledRuntimeArtifactsCurrent();
+            } catch (Exception error) {
+                Logger.logError(LOG_TAG, "Bundled Runtime V2 deployment failed: " + error.getMessage());
+            }
+        });
+    }
     @Override public int onStartCommand(Intent intent, int flags, int startId) { return START_STICKY; }
 
     @Override
@@ -209,6 +225,8 @@ public class CoomiService extends Service {
             try {
                 File binary = nativeBinary();
                 File web = ensureCurrentWebAssets();
+                ensureRuntimeManifestCurrent();
+                ensureBundledRuntimeArtifactsCurrent();
                 if (!binary.isFile()) {
                     callback.onError("APK 中缺少 ARM64 coomi-rs 二进制：" + binary.getAbsolutePath());
                     return;
@@ -390,6 +408,8 @@ public class CoomiService extends Service {
             }
             File binary = nativeBinary();
             File web = ensureCurrentWebAssets();
+            ensureRuntimeManifestCurrent();
+            ensureBundledRuntimeArtifactsCurrent();
             if (!binary.isFile() || !new File(web, "index.html").isFile()) {
                 mIsEngineStarting = false;
                 return new CommandResult(false, "", "native binary or frontend is missing", -1);
@@ -412,6 +432,7 @@ public class CoomiService extends Service {
             mEngineProcess = builder.start();
             mEnginePort = port;
             mIsEngineRunning = true;
+            startBundledRuntimeInstallWhenReady(mEngineProcess, port, token);
             reportDailyActive();
 
             Process process = mEngineProcess;
@@ -479,6 +500,123 @@ public class CoomiService extends Service {
             }
         }
         return web;
+    }
+
+    /** Keep the signed-in-APK Runtime V2 manifest in the engine config directory across upgrades. */
+    private synchronized void ensureRuntimeManifestCurrent() throws Exception {
+        byte[] expected;
+        try (InputStream input = getAssets().open(CoomiConstants.RUNTIME_V2_MANIFEST_ASSET)) {
+            expected = input.readAllBytes();
+        }
+        if (expected.length == 0) {
+            throw new IllegalStateException("APK Runtime V2 manifest is empty");
+        }
+
+        File target = new File(CoomiConstants.RUNTIME_V2_MANIFEST_PATH);
+        File parent = target.getParentFile();
+        if (parent == null || (!parent.isDirectory() && !parent.mkdirs())) {
+            throw new IllegalStateException("cannot create Runtime V2 config directory");
+        }
+        if (target.isFile() && Arrays.equals(expected, Files.readAllBytes(target.toPath()))) {
+            return;
+        }
+
+        File temporary = new File(parent, target.getName() + ".tmp");
+        Files.write(temporary.toPath(), expected);
+        Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        Logger.logInfo(LOG_TAG, "Runtime V2 manifest deployed to " + target.getAbsolutePath());
+    }
+
+    /**
+     * Seed the signed APK's verified runtime archives into RuntimeManager's download cache.
+     * A per-APK stamp avoids copying the 150+ MB rootfs on every service start.
+     */
+    private synchronized void ensureBundledRuntimeArtifactsCurrent() throws Exception {
+        File directory = new File(CoomiConstants.RUNTIME_V2_DOWNLOAD_DIR);
+        if (!directory.isDirectory() && !directory.mkdirs()) {
+            throw new IllegalStateException("cannot create Runtime V2 download directory");
+        }
+        File stamp = new File(directory, ".bundled-app-stamp");
+        String expectedStamp = CoomiBootstrap.appStamp(this);
+        String actualStamp = stamp.isFile() ? readText(stamp).trim() : "";
+        File host = new File(CoomiConstants.RUNTIME_V2_HOST_PATH);
+        File rootfs = new File(CoomiConstants.RUNTIME_V2_ROOTFS_PATH);
+        if (expectedStamp.equals(actualStamp) && host.isFile() && rootfs.isFile()) return;
+
+        copyAssetAtomically(CoomiConstants.RUNTIME_V2_HOST_ASSET, host);
+        copyAssetAtomically(CoomiConstants.RUNTIME_V2_ROOTFS_ASSET, rootfs);
+        File temporary = new File(directory, stamp.getName() + ".tmp");
+        Files.write(temporary.toPath(), expectedStamp.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        Files.move(temporary.toPath(), stamp.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        Logger.logInfo(LOG_TAG, "Bundled Runtime V2 artifacts are ready for offline installation");
+    }
+
+    private void copyAssetAtomically(String assetName, File target) throws Exception {
+        File parent = target.getParentFile();
+        if (parent == null || (!parent.isDirectory() && !parent.mkdirs())) {
+            throw new IllegalStateException("cannot create parent for " + target.getAbsolutePath());
+        }
+        File temporary = new File(parent, target.getName() + ".asset.tmp");
+        try (InputStream input = getAssets().open(assetName);
+             FileOutputStream output = new FileOutputStream(temporary, false)) {
+            byte[] buffer = new byte[128 * 1024];
+            int count;
+            long total = 0;
+            while ((count = input.read(buffer)) >= 0) {
+                if (count == 0) continue;
+                output.write(buffer, 0, count);
+                total += count;
+            }
+            output.getFD().sync();
+            if (total == 0) throw new IllegalStateException("APK asset is empty: " + assetName);
+        }
+        Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+    }
+
+    /** Start the persistent Rust installation state machine once the local API is healthy. */
+    private void startBundledRuntimeInstallWhenReady(Process process, int port, String token) {
+        new Thread(() -> {
+            for (int attempt = 0; attempt < 180; attempt++) {
+                if (mEngineProcess != process || !process.isAlive()) return;
+                if (checkHealth(port)) break;
+                try {
+                    Thread.sleep(500);
+                } catch (InterruptedException error) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+            if (!checkHealth(port)) {
+                Logger.logError(LOG_TAG, "Runtime V2 auto-install skipped because the engine did not become healthy");
+                return;
+            }
+            HttpURLConnection connection = null;
+            try {
+                byte[] body = "{\"action\":\"install\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                connection = (HttpURLConnection) new URL(
+                    "http://127.0.0.1:" + port + "/api/runtime/v2").openConnection();
+                connection.setRequestMethod("POST");
+                connection.setConnectTimeout(3000);
+                connection.setReadTimeout(5000);
+                connection.setRequestProperty("Authorization", "Bearer " + token);
+                connection.setRequestProperty("Content-Type", "application/json");
+                connection.setDoOutput(true);
+                connection.setFixedLengthStreamingMode(body.length);
+                try (java.io.OutputStream output = connection.getOutputStream()) {
+                    output.write(body);
+                }
+                int code = connection.getResponseCode();
+                if (code >= 200 && code < 300) {
+                    Logger.logInfo(LOG_TAG, "Runtime V2 automatic installation requested");
+                } else {
+                    Logger.logError(LOG_TAG, "Runtime V2 auto-install request failed with HTTP " + code);
+                }
+            } catch (Exception error) {
+                Logger.logError(LOG_TAG, "Runtime V2 auto-install request failed: " + error.getMessage());
+            } finally {
+                if (connection != null) connection.disconnect();
+            }
+        }, "coomi-runtime-v2-install").start();
     }
 
     public void stopEngine(Consumer<CommandResult> callback) {

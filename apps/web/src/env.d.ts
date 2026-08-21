@@ -21,6 +21,8 @@ interface Window {
     sendFeedback?(json: string, callbackId: string): void
     getThemeMode?(): string
     setThemeMode?(mode: string): void
+    getDigitalLifeEnabled?(): boolean
+    setDigitalLifeEnabled?(enabled: boolean): void
     getAppearanceConfig?(): string
   }
 }

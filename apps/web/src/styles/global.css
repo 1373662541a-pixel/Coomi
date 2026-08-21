@@ -180,6 +180,63 @@
   --bg-elevated: #ffffff;
   --user-bubble: #a94f12;
 }
+:root[data-theme='ink'] {
+  color-scheme: dark;
+  --bg: #101714; --page: #0b110f; --fill: #17211d; --fill-strong: #1e2b26; --fill-press: #273630;
+  --border: #26342f; --border-strong: #344840;
+  --text: #e8eee9; --text-2: #a3b1a8; --text-3: #6f8177;
+  --blue: #63b894; --blue-press: #7ac7a7; --blue-soft: #17392d; --blue-soft-2: #1e493a; --blue-border: #366956;
+  --orange: #d49367; --orange-soft: #38291f; --orange-border: #664733;
+  --ok: #63b894; --ok-soft: #17392d; --warn: #d0a451; --warn-soft: #362e1d;
+  --danger: #e07168; --danger-soft: #3b2423; --danger-border: #673b39;
+  --code-bg: #151e1b; --code-text: #d3ddd6; --code-bg-dark: #080d0b;
+  --bg-card: #141d19; --bg-input: #17211d; --bg-elevated: #1b2621; --user-bubble: #397e62;
+  --shadow-1: 0 2px 8px rgba(0,0,0,.32); --shadow-2: 0 7px 26px rgba(0,0,0,.48); --shadow-sheet: 0 -10px 44px rgba(0,0,0,.56); --shadow-drawer: 10px 0 44px rgba(0,0,0,.56);
+}
+:root[data-theme='abyss'] {
+  color-scheme: dark;
+  --bg: #0d1720; --page: #081018; --fill: #14212c; --fill-strong: #1b2b38; --fill-press: #243746;
+  --border: #223442; --border-strong: #30495c;
+  --text: #e5edf2; --text-2: #9db0bc; --text-3: #667d8d;
+  --blue: #55b8cf; --blue-press: #72c7d9; --blue-soft: #123444; --blue-soft-2: #174457; --blue-border: #32677a;
+  --orange: #e08b71; --orange-soft: #3b2925; --orange-border: #65453b;
+  --ok: #4fc49d; --ok-soft: #12362d; --warn: #d4ad56; --warn-soft: #362f1e;
+  --danger: #ed746e; --danger-soft: #3d2425; --danger-border: #693a3b;
+  --code-bg: #101c26; --code-text: #cedae2; --code-bg-dark: #060c11;
+  --bg-card: #111d27; --bg-input: #14212c; --bg-elevated: #172631; --user-bubble: #247b91;
+  --shadow-1: 0 2px 8px rgba(0,0,0,.34); --shadow-2: 0 7px 26px rgba(0,0,0,.5); --shadow-sheet: 0 -10px 44px rgba(0,0,0,.58); --shadow-drawer: 10px 0 44px rgba(0,0,0,.58);
+}
+:root[data-theme='ember'] {
+  color-scheme: dark;
+  --bg: #1a1614; --page: #110f0e; --fill: #241e1b; --fill-strong: #302824; --fill-press: #3b312c;
+  --border: #352c28; --border-strong: #493b34;
+  --text: #eee9e5; --text-2: #b5a8a0; --text-3: #7e6f67;
+  --blue: #d18a62; --blue-press: #dfa17d; --blue-soft: #40291f; --blue-soft-2: #513327; --blue-border: #76503b;
+  --orange: #e1a05f; --orange-soft: #402f20; --orange-border: #6b4c2e;
+  --ok: #70b995; --ok-soft: #20362c; --warn: #d7ad5d; --warn-soft: #3b311f;
+  --danger: #e47569; --danger-soft: #422624; --danger-border: #6d3c37;
+  --code-bg: #211b18; --code-text: #ddd3cc; --code-bg-dark: #0d0b0a;
+  --bg-card: #201a18; --bg-input: #241e1b; --bg-elevated: #29221f; --user-bubble: #98583a;
+  --shadow-1: 0 2px 8px rgba(0,0,0,.34); --shadow-2: 0 7px 26px rgba(0,0,0,.5); --shadow-sheet: 0 -10px 44px rgba(0,0,0,.58); --shadow-drawer: 10px 0 44px rgba(0,0,0,.58);
+}
+:root[data-theme='celadon'] {
+  color-scheme: light;
+  --bg: #f8fbf9; --page: #edf3ef; --fill: #f0f5f2; --fill-strong: #e2ebe5; --fill-press: #d6e2da;
+  --border: #dce6df; --border-strong: #c8d7cd;
+  --text: #202a25; --text-2: #596a60; --text-3: #89988f;
+  --blue: #39745d; --blue-press: #2d5d4a; --blue-soft: #deeee6; --blue-soft-2: #cde3d7; --blue-border: #a9c9b8;
+  --orange: #b66f4f; --orange-soft: #f5e9e2; --orange-border: #dfc1b2;
+  --bg-card: #ffffff; --bg-input: #f0f5f2; --bg-elevated: #ffffff; --user-bubble: #39745d;
+}
+:root[data-theme='linen'] {
+  color-scheme: light;
+  --bg: #fbfaf7; --page: #f1f0ec; --fill: #f4f2ed; --fill-strong: #e9e6df; --fill-press: #dedad1;
+  --border: #e4e1da; --border-strong: #d2cdc3;
+  --text: #262728; --text-2: #626365; --text-3: #91908d;
+  --blue: #4f607f; --blue-press: #3e4c67; --blue-soft: #e6eaf1; --blue-soft-2: #d7dde8; --blue-border: #b9c3d4;
+  --orange: #b66b4e; --orange-soft: #f4e8e2; --orange-border: #ddbeb1;
+  --bg-card: #fffefa; --bg-input: #f4f2ed; --bg-elevated: #fffefa; --user-bubble: #4f607f;
+}
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 /* 点击不出现蓝色高亮方块：WebView 的 tap highlight / focus ring 全部去掉，
    交互反馈交给各组件自己的 :active 样式。 */

@@ -3,6 +3,7 @@ use coomi_services::RuntimeBackend;
 use coomi_services::RuntimeBackendKind;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -99,6 +100,19 @@ impl ProcessManager {
         self.runtime_backend =
             (backend.kind() == RuntimeBackendKind::ProotLinux).then_some(backend);
         self
+    }
+
+    /// Build a one-shot shell command using the configured runtime backend.
+    /// `None` means the caller should use the platform host shell.
+    pub fn runtime_shell(&self, cwd: &Path, command: &str) -> anyhow::Result<Option<Command>> {
+        let Some(backend) = &self.runtime_backend else {
+            return Ok(None);
+        };
+        Ok(Some(
+            backend
+                .command(cwd, "/bin/sh", &["-lc".into(), command.into()])?
+                .into_tokio(),
+        ))
     }
 
     pub async fn execute(&self, cwd: &std::path::Path, arguments: &Value) -> ToolResult {

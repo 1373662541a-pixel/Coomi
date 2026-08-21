@@ -130,8 +130,8 @@ function initTheme() {
     return
   }
   const apply = (mode: ThemeMode) => applyTheme(mode)
-  const saved = localStorage.getItem('coomi.themeMode')
-  if (saved === 'light' || saved === 'dark') {
+  const saved = readThemeMode()
+  if (saved !== 'system') {
     apply(saved)
     return
   }

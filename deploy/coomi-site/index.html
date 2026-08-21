@@ -661,7 +661,7 @@
         </div>
         <div class="compatibility-item">
           <span class="compatibility-label">当前版本</span>
-          <span id="versionValue" class="compatibility-value">1.3.2</span>
+          <span id="versionValue" class="compatibility-value">1.4.0</span>
         </div>
       </div>
       <div class="container compatibility-grid" data-platform-panel="desktop">
@@ -684,21 +684,35 @@
       <div class="platform-panel" data-platform="android">
       <div class="container">
         <div class="changelog-platform-tag"><span class="tag">移动端</span></div>
-        <h2 class="changelog-title">v1.3.2 更新说明【稳定】</h2>
-        <p class="changelog-sub">2026-08-19 发布</p>
+        <h2 class="changelog-title">v1.4.0 更新说明【重要更新】</h2>
+        <p class="changelog-sub">2026-08-22 发布</p>
         <ul class="changelog-list">
-          <li><strong>五任务并行与下载调度</strong>：多任务并行上限提升至 5 条；下载任务置顶显示，依赖下载期间可继续处理其他独立工作。</li>
-          <li><strong>连接与重试修复</strong>：修复参数校验异常，模型重试、WebSocket 重连次数及首次/最大间隔均可正常保存并立即生效。</li>
-          <li><strong>持久记忆删除修复</strong>：修复删除按钮无效，增加删除确认、执行中状态和错误提示。</li>
-          <li><strong>备份体验升级</strong>：手动和自动备份增加阶段、百分比、完成与失败状态，优化大体积备份并阻止重复任务。</li>
-          <li><strong>Provider 自动恢复</strong>：模型返回能力不支持错误时自动移除不兼容的可选能力并恢复请求，避免 HTTP 400 直接终止会话。</li>
-          <li><strong>MCP 配置热更新</strong>：地址、安装状态或配置变化后立即重连并刷新工具清单，无需重启引擎或新建会话。</li>
-          <li><strong>Agent 主动使用 Skill</strong>：非简单任务开始前主动检查已安装 Skill，并读取、遵循相关 Skill 指令。</li>
+          <li><strong>Runtime V2 与内置 ProotLinux</strong>：APK 内置离线 ARM64 ProotLinux，新增安装下载进度、持久状态和统一挂载目录；修复已安装但 Agent 无法识别 Proot 的问题。</li>
+          <li><strong>自定义迭代（实验）</strong>：新增 GitHub 配置引导、专用 Skill、隔离源码工作区和 CoomiDev 构建入口，可在手机虚拟 Linux 中开发、提交 PR 或构建独立 APK。</li>
+          <li><strong>CoomiDev ARM64 Build Kit</strong>：加入版本化、SHA-256 校验的工具链安装与诊断机制，提供 Android/Rust 冒烟测试和完整构建流程，并明确隔离 Debian/glibc 与 Termux/Bionic 工具。</li>
+          <li><strong>Provider 配置重构</strong>：模型能力改为用户手动配置“文本模型、图像理解、图像生成”；模型 ID、温度、推理强度、上下文窗口和能力选择采用紧凑布局，并修复无效密钥仍可使用及删除提供商问题。</li>
+          <li><strong>全局子代理模型池</strong>：子代理配置独立于单一提供商，可从已配置的不同 Provider 中选择最多 20 个模型，支持描述、保底模型和统一并发上限。</li>
+          <li><strong>数字生命与运行环境</strong>：数字生命和 ProotLinux 迁入控制台，修复安装、就绪检测与路径映射；数字生命启用后使用轻量动态双环标识，控制台图标同步更新。</li>
+          <li><strong>外观与主题升级</strong>：新增墨玉、深海、炭褐、青瓷、亚麻五套主题；会话外观设置改为独立二级页面，并完善按钮返回和手机系统返回逻辑。</li>
+          <li><strong>引擎稳定性修复</strong>：修复长工具输出在多字节 UTF-8 字符中间截断导致的 Tokio worker Panic；请求发送、连接重置和 TLS 抖动等瞬时错误可正确触发退避重试。</li>
+          <li><strong>会话交互修复</strong>：连接恢复后自动清除红色恢复提示，完善工具调用过多失败时的反馈入口；问询窗口移除容易误触的自定义输入勾选图标。</li>
+          <li><strong>模型分类同步</strong>：会话顶部模型切换卡片与 Provider 手动能力配置保持一致，分类统一显示“文本模型、图像理解、图像生成”。</li>
         </ul>
 
         <details class="changelog-history">
           <summary>查看全部更新记录</summary>
           <div class="history-inner">
+            <h3 class="history-version">v1.3.2 更新说明【稳定】</h3>
+            <p class="changelog-sub">2026-08-19 发布</p>
+            <ul class="changelog-list">
+              <li><strong>五任务并行与下载调度</strong>：多任务并行上限提升至 5 条；下载任务置顶显示，依赖下载期间可继续处理其他独立工作。</li>
+              <li><strong>连接与重试修复</strong>：修复参数校验异常，模型重试、WebSocket 重连次数及首次/最大间隔均可正常保存并立即生效。</li>
+              <li><strong>持久记忆删除修复</strong>：修复删除按钮无效，增加删除确认、执行中状态和错误提示。</li>
+              <li><strong>备份体验升级</strong>：手动和自动备份增加阶段、百分比、完成与失败状态，优化大体积备份并阻止重复任务。</li>
+              <li><strong>Provider 自动恢复</strong>：模型返回能力不支持错误时自动移除不兼容的可选能力并恢复请求，避免 HTTP 400 直接终止会话。</li>
+              <li><strong>MCP 配置热更新</strong>：地址、安装状态或配置变化后立即重连并刷新工具清单，无需重启引擎或新建会话。</li>
+              <li><strong>Agent 主动使用 Skill</strong>：非简单任务开始前主动检查已安装 Skill，并读取、遵循相关 Skill 指令。</li>
+            </ul>
             <h3 class="history-version">v1.3.1 更新说明【稳定】</h3>
             <p class="changelog-sub">2026-08-17 发布</p>
             <ul class="changelog-list">

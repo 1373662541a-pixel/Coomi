@@ -41,8 +41,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tokio::process::Command;
 
-pub use crate::agents::AgentScheduler;
 use crate::agents::snapshots_json;
+pub use crate::agents::{AgentScheduler, ConfiguredSubAgent};
 pub use crate::processes::{ProcessManager, terminate_all_managed};
 
 const DEFAULT_MAX_OUTPUT: usize = 48_000;
@@ -366,8 +366,14 @@ impl CoreTools {
             return ToolResult::error("missing string argument: task");
         };
         let fork_turns = string_arg(arguments, "fork_turns");
+        let sub_agent_id = string_arg(arguments, "sub_agent_id");
         match scheduler
-            .spawn(task.to_owned(), &self.parent_history, fork_turns)
+            .spawn(
+                task.to_owned(),
+                &self.parent_history,
+                fork_turns,
+                sub_agent_id,
+            )
             .await
         {
             Ok(id) => ToolResult::success(format!("agent_id: {id}")),
@@ -1538,7 +1544,13 @@ impl CoreTools {
         let timeout_ms = u64_arg(&call.arguments, "timeout_ms")
             .unwrap_or(DEFAULT_TIMEOUT_MS)
             .clamp(1_000, 300_000);
-        let mut process = platform_shell(command);
+        let mut process = match self.processes.runtime_shell(&self.cwd, command) {
+            Ok(Some(process)) => process,
+            Ok(None) => platform_shell(command),
+            Err(error) => {
+                return ToolResult::error(format!("failed to prepare runtime shell: {error:#}"));
+            }
+        };
         process
             .current_dir(&self.cwd)
             .kill_on_drop(true)
@@ -1971,12 +1983,19 @@ impl ToolRuntime for CoreTools {
             specs.extend([
                 ToolSpec {
                     name: "spawn_agent".into(),
-                    description: "Spawn a background Coomi sub-agent with an optional fork of parent history.".into(),
+                    description: format!(
+                        "Spawn a background Coomi sub-agent with an optional fork of parent history. {}",
+                        self.agent_scheduler
+                            .as_ref()
+                            .map(|scheduler| scheduler.sub_agent_summary())
+                            .unwrap_or_default()
+                    ),
                     parameters: json!({
                         "type": "object",
                         "properties": {
                             "task": {"type": "string"},
-                            "fork_turns": {"type": "string", "description": "none, all, or a positive integer"}
+                            "fork_turns": {"type": "string", "description": "none, all, or a positive integer"},
+                            "sub_agent_id": {"type": "string", "description": "Optional ID from the configured global sub-agent list"}
                         },
                         "required": ["task"],
                         "additionalProperties": false

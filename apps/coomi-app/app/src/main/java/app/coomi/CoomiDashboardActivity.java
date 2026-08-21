@@ -71,10 +71,12 @@ public class CoomiDashboardActivity extends Activity {
     private View mCatalogButton;
     private View mHooksButton;
     private View mMemoryButton;
+    private View mLifeButton;
     private View mFilesButton;
     private View mProvidersButton;
     private View mRuntimeButton;
     private View mCheckUpdateButton;
+    private View mCustomIterationButton;
     private TextView mCheckUpdateDesc;
     private View mUpdateDot;
     private View mHomeSettingsButton;
@@ -134,8 +136,10 @@ public class CoomiDashboardActivity extends Activity {
         mCatalogButton = findViewById(R.id.btn_web_catalog);
         mHooksButton = findViewById(R.id.btn_web_hooks);
         mMemoryButton = findViewById(R.id.btn_web_memory);
+        mLifeButton = findViewById(R.id.btn_web_life);
         mFilesButton = findViewById(R.id.btn_web_files);
         mCheckUpdateButton = findViewById(R.id.btn_check_update);
+        mCustomIterationButton = findViewById(R.id.btn_custom_iteration);
         mCheckUpdateDesc = findViewById(R.id.txt_check_update_desc);
         mUpdateDot = findViewById(R.id.dot_update);
         mHomeSettingsButton = findViewById(R.id.btn_home_settings);
@@ -156,12 +160,14 @@ public class CoomiDashboardActivity extends Activity {
         mCatalogButton.setOnClickListener(v -> openCatalog());
         mHooksButton.setOnClickListener(v -> openCoomiRoute("#/hooks"));
         mMemoryButton.setOnClickListener(v -> openCoomiRoute("#/memory"));
+        mLifeButton.setOnClickListener(v -> openCoomiRoute("#/life"));
         mFilesButton.setOnClickListener(v -> openFiles());
         mProvidersButton = findViewById(R.id.btn_web_providers);
         mRuntimeButton = findViewById(R.id.btn_web_runtime);
         mProvidersButton.setOnClickListener(v -> openProviders());
         mRuntimeButton.setOnClickListener(v -> openRuntime());
         mCheckUpdateButton.setOnClickListener(v -> checkUpdate());
+        mCustomIterationButton.setOnClickListener(v -> openCoomiRoute("#/custom-iteration"));
         mHomeSettingsButton.setOnClickListener(v ->
             startActivity(new Intent(this, CoomiHomeSettingActivity.class)));
         mAppearanceButton.setOnClickListener(v ->
@@ -371,7 +377,7 @@ public class CoomiDashboardActivity extends Activity {
         if (demoUnavailable()) return;
         // 1) 先打开终端：确保 TermuxService / 终端会话先就绪
         Intent terminal = new Intent(this, TermuxActivity.class);
-        terminal.putExtra("com.coomi.android.app.TERMUX_DIR", TermuxConstants.TERMUX_HOME_DIR_PATH);
+        terminal.putExtra(TermuxConstants.TERMUX_PACKAGE_NAME + ".app.TERMUX_DIR", TermuxConstants.TERMUX_HOME_DIR_PATH);
         startActivity(terminal);
         // 2) 稍作延迟等终端会话起来后，再在新会话里执行 `coomi`（无子命令 = 交互式 TUI）。
         //    立即执行的话命令会跑在尚未就绪的 shell 上，导致打开的只是普通终端。
@@ -403,7 +409,7 @@ public class CoomiDashboardActivity extends Activity {
         // Open Termux shell for debugging. TERMUX_DIR must match the bootstrap's baked-in
         // home path, so it comes from TermuxConstants rather than a literal.
         Intent intent = new Intent(this, TermuxActivity.class);
-        intent.putExtra("com.coomi.android.app.TERMUX_DIR", TermuxConstants.TERMUX_HOME_DIR_PATH);
+        intent.putExtra(TermuxConstants.TERMUX_PACKAGE_NAME + ".app.TERMUX_DIR", TermuxConstants.TERMUX_HOME_DIR_PATH);
         startActivity(intent);
     }
 

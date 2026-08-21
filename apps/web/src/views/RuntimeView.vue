@@ -22,6 +22,7 @@ interface RuntimeV2 {
   runtime: { backend: 'legacy_termux' | 'proot_linux'; status: 'not_installed' | 'downloading' | 'initializing' | 'ready' | 'needs_repair' | 'update_available' | 'rolling_back' | 'removing'; active_version?: string; previous_version?: string; error?: string }
   manifest_available: boolean
   manifest?: { runtime_version: string; architecture: string; proot_commit: string; rootfs_bytes: number }
+  downloads?: Record<string, { downloaded: number; total: number; percent: number; status: 'pending' | 'downloading' | 'completed' }>
   legacy_available: boolean
 }
 
@@ -35,6 +36,7 @@ const runtimeV2 = ref<RuntimeV2 | null>(null)
 const runtimeAction = ref('')
 const runtimeError = ref('')
 const refreshing = ref(false)
+const autoInstallRequested = ref(false)
 let timer: ReturnType<typeof setInterval> | null = null
 
 async function load(manual = false) {
@@ -46,7 +48,15 @@ async function load(manual = false) {
     health.value = null
     failed.value = true
   }
-  try { runtimeV2.value = await apiGet<RuntimeV2>('/api/runtime/v2') } catch { runtimeV2.value = null }
+  try {
+    runtimeV2.value = await apiGet<RuntimeV2>('/api/runtime/v2')
+    const status = runtimeV2.value.runtime.status
+    if (!autoInstallRequested.value && runtimeV2.value.manifest_available
+      && (status === 'not_installed' || status === 'needs_repair')) {
+      autoInstallRequested.value = true
+      void runRuntimeAction('install')
+    }
+  } catch { runtimeV2.value = null }
   try {
     port.value = (await apiGet<{ port: number }>('/api/runtime/port')).port
   } catch {
@@ -80,6 +90,35 @@ const state = computed(() => {
   return { label: '部分就绪', cls: 'warn', icon: 'alert', desc: '服务在跑，但模型还没配好 —— 去 Provider 里填一个 API Key。' }
 })
 
+const runtimeStatusLabel = computed(() => {
+  switch (runtimeV2.value?.runtime.status) {
+    case 'not_installed': return '未安装'
+    case 'downloading': return '正在下载'
+    case 'initializing': return '正在初始化'
+    case 'ready': return '已就绪'
+    case 'needs_repair': return '需要修复'
+    case 'update_available': return '可更新'
+    case 'rolling_back': return '正在回滚'
+    case 'removing': return '正在删除'
+    default: return '未知'
+  }
+})
+
+function formatBytes(value: number): string {
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`
+  return `${(value / (1024 * 1024)).toFixed(value >= 100 * 1024 * 1024 ? 0 : 1)} MB`
+}
+
+const runtimeDownload = computed(() => {
+  const downloads = runtimeV2.value?.downloads
+  if (!downloads) return null
+  const entries = Object.entries(downloads)
+  const active = entries.find(([, item]) => item.status === 'downloading')
+  const [name, item] = active || entries.find(([, value]) => value.status !== 'completed') || entries[entries.length - 1] || []
+  if (!item || !name) return null
+  return { name, ...item }
+})
+
 const rows = computed(() => {
   const h = health.value
   return [
@@ -99,7 +138,7 @@ function goDashboard() {
 }
 </script><template>
   <div class="page">
-    <PageHead title="内置环境" @back="goDashboard">
+    <PageHead title="ProotLinux 环境" @back="goDashboard">
       <template #right>
         <button class="icon-btn" aria-label="刷新" @click="load(true)">
           <CoomiIcon name="refresh" :class="{ spin: refreshing }" />
@@ -128,15 +167,22 @@ function goDashboard() {
         <p class="sec-label">ProotLinux</p>
         <div class="group runtime-v2">
           <div class="kv"><span class="k">后端</span><span class="v mono">{{ runtimeV2.runtime.backend }}</span></div>
-          <div class="kv"><span class="k">状态</span><span class="v">{{ runtimeV2.runtime.status }}</span></div>
+          <div class="kv"><span class="k">状态</span><span class="v">{{ runtimeStatusLabel }}</span></div>
           <div class="kv"><span class="k">当前版本</span><span class="v mono">{{ runtimeV2.runtime.active_version || '未安装' }}</span></div>
           <div v-if="runtimeV2.manifest" class="kv"><span class="k">可用版本</span><span class="v mono">{{ runtimeV2.manifest.runtime_version }}</span></div>
           <div class="runtime-actions">
-            <button v-if="runtimeV2.manifest_available && runtimeV2.runtime.status === 'not_installed'" :disabled="!!runtimeAction" @click="runRuntimeAction('install')">安装</button>
             <button v-if="runtimeV2.manifest_available && runtimeV2.runtime.status === 'update_available'" :disabled="!!runtimeAction" @click="runRuntimeAction('update')">更新</button>
-            <button v-if="runtimeV2.runtime.status === 'needs_repair'" :disabled="!!runtimeAction" @click="runRuntimeAction('repair')">修复</button>
+            <button v-if="runtimeV2.runtime.status === 'needs_repair'" :disabled="!!runtimeAction" @click="runRuntimeAction('install')">重新部署</button>
             <button v-if="runtimeV2.runtime.previous_version" :disabled="!!runtimeAction" @click="runRuntimeAction('rollback')">回滚</button>
-            <button v-if="runtimeV2.runtime.status !== 'not_installed'" class="danger" :disabled="!!runtimeAction" @click="runRuntimeAction('remove')">删除</button>
+          </div>
+          <p v-if="!runtimeV2.manifest_available" class="runtime-error">APK 中缺少 Runtime V2 安装清单，请更新或重新安装应用。</p>
+          <div v-else-if="runtimeV2.runtime.status === 'downloading' || runtimeV2.runtime.status === 'initializing'" class="runtime-progress">
+            <template v-if="runtimeDownload">
+              <div class="progress-head"><span>{{ runtimeDownload.status === 'completed' ? '内置包已就绪' : '准备中' }} {{ runtimeDownload.percent }}%</span><span>{{ formatBytes(runtimeDownload.downloaded) }} / {{ formatBytes(runtimeDownload.total) }}</span></div>
+              <div class="progress-track"><div class="progress-fill" :style="{ width: `${runtimeDownload.percent}%` }" /></div>
+              <div class="progress-file">{{ runtimeDownload.name }}</div>
+            </template>
+            <span v-else>{{ runtimeV2.runtime.status === 'initializing' ? '正在校验并解包内置环境，请稍候。' : '正在读取 APK 内置运行时。' }}</span>
           </div>
           <p v-if="runtimeError || runtimeV2.runtime.error" class="runtime-error">{{ runtimeError || runtimeV2.runtime.error }}</p>
         </div>
@@ -147,8 +193,8 @@ function goDashboard() {
       </button>
 
       <p class="note">
-        环境跑在 App 私有目录 <code>$FILES_DIR/rootfs</code> 里，天然沙箱。首次启动要解压内置
-        Linux 环境并装基础包，会花一点时间和流量；装好之后不再重复。
+        ProotLinux 是 Coomi 的必备内置环境，由 Runtime V2 在 App 私有存储中自动校验和初始化，
+        无需手动安装或联网下载。首次解包会花一点时间，后续更新、修复和回滚均保留持久状态。
       </p>
     </main>
   </div>
@@ -191,4 +237,9 @@ function goDashboard() {
 .runtime-actions button.danger { background: var(--danger-soft); color: var(--danger); }
 .runtime-actions button:disabled { opacity: .5; }
 .runtime-error { margin: 0; padding: 0 12px 12px; color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
+.runtime-progress { margin: 0; padding: 0 12px 12px; color: var(--blue); font-size: 12px; }
+.progress-head { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 6px; font-variant-numeric: tabular-nums; }
+.progress-track { height: 7px; overflow: hidden; border-radius: 4px; background: var(--fill-strong); }
+.progress-fill { height: 100%; border-radius: inherit; background: var(--blue); transition: width .3s ease; }
+.progress-file { margin-top: 6px; color: var(--text-3); font-family: var(--font-mono); font-size: 10.5px; overflow-wrap: anywhere; }
 </style>

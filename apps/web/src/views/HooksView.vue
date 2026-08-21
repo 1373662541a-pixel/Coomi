@@ -101,9 +101,9 @@ async function save() {
           <h3>样例：调用工具前运行 Bash 检查脚本</h3>
           <dl>
             <dt>事件</dt><dd>工具调用前</dd>
-            <dt>命令</dt><dd><code>/data/data/com.coomi.android/files/usr/bin/bash</code></dd>
+            <dt>命令</dt><dd>Runtime V2 提供的 Bash（按当前运行时 PREFIX 解析）</dd>
             <dt>匹配</dt><dd><code>local_shell</code></dd>
-            <dt>参数</dt><dd><code>--noprofile /data/data/com.coomi.android/files/home/hooks/check_tool.sh</code></dd>
+            <dt>参数</dt><dd><code>--noprofile &lt;运行时 HOME&gt;/hooks/check_tool.sh</code></dd>
           </dl>
           <p>上例等价于依次传入两个参数：<code>--noprofile</code> 和脚本完整路径。当前工具事件会以 JSON 写入脚本的标准输入；脚本不需要修改结果时可不输出，需要控制行为时应向标准输出返回合法 JSON。</p>
         </div>

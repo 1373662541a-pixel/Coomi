@@ -12,9 +12,7 @@ type ConflictChoice = 'skip' | 'keep' | 'replace' | 'cancel'
 
 const router = useRouter()
 const session = useSessionStore()
-const HOME = '/data/user/0/com.coomi.android/files'
-
-const path = ref(HOME)
+const path = ref('/')
 const entries = ref<Entry[]>([])
 const loading = ref(true)
 const error = ref('')
@@ -374,7 +372,14 @@ function goDashboard() {
   else router.push('/')
 }
 
-onMounted(() => load(path.value))
+onMounted(async () => {
+  try {
+    const health = await api('GET', '/api/runtime/health')
+    await load(health.home || health.cwd || '/')
+  } catch {
+    await load(path.value)
+  }
+})
 onBeforeUnmount(clearPressTimer)
 </script>
 

@@ -12,6 +12,12 @@ use std::path::PathBuf;
 
 const MCP_CATALOG: &str = include_str!("../mcp.json");
 const SKILL_CATALOG: &str = include_str!("../skills.json");
+const CUSTOM_ITERATION_SKILL: &str = include_str!("../coomi-custom-iteration.md");
+const COOMIDEV_ENV: &str = include_str!("../../../../tools/mobile-build/coomidev-env.sh");
+const COOMIDEV_DOCTOR: &str = include_str!("../../../../tools/mobile-build/coomidev-doctor.sh");
+const COOMIDEV_BUILD: &str = include_str!("../../../../tools/mobile-build/build-coomidev.sh");
+const COOMIDEV_INSTALL_BUILDKIT: &str =
+    include_str!("../../../../tools/mobile-build/install-coomidev-buildkit.sh");
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Catalog<T> {
@@ -133,6 +139,54 @@ impl CatalogInstaller {
 
     pub fn install_skill(&self, id: &str) -> Result<PathBuf> {
         self.install_skill_inner(id, false)
+    }
+
+    /// Install the Coomi development workflow locally without a network call.
+    /// This is intentionally bundled with the bridge so the entry-point flow
+    /// remains usable before GitHub/gh has been configured.
+    pub fn install_custom_iteration_skill(&self) -> Result<PathBuf> {
+        let destination = self.home.join("skills").join("coomi-custom-iteration");
+        fs::create_dir_all(&destination)?;
+        fs::write(destination.join("SKILL.md"), CUSTOM_ITERATION_SKILL)?;
+        save_skill_metadata(
+            &self.home,
+            &SkillEntry {
+                id: "coomi-custom-iteration".into(),
+                name: "Coomi Custom Iteration".into(),
+                description: "Safely develop Coomi, submit PRs, or build CoomiDev.".into(),
+                repository: "TensorHub-ORG/Coomi".into(),
+                git_ref: "main".into(),
+                subdir: "".into(),
+            },
+            &destination,
+            "bundled",
+        )?;
+        Ok(destination)
+    }
+
+    /// Install Coomi-owned Build Kit helpers into the persistent Runtime V2
+    /// home. Compiler artifacts are deliberately not bundled here: the doctor
+    /// must report not-ready until a pinned, checksum-verified kit is selected.
+    pub fn install_custom_iteration_buildkit(&self) -> Result<PathBuf> {
+        let root = self.home.join("runtime-v2").join("home").join(".coomi-dev");
+        for directory in [
+            "bin",
+            "toolchains",
+            "cache",
+            "state",
+            "logs",
+            "keys",
+        ] {
+            fs::create_dir_all(root.join(directory))?;
+        }
+        write_executable(&root.join("bin/coomidev-env"), COOMIDEV_ENV)?;
+        write_executable(&root.join("bin/coomidev-doctor"), COOMIDEV_DOCTOR)?;
+        write_executable(&root.join("bin/coomidev-build"), COOMIDEV_BUILD)?;
+        write_executable(
+            &root.join("bin/coomidev-install-buildkit"),
+            COOMIDEV_INSTALL_BUILDKIT,
+        )?;
+        Ok(root)
     }
 
     pub fn update_skill(&self, id: &str) -> Result<PathBuf> {
@@ -391,6 +445,18 @@ fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
+fn write_executable(path: &Path, contents: &str) -> Result<()> {
+    fs::write(path, contents)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(path)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,6 +486,24 @@ mod tests {
             document.pointer("/servers/filesystem/enabled"),
             Some(&Value::Bool(true))
         );
+    }
+
+    #[test]
+    fn installs_custom_iteration_buildkit_helpers_without_claiming_ready() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let root = CatalogInstaller::new(home.path())
+            .install_custom_iteration_buildkit()
+            .expect("install Build Kit helpers");
+        for helper in [
+            "coomidev-env",
+            "coomidev-doctor",
+            "coomidev-build",
+            "coomidev-install-buildkit",
+        ] {
+            assert!(root.join("bin").join(helper).is_file(), "missing {helper}");
+        }
+        assert!(root.join("toolchains").is_dir());
+        assert!(!root.join("current/buildkit.json").exists());
     }
 
     #[test]

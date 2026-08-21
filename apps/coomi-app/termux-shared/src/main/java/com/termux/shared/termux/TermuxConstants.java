@@ -349,7 +349,7 @@ public final class TermuxConstants {
     /** Termux app name */
     public static final String TERMUX_APP_NAME = "Coomi"; // Default: "Termux"
     /** Termux package name */
-    public static final String TERMUX_PACKAGE_NAME = "com.coomi.android"; // Default: "com.termux"
+    public static final String TERMUX_PACKAGE_NAME = com.termux.shared.BuildConfig.COOMI_TERMUX_PACKAGE_NAME;
     /** Termux GitHub repo name */
     public static final String TERMUX_GITHUB_REPO_NAME = "termux-app"; // Default: "termux-app"
     /** Termux GitHub repo url */

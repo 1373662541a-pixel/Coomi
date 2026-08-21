@@ -2,6 +2,9 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { apiGet, apiSend } from '@/bridge/http'
+import { goBack } from '@/bridge/navigation'
+import { useConfigStore } from '@/stores/config'
+import { useSessionStore } from '@/stores/session'
 import PageHead from '@/components/PageHead.vue'
 import CoomiIcon from '@/components/CoomiIcon.vue'
 
@@ -28,6 +31,8 @@ interface LifeStatus {
 }
 
 const router = useRouter()
+const config = useConfigStore()
+const session = useSessionStore()
 const status = ref<LifeStatus | null>(null)
 const busy = ref('')
 const message = ref('')
@@ -49,6 +54,8 @@ async function refresh() {
     if (status.value.profile) {
       name.value = status.value.profile.name
       address.value = status.value.profile.address
+    } else if (config.digitalLifeEnabled) {
+      config.setDigitalLifeEnabled(false)
     }
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : String(reason)
@@ -97,6 +104,17 @@ function togglePause() {
   }), profile.value?.paused ? '已恢复' : '已暂停')
 }
 
+function openRuntime() {
+  router.push('/runtime')
+}
+
+function toggleEnabled() {
+  if (!profile.value) return
+  const enabled = !config.digitalLifeEnabled
+  config.setDigitalLifeEnabled(enabled)
+  session.setSessionMode(enabled ? 'life' : 'agent')
+}
+
 async function recall() {
   if (busy.value) return
   busy.value = 'memory'
@@ -135,21 +153,34 @@ function deleteProfile() {
   return run('delete', () => apiSend('/api/cognitive/delete', 'POST', { profile_id: 'primary' }), '数据已彻底删除')
 }
 
-onMounted(refresh)
+onMounted(() => {
+  config.syncDigitalLifeEnabled()
+  void refresh()
+})
 </script>
 
 <template>
   <div class="page">
-    <PageHead title="数字生命体（实验）" @back="router.push('/settings')" />
+    <PageHead title="数字生命体（实验）" @back="goBack(router, 'dashboard')" />
     <main class="body">
       <div v-if="error || message" class="notice" :class="{ error: !!error }">{{ error || message }}</div>
+
+      <p class="sec-label">模式</p>
+      <section class="group enable-group">
+        <button :disabled="!profile" @click="toggleEnabled">
+          <span class="life-mark"><CoomiIcon name="lifeRings" :size="22" /></span>
+          <span><strong>启用数字生命</strong><small>{{ profile ? '开启后对话将由数字生命模式接管' : '完成安装和觉醒后可开启' }}</small></span>
+          <i class="switch" :class="{ on: config.digitalLifeEnabled }" />
+        </button>
+      </section>
 
       <p class="sec-label">扩展</p>
       <section class="group status-group">
         <div class="status-row"><span>ProotLinux</span><strong :class="{ ok: status?.runtime_ready }">{{ status?.runtime_ready ? '可用' : '未就绪' }}</strong></div>
         <div class="status-row"><span>Coomi Life</span><strong :class="{ ok: status?.installed }">{{ status?.installed ? '已安装' : '未安装' }}</strong></div>
         <div class="actions">
-          <button v-if="!status?.installed" class="primary" :disabled="!status?.runtime_ready || !!busy" @click="install"><CoomiIcon name="download" :size="16" />安装</button>
+          <button v-if="!status?.installed && !status?.runtime_ready" class="secondary" :disabled="!!busy" @click="openRuntime"><CoomiIcon name="download" :size="16" />先安装 ProotLinux</button>
+          <button v-else-if="!status?.installed" class="primary" :disabled="!!busy" @click="install"><CoomiIcon name="download" :size="16" />安装</button>
           <button v-else class="secondary" :disabled="!!busy" @click="uninstall"><CoomiIcon name="trash" :size="16" />卸载扩展</button>
         </div>
       </section>
@@ -207,6 +238,15 @@ onMounted(refresh)
 .group { overflow: hidden; border-radius: var(--r-card); background: var(--bg); box-shadow: var(--shadow-1); }
 .notice { margin-bottom: 10px; padding: 9px 11px; border-radius: 6px; background: var(--blue-soft); color: var(--blue); font-size: 12.5px; }
 .notice.error { background: color-mix(in srgb, var(--danger) 10%, var(--bg)); color: var(--danger); }
+.enable-group button { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 62px; padding: 10px 13px; text-align: left; }
+.enable-group button > span { display: flex; flex: 1; min-width: 0; flex-direction: column; }
+.enable-group button > .life-mark { display: grid; place-items: center; flex: none; width: 36px; height: 36px; border-radius: 50%; color: var(--blue); background: var(--blue-soft); }
+.enable-group strong { color: var(--text); font-size: 14px; font-weight: 600; }
+.enable-group small { margin-top: 2px; color: var(--text-3); font-size: 12px; }
+.switch { position: relative; flex: none; width: 42px; height: 24px; border-radius: 12px; background: var(--border-strong); transition: background .2s; }
+.switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 20px; height: 20px; border-radius: 50%; background: #fff; box-shadow: var(--shadow-1); transition: transform .2s; }
+.switch.on { background: var(--blue); }
+.switch.on::after { transform: translateX(18px); }
 .status-row, .metrics > div { display: flex; align-items: center; justify-content: space-between; min-height: 48px; padding: 0 13px; border-bottom: 1px solid var(--border); font-size: 13px; }
 .status-row strong, .metrics strong { color: var(--text-2); font-variant-numeric: tabular-nums; }
 .status-row strong.ok { color: var(--ok); }

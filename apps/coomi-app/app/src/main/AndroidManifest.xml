@@ -15,7 +15,7 @@
     <permission
         android:name="${TERMUX_PACKAGE_NAME}.permission.RUN_COMMAND"
         android:description="@string/permission_run_command_description"
-        android:icon="@mipmap/ic_launcher"
+        android:icon="${COOMI_APP_ICON}"
         android:label="@string/permission_run_command_label"
         android:protectionLevel="dangerous" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -50,10 +50,10 @@
         tools:replace="android:allowBackup,android:banner,android:icon,android:label,android:supportsRtl,android:theme"
         android:banner="@drawable/banner"
         android:extractNativeLibs="true"
-        android:icon="@mipmap/ic_launcher"
-        android:label="@string/application_name"
+        android:icon="${COOMI_APP_ICON}"
+        android:label="${COOMI_APP_LABEL}"
         android:requestLegacyExternalStorage="true"
-        android:roundIcon="@mipmap/ic_launcher_round"
+        android:roundIcon="${COOMI_APP_ROUND_ICON}"
         android:supportsRtl="false"
         android:theme="@style/Theme.TermuxApp.DayNight.DarkActionBar"
         android:networkSecurityConfig="@xml/network_security_config"

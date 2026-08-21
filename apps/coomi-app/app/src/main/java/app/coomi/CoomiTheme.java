@@ -55,7 +55,8 @@ import java.util.UUID;
  */
 public final class CoomiTheme {
 
-    public static final String ACTION_THEME_CHANGED = "com.coomi.android.action.THEME_CHANGED";
+    public static final String ACTION_THEME_CHANGED =
+        com.termux.shared.termux.TermuxConstants.TERMUX_PACKAGE_NAME + ".action.THEME_CHANGED";
 
     /** 主题档位：system 跟随系统、light 明亮、dark 夜间。 */
     public static final String MODE_SYSTEM = "system";
@@ -63,8 +64,14 @@ public final class CoomiTheme {
     public static final String MODE_DARK = "dark";
     public static final String MODE_BOOK = "book";
     public static final String MODE_ORANGE = "orange";
+    public static final String MODE_INK = "ink";
+    public static final String MODE_ABYSS = "abyss";
+    public static final String MODE_EMBER = "ember";
+    public static final String MODE_CELADON = "celadon";
+    public static final String MODE_LINEN = "linen";
 
     public static final String PREF_THEME_MODE = "coomi.themeMode";
+    public static final String PREF_DIGITAL_LIFE_ENABLED = "coomi.digitalLifeEnabled";
     private static final String PREF_NAME = "coomi_settings";
     public static final String SURFACE_CONSOLE = "console";
     public static final String SURFACE_CHAT = "chat";
@@ -85,6 +92,14 @@ public final class CoomiTheme {
     };
 
     private CoomiTheme() {}
+
+    public static boolean isDigitalLifeEnabled(Context context) {
+        return preferences(context).getBoolean(PREF_DIGITAL_LIFE_ENABLED, false);
+    }
+
+    public static void setDigitalLifeEnabled(Context context, boolean enabled) {
+        preferences(context).edit().putBoolean(PREF_DIGITAL_LIFE_ENABLED, enabled).apply();
+    }
 
     /** 当前档位，非法值一律回落 system。 */
     @NonNull
@@ -115,7 +130,7 @@ public final class CoomiTheme {
             return luminance < 0.45;
         }
         String mode = getMode(context);
-        if (MODE_DARK.equals(mode)) return true;
+        if (MODE_DARK.equals(mode) || MODE_INK.equals(mode) || MODE_ABYSS.equals(mode) || MODE_EMBER.equals(mode)) return true;
         if (!MODE_SYSTEM.equals(mode)) return false;
         int night = context.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
         return night == Configuration.UI_MODE_NIGHT_YES;
@@ -123,7 +138,9 @@ public final class CoomiTheme {
 
     private static boolean isValid(String mode) {
         return MODE_SYSTEM.equals(mode) || MODE_LIGHT.equals(mode) || MODE_DARK.equals(mode)
-            || MODE_BOOK.equals(mode) || MODE_ORANGE.equals(mode);
+            || MODE_BOOK.equals(mode) || MODE_ORANGE.equals(mode) || MODE_INK.equals(mode)
+            || MODE_ABYSS.equals(mode) || MODE_EMBER.equals(mode) || MODE_CELADON.equals(mode)
+            || MODE_LINEN.equals(mode);
     }
 
     /**
@@ -132,31 +149,31 @@ public final class CoomiTheme {
      */
     public static void applyTheme(Activity activity) {
         String mode = getMode(activity);
-        activity.setTheme(MODE_DARK.equals(mode) || (MODE_SYSTEM.equals(mode) && isDark(activity))
-            ? R.style.Theme_Coomi_Night
-            : MODE_BOOK.equals(mode) ? R.style.Theme_Coomi_Book
-            : MODE_ORANGE.equals(mode) ? R.style.Theme_Coomi_Orange
-            : R.style.Theme_Coomi);
+        activity.setTheme(themeResource(mode, isDark(activity), false, false));
     }
 
     /** 页面底色为灰的变体（Dashboard 等）：对应 Theme.Coomi.Page / Theme.Coomi.Night.Page。 */
     public static void applyPageTheme(Activity activity) {
         String mode = getMode(activity);
-        activity.setTheme(MODE_DARK.equals(mode) || (MODE_SYSTEM.equals(mode) && isDark(activity))
-            ? R.style.Theme_Coomi_Night_Page
-            : MODE_BOOK.equals(mode) ? R.style.Theme_Coomi_Book_Page
-            : MODE_ORANGE.equals(mode) ? R.style.Theme_Coomi_Orange_Page
-            : R.style.Theme_Coomi_Page);
+        activity.setTheme(themeResource(mode, isDark(activity), true, false));
     }
 
     /** WebView 宿主闪屏变体：对应 Theme.Coomi.Web / Theme.Coomi.Night.Web。 */
     public static void applyWebTheme(Activity activity) {
         String mode = getMode(activity);
-        activity.setTheme(MODE_DARK.equals(mode) || (MODE_SYSTEM.equals(mode) && isDark(activity))
-            ? R.style.Theme_Coomi_Night_Web
-            : MODE_BOOK.equals(mode) ? R.style.Theme_Coomi_Book_Web
-            : MODE_ORANGE.equals(mode) ? R.style.Theme_Coomi_Orange_Web
-            : R.style.Theme_Coomi_Web);
+        activity.setTheme(themeResource(mode, isDark(activity), false, true));
+    }
+
+    private static int themeResource(String mode, boolean dark, boolean page, boolean web) {
+        if (MODE_INK.equals(mode)) return page ? R.style.Theme_Coomi_Ink_Page : web ? R.style.Theme_Coomi_Ink_Web : R.style.Theme_Coomi_Ink;
+        if (MODE_ABYSS.equals(mode)) return page ? R.style.Theme_Coomi_Abyss_Page : web ? R.style.Theme_Coomi_Abyss_Web : R.style.Theme_Coomi_Abyss;
+        if (MODE_EMBER.equals(mode)) return page ? R.style.Theme_Coomi_Ember_Page : web ? R.style.Theme_Coomi_Ember_Web : R.style.Theme_Coomi_Ember;
+        if (MODE_CELADON.equals(mode)) return page ? R.style.Theme_Coomi_Celadon_Page : web ? R.style.Theme_Coomi_Celadon_Web : R.style.Theme_Coomi_Celadon;
+        if (MODE_LINEN.equals(mode)) return page ? R.style.Theme_Coomi_Linen_Page : web ? R.style.Theme_Coomi_Linen_Web : R.style.Theme_Coomi_Linen;
+        if (dark) return page ? R.style.Theme_Coomi_Night_Page : web ? R.style.Theme_Coomi_Night_Web : R.style.Theme_Coomi_Night;
+        if (MODE_BOOK.equals(mode)) return page ? R.style.Theme_Coomi_Book_Page : web ? R.style.Theme_Coomi_Book_Web : R.style.Theme_Coomi_Book;
+        if (MODE_ORANGE.equals(mode)) return page ? R.style.Theme_Coomi_Orange_Page : web ? R.style.Theme_Coomi_Orange_Web : R.style.Theme_Coomi_Orange;
+        return page ? R.style.Theme_Coomi_Page : web ? R.style.Theme_Coomi_Web : R.style.Theme_Coomi;
     }
 
     /**
@@ -176,13 +193,8 @@ public final class CoomiTheme {
         boolean dark = isDark(activity);
         Window window = activity.getWindow();
         String mode = getMode(activity);
-        int background = isCustomEnabled(activity) ? getCustomColor(activity, page ? "page" : "surface") : dark
-            ? activity.getColor(page ? R.color.coomi_night_page : R.color.coomi_night_bg)
-            : MODE_BOOK.equals(mode)
-                ? activity.getColor(page ? R.color.coomi_book_page : R.color.coomi_book_bg)
-            : MODE_ORANGE.equals(mode)
-                ? activity.getColor(page ? R.color.coomi_orange_theme_page : R.color.coomi_orange_theme_bg)
-            : activity.getColor(page ? R.color.coomi_page : R.color.coomi_white);
+        int background = isCustomEnabled(activity) ? getCustomColor(activity, page ? "page" : "surface")
+            : resolveBackgroundColor(activity, mode, dark, page);
         window.setStatusBarColor(background);
         window.setNavigationBarColor(background);
         View decor = window.getDecorView();
@@ -713,10 +725,27 @@ public final class CoomiTheme {
 
     private static int resolvePageColor(Context context) {
         String mode = getMode(context);
+        if (MODE_INK.equals(mode)) return context.getColor(R.color.coomi_ink_page);
+        if (MODE_ABYSS.equals(mode)) return context.getColor(R.color.coomi_abyss_page);
+        if (MODE_EMBER.equals(mode)) return context.getColor(R.color.coomi_ember_page);
+        if (MODE_CELADON.equals(mode)) return context.getColor(R.color.coomi_celadon_page);
+        if (MODE_LINEN.equals(mode)) return context.getColor(R.color.coomi_linen_page);
         if (isDark(context)) return context.getColor(R.color.coomi_night_page);
         if (MODE_BOOK.equals(mode)) return context.getColor(R.color.coomi_book_page);
         if (MODE_ORANGE.equals(mode)) return context.getColor(R.color.coomi_orange_theme_page);
         return context.getColor(R.color.coomi_page);
+    }
+
+    private static int resolveBackgroundColor(Context context, String mode, boolean dark, boolean page) {
+        if (MODE_INK.equals(mode)) return context.getColor(page ? R.color.coomi_ink_page : R.color.coomi_ink_bg);
+        if (MODE_ABYSS.equals(mode)) return context.getColor(page ? R.color.coomi_abyss_page : R.color.coomi_abyss_bg);
+        if (MODE_EMBER.equals(mode)) return context.getColor(page ? R.color.coomi_ember_page : R.color.coomi_ember_bg);
+        if (MODE_CELADON.equals(mode)) return context.getColor(page ? R.color.coomi_celadon_page : R.color.coomi_celadon_bg);
+        if (MODE_LINEN.equals(mode)) return context.getColor(page ? R.color.coomi_linen_page : R.color.coomi_linen_bg);
+        if (dark) return context.getColor(page ? R.color.coomi_night_page : R.color.coomi_night_bg);
+        if (MODE_BOOK.equals(mode)) return context.getColor(page ? R.color.coomi_book_page : R.color.coomi_book_bg);
+        if (MODE_ORANGE.equals(mode)) return context.getColor(page ? R.color.coomi_orange_theme_page : R.color.coomi_orange_theme_bg);
+        return context.getColor(page ? R.color.coomi_page : R.color.coomi_white);
     }
 
     private static SharedPreferences preferences(Context context) {

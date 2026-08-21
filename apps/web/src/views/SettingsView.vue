@@ -3,9 +3,9 @@
  * 设置。分组白卡 + 行的结构，选中态用蓝勾而不是描边 ——
  * 和抽屉、空态里的选中语言保持一致。
  */
-import { computed, ref, onBeforeUnmount, onMounted } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { useConfigStore, DEFAULT_CONNECTION_SETTINGS, PERMISSION_MODES, REASONING_EFFORTS, THEME_MODES, type ConnectionSettings } from '@/stores/config'
+import { useConfigStore, DEFAULT_CONNECTION_SETTINGS, PERMISSION_MODES, REASONING_EFFORTS, type ConnectionSettings } from '@/stores/config'
 import { useSessionStore } from '@/stores/session'
 import { useSessionsStore } from '@/stores/sessions'
 import { useConnectionStore } from '@/stores/connection'
@@ -24,12 +24,6 @@ const reconnectInitialSeconds = ref(config.connectionSettings.reconnectInitialDe
 const reconnectMaxSeconds = ref(config.connectionSettings.reconnectMaxDelayMs / 1000)
 const connectionError = ref('')
 const connectionSaved = ref(false)
-const customAppearanceEnabled = ref(document.documentElement.dataset.customAppearance === 'true')
-
-function syncCustomAppearance() {
-  customAppearanceEnabled.value = document.documentElement.dataset.customAppearance === 'true'
-}
-
 function resetConnectionSettings() {
   connectionDraft.value = { ...DEFAULT_CONNECTION_SETTINGS }
   reconnectInitialSeconds.value = DEFAULT_CONNECTION_SETTINGS.reconnectInitialDelayMs / 1000
@@ -43,6 +37,11 @@ async function saveConnectionSettings() {
   if (!Number.isInteger(connectionDraft.value.providerRetryCount)
     || connectionDraft.value.providerRetryCount < 0 || connectionDraft.value.providerRetryCount > 10) {
     connectionError.value = '模型重试次数需为 0 - 10 的整数'
+    return
+  }
+  if (!Number.isInteger(connectionDraft.value.maxConcurrentTasks)
+    || connectionDraft.value.maxConcurrentTasks < 1 || connectionDraft.value.maxConcurrentTasks > 20) {
+    connectionError.value = '会话并发数需为 1 - 20 的整数'
     return
   }
   if (!Number.isInteger(connectionDraft.value.wsRetryCount)
@@ -121,7 +120,6 @@ function isCurrent(providerId: string, model: string): boolean {
 
 /** 进入设置页时拉取定制提示词与统计开关状态（旧引擎无统计接口时保持默认）。 */
 onMounted(async () => {
-  window.addEventListener('coomi:appearance-changed', syncCustomAppearance)
   void config.fetchCustomPrompt()
   if (await config.fetchConnectionSettings()) {
     connectionDraft.value = { ...config.connectionSettings }
@@ -137,7 +135,6 @@ onMounted(async () => {
   } catch { /* 旧引擎进程：接口不存在，保持默认开启 */ }
 })
 
-onBeforeUnmount(() => window.removeEventListener('coomi:appearance-changed', syncCustomAppearance))
 </script>
 <template>
   <div class="page">
@@ -192,11 +189,15 @@ onBeforeUnmount(() => window.removeEventListener('coomi:appearance-changed', syn
       </div>
       <p class="option-note">默认 192，256 为进阶选项，512 为硬上限。</p>
 
-      <p class="sec-label">连接与重试</p>
+      <p class="sec-label">连接、重试与并发</p>
       <div class="group numeric-settings">
         <label class="number-row">
           <span class="rt"><span class="rmain">模型重试次数</span><span class="rsub">瞬时网络或上游故障，0 表示禁用</span></span>
           <input v-model.number="connectionDraft.providerRetryCount" type="number" min="0" max="10" step="1" inputmode="numeric" aria-label="模型重试次数" />
+        </label>
+        <label class="number-row">
+          <span class="rt"><span class="rmain">会话并发数</span><span class="rsub">同时运行的会话任务，重启引擎后生效</span></span>
+          <input v-model.number="connectionDraft.maxConcurrentTasks" type="number" min="1" max="20" step="1" inputmode="numeric" aria-label="会话并发数" />
         </label>
         <label class="number-row">
           <span class="rt"><span class="rmain">WebSocket 重连次数</span><span class="rsub">界面与引擎断开后的尝试次数</span></span>
@@ -230,16 +231,11 @@ onBeforeUnmount(() => window.removeEventListener('coomi:appearance-changed', syn
       </div>
 
       <p class="sec-label">外观</p>
-      <div class="group theme-options" :class="{ disabled: customAppearanceEnabled }">
-        <button v-for="m in THEME_MODES" :key="m.mode" class="row" :disabled="customAppearanceEnabled" @click="config.setThemeMode(m.mode)">
-          <span class="ri" :class="{ on: config.themeMode === m.mode }">
-            <CoomiIcon :name="m.mode === 'dark' ? 'moon' : m.mode === 'light' ? 'sun' : 'phone'" :size="17" />
-          </span>
-          <span class="rt">
-            <span class="rmain">{{ m.label }}</span>
-            <span class="rsub">{{ m.desc }}</span>
-          </span>
-          <CoomiIcon v-if="config.themeMode === m.mode" name="check" :size="17" class="tick" />
+      <div class="group">
+        <button class="row" @click="router.push('/appearance')">
+          <span class="ri"><CoomiIcon name="sun" :size="17" /></span>
+          <span class="rt"><span class="rmain">外观</span><span class="rsub">主题、颜色和背景</span></span>
+          <CoomiIcon name="chevronRight" :size="15" class="arw" />
         </button>
       </div>
 
@@ -272,11 +268,6 @@ onBeforeUnmount(() => window.removeEventListener('coomi:appearance-changed', syn
       </div>
       <p class="sec-label">配置</p>
       <div class="group">
-        <button class="row" @click="router.push('/life')">
-          <span class="ri"><CoomiIcon name="sparkle" :size="17" /></span>
-          <span class="rt"><span class="rmain">数字生命体（实验）</span><span class="rsub">Coomi Life</span></span>
-          <CoomiIcon name="chevronRight" :size="15" class="arw" />
-        </button>
         <button class="row" @click="router.push('/sessions')">
           <span class="ri"><CoomiIcon name="chat" :size="17" /></span>
           <span class="rt"><span class="rmain">会话历史</span></span>
