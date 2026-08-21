@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test tests/marketSearch.test.ts"
   },
   "dependencies": {
     "marked": "^12.0.2",
