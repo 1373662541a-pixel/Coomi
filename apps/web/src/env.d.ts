@@ -38,3 +38,10 @@ declare module '*.vue' {
   const component: DefineComponent<{}, {}, any>
   export default component
 }
+
+declare module 'vue-virtual-scroller' {
+  import type { DefineComponent } from 'vue'
+
+  export const DynamicScroller: DefineComponent
+  export const DynamicScrollerItem: DefineComponent
+}

@@ -14,6 +14,23 @@ export interface ProviderConfig {
   active?: boolean
   builtin?: boolean
   status?: ProviderStatus
+  capabilities?: ModelCapabilityProfile[]
+}
+
+export type CapabilityState = 'verified' | 'inferred' | 'unsupported' | 'unknown'
+export interface CapabilityEvidence { state: CapabilityState; checked_at_ms: number; error?: string }
+export interface ModelCapabilityProfile {
+  key: { provider: string; model: string; protocol: string; base_url: string; key_version_fingerprint: string }
+  text: CapabilityEvidence
+  vision: CapabilityEvidence
+  image_generation: CapabilityEvidence
+  native_tools: CapabilityEvidence
+  parallel_tools: CapabilityEvidence
+  web_search: CapabilityEvidence
+  streaming: CapabilityEvidence
+  reasoning_efforts: string[]
+  source: string
+  probed_at_ms: number
 }
 
 export type ProviderProtocol = 'openai_compatible' | 'openai_responses' | 'anthropic_messages' | 'gemini_native'
@@ -83,6 +100,7 @@ export function mergeProviderList(configured: ProviderConfig[], activeId: string
       modelContextWindows: { ...(saved?.modelContextWindows ?? {}) },
       supportsWebSearch: saved?.supportsWebSearch ?? false,
       supportsVision: saved?.supportsVision ?? false,
+      capabilities: saved?.capabilities ?? [],
       active: activeId === preset.id,
       builtin: true,
     }
