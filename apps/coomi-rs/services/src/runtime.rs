@@ -458,6 +458,35 @@ impl RuntimeManager {
         Ok(state)
     }
 
+    pub fn begin_install(&self) -> Result<RuntimeState> {
+        let mut state = self.state()?;
+        anyhow::ensure!(
+            matches!(
+                state.status,
+                RuntimeInstallStatus::NotInstalled
+                    | RuntimeInstallStatus::NeedsRepair
+                    | RuntimeInstallStatus::UpdateAvailable
+            ),
+            "runtime installation is already in progress"
+        );
+        state.status = RuntimeInstallStatus::Downloading;
+        state.error = None;
+        self.save_state(&state)?;
+        Ok(state)
+    }
+
+    pub fn fail_install(&self, error: impl Into<String>) -> Result<RuntimeState> {
+        let mut state = self.state()?;
+        state.status = if state.active_version.is_some() {
+            RuntimeInstallStatus::NeedsRepair
+        } else {
+            RuntimeInstallStatus::NotInstalled
+        };
+        state.error = Some(error.into());
+        self.save_state(&state)?;
+        Ok(state)
+    }
+
     pub fn backend(
         &self,
         legacy_prefix: PathBuf,
@@ -589,6 +618,7 @@ impl RuntimeManager {
         if staging.exists() {
             fs::remove_dir_all(&staging)?;
         }
+        fs::create_dir_all(&staging)?;
         let mut host_archive = tar::Archive::new(open_archive(host_file)?);
         for entry in host_archive.entries()? {
             let mut entry = entry?;
@@ -845,6 +875,21 @@ mod tests {
                 .is_file()
         );
         assert!(!home.path().join("runtime-v2/home/usr").exists());
+    }
+
+    #[test]
+    fn persists_install_progress_and_recoverable_failure() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let manager = RuntimeManager::open(home.path()).expect("open runtime");
+        let downloading = manager.begin_install().expect("begin installation");
+        assert_eq!(downloading.status, RuntimeInstallStatus::Downloading);
+        assert!(manager.begin_install().is_err());
+
+        let failed = manager
+            .fail_install("network unavailable")
+            .expect("record failure");
+        assert_eq!(failed.status, RuntimeInstallStatus::NotInstalled);
+        assert_eq!(failed.error.as_deref(), Some("network unavailable"));
     }
 
     #[test]
