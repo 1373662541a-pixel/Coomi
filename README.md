@@ -97,13 +97,6 @@ Coomi-Android/
 
 本项目采用 Apache License 2.0 许可证。详细条款请阅读 [LICENSE](LICENSE)。
 
-## 贡献者
-
-感谢以下贡献者对本项目的支持：
-
-- [github19155](https://github.com/github19155) — Root 权限可选项（[PR #5](https://github.com/TensorHub-ORG/Coomi-Android/pull/5)）
-- [Septemc](https://github.com/Septemc) — 维护者
-
 ## 作者与版权
 
 Copyright 2026 Septemc and TensorHub.
