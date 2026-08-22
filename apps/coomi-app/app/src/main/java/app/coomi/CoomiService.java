@@ -50,6 +50,9 @@ public class CoomiService extends Service {
     /** 引擎启动流程进行中（含部署检查/进程拉起/健康探测），供控制台显示「引擎启动中」。 */
     private volatile boolean mIsEngineStarting;
     private volatile boolean mUpdateInProgress;
+    /** Cancels health/install callbacks when the service is torn down. */
+    private volatile boolean mDestroyed;
+    private Thread mRuntimeInstallThread;
 
     private static String prefix() { return TermuxConstants.TERMUX_PREFIX_DIR_PATH; }
     private static String home() { return TermuxConstants.TERMUX_HOME_DIR_PATH; }
@@ -131,6 +134,9 @@ public class CoomiService extends Service {
 
     @Override
     public void onDestroy() {
+        mDestroyed = true;
+        Thread installThread = mRuntimeInstallThread;
+        if (installThread != null) installThread.interrupt();
         stopEngineSync();
         mExecutor.shutdownNow();
         super.onDestroy();
@@ -575,9 +581,11 @@ public class CoomiService extends Service {
 
     /** Start the persistent Rust installation state machine once the local API is healthy. */
     private void startBundledRuntimeInstallWhenReady(Process process, int port, String token) {
-        new Thread(() -> {
+        Thread previous = mRuntimeInstallThread;
+        if (previous != null && previous.isAlive()) return;
+        Thread installThread = new Thread(() -> {
             for (int attempt = 0; attempt < 180; attempt++) {
-                if (mEngineProcess != process || !process.isAlive()) return;
+                if (mDestroyed || mEngineProcess != process || !process.isAlive()) return;
                 if (checkHealth(port)) break;
                 try {
                     Thread.sleep(500);
@@ -586,6 +594,7 @@ public class CoomiService extends Service {
                     return;
                 }
             }
+            if (mDestroyed || mEngineProcess != process || !process.isAlive()) return;
             if (!checkHealth(port)) {
                 Logger.logError(LOG_TAG, "Runtime V2 auto-install skipped because the engine did not become healthy");
                 return;
@@ -616,7 +625,9 @@ public class CoomiService extends Service {
             } finally {
                 if (connection != null) connection.disconnect();
             }
-        }, "coomi-runtime-v2-install").start();
+        }, "coomi-runtime-v2-install");
+        mRuntimeInstallThread = installThread;
+        installThread.start();
     }
 
     public void stopEngine(Consumer<CommandResult> callback) {

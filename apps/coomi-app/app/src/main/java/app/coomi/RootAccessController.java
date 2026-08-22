@@ -17,10 +17,9 @@ import java.io.File;
  */
 public final class RootAccessController {
 
-    private static final long TIMEOUT_MILLIS = 30_000L;
+    private static final long TIMEOUT_MILLIS = 10_000L;
     private static final long FAILURE_COOLDOWN_MILLIS = 30_000L;
     private static final String[] SU_CANDIDATES = {
-        "su",
         "/system_ext/bin/su",
         "/system/bin/su",
         "/system/xbin/su",
@@ -70,17 +69,8 @@ public final class RootAccessController {
 
     /** Starts one user-requested check. A second check is ignored while active. */
     public void check(Callback callback) {
-        check(callback, false);
-    }
-
-    /** Re-runs a previously granted check while retaining the short failure cooldown. */
-    public void refresh(Callback callback) {
-        check(callback, true);
-    }
-
-    private void check(Callback callback, boolean refreshGranted) {
         Result granted = cachedGranted;
-        if (!refreshGranted && granted != null) {
+        if (granted != null) {
             if (callback != null) mainHandler.post(() -> callback.onComplete(granted));
             return;
         }
@@ -143,10 +133,8 @@ public final class RootAccessController {
         String cached = resolvedCandidate;
         if (cached != null) return cached;
         for (String candidate : SU_CANDIDATES) {
-            File file = candidate.startsWith("/")
-                ? new File(candidate)
-                : findExecutableOnPath(System.getenv("PATH"), candidate);
-            if (file == null) continue;
+            if (!candidate.startsWith("/")) continue;
+            File file = new File(candidate);
             if (file.isFile() && file.canExecute()) {
                 try {
                     resolvedCandidate = file.getCanonicalPath();

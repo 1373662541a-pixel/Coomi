@@ -50,8 +50,6 @@ public class CoomiLauncherActivity extends Activity {
     private static final String PREFS_NAME = "coomi_launcher";
     private static final String PREF_CONTINUE = "onboarding_continue";
     private static final String PREF_SETUP_COMPLETED = "setup_completed";
-    // Keep the legacy key so upgrades that already confirmed Root keep refreshing its status.
-    private static final String PREF_ROOT_CHECK_ENABLED = "root_granted_hint";
 
     public static void markSetupCompleted(Context context) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -77,6 +75,8 @@ public class CoomiLauncherActivity extends Activity {
     private RootAccessController mRootAccessController;
     private ShizukuAccessController mShizukuAccessController;
     private boolean mRootCheckInFlight = false;
+    /** Monotonically invalidates callbacks posted by a previous Activity instance. */
+    private int mRootCheckGeneration;
     private boolean mShizukuCheckInFlight = false;
     private boolean mPermissionsDone = false;
     private boolean mContinuePersisted = false;
@@ -149,6 +149,7 @@ public class CoomiLauncherActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        mRootCheckGeneration++;
         super.onDestroy();
         mHandler.removeCallbacksAndMessages(null);
         if (mRootAccessController != null) mRootAccessController.cancel();
@@ -212,40 +213,43 @@ public class CoomiLauncherActivity extends Activity {
 
     /** Root is an optional capability check and never gates bootstrap installation. */
     private void checkRootPermission() {
-        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-            .edit().putBoolean(PREF_ROOT_CHECK_ENABLED, true).apply();
-        refreshRootStatus();
-    }
-
-    private void refreshRootStatus() {
         if (mRootCheckInFlight || mRootAccessController == null) return;
         mRootCheckInFlight = true;
+        final int generation = mRootCheckGeneration;
         mRootButton.setEnabled(false);
         mRootButton.setText(R.string.coomi_root_checking);
-        mRootAccessController.refresh(result -> {
-            if (isFinishing()
+        // Root authorization is deliberately user initiated. Re-running `su` from
+        // onResume can reopen a manager prompt or race Activity teardown after the
+        // user returns from the Root app, which was the v1.4.x startup regression.
+        mRootAccessController.check(result -> {
+            mRootCheckInFlight = false;
+            if (generation != mRootCheckGeneration || isFinishing()
                 || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1 && isDestroyed())) {
                 return;
             }
-            mRootCheckInFlight = false;
-            switch (result.status) {
-                case GRANTED:
-                    mRootButton.setText(R.string.coomi_authorized);
-                    mRootButton.setEnabled(false);
-                    break;
-                case UNAVAILABLE:
-                    mRootButton.setText(R.string.coomi_root_unavailable);
-                    mRootButton.setEnabled(true);
-                    break;
-                case DENIED:
-                case TIMEOUT:
-                case ERROR:
-                default:
-                    mRootButton.setText(R.string.coomi_root_retry);
-                    mRootButton.setEnabled(true);
-                    break;
-            }
+            applyRootResult(result);
         });
+    }
+
+    private void applyRootResult(RootAccessController.Result result) {
+        if (result == null) return;
+        switch (result.status) {
+            case GRANTED:
+                mRootButton.setText(R.string.coomi_authorized);
+                mRootButton.setEnabled(false);
+                break;
+            case UNAVAILABLE:
+                mRootButton.setText(R.string.coomi_root_unavailable);
+                mRootButton.setEnabled(true);
+                break;
+            case DENIED:
+            case TIMEOUT:
+            case ERROR:
+            default:
+                mRootButton.setText(R.string.coomi_root_retry);
+                mRootButton.setEnabled(true);
+                break;
+        }
     }
 
     private void requestShizukuPermission() {
@@ -309,12 +313,6 @@ public class CoomiLauncherActivity extends Activity {
 
         if (mShizukuAccessController != null) {
             updateShizukuButton(mShizukuAccessController.getStatus());
-        }
-
-        boolean rootCheckEnabled = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-            .getBoolean(PREF_ROOT_CHECK_ENABLED, false);
-        if (rootCheckEnabled) {
-            refreshRootStatus();
         }
 
         // 演示包不为权限拦人：这两个开关只影响引擎常驻，而演示包没有引擎。
