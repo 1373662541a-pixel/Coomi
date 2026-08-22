@@ -7,6 +7,6 @@
   "file": "Coomi-Android-arm64-v1.4.2.apk",
   "size": 200170971,
   "sha256": "e21485761207cda225317cb2f02129ebe7cf4518cc9cfd812faa9f3bb96653b0",
-  "publishedAt": "2026-08-23T00:00:00Z",
+  "publishedAt": "2026-08-22T17:40:00Z",
   "notes": "v1.4.2 更新说明【稳定】：\n• 优化指定虚拟环境文件夹备份、智能备份布局与备份包导入恢复\n• 修复人格预设保存和核心提示词注入，完善数字生命状态与主题适配\n• 加强 Termux/ProotLinux 路径协同、引擎恢复和 Root 授权启动兼容性\n• 更新 GitHub Actions 优先的 CoomiDev 自定义迭代 Skill 与引导文案\n• 保留 v1.4.1 的运行环境、UTF-8 输出、瞬时请求重试与工具反馈稳定性修复"
 }
