@@ -152,6 +152,7 @@ impl ProcessManager {
             Ok(backend) => backend,
             Err(error) => return ToolResult::error(error.to_string()),
         };
+        let uses_runtime_backend = backend.is_some();
         let mut process = if let Some(backend) = backend {
             match backend.command(cwd, "/bin/sh", &["-lc".into(), command.into()]) {
                 Ok(command) => command.into_tokio(),
@@ -164,8 +165,13 @@ impl ProcessManager {
         } else {
             platform_shell(command)
         };
+        // RuntimeCommand already carries the namespace-correct cwd.  Applying
+        // the host cwd again breaks guest aliases and can make an otherwise
+        // valid Termux/Proot command fail before the shell starts.
+        if !uses_runtime_backend {
+            process.current_dir(cwd);
+        }
         process
-            .current_dir(cwd)
             .kill_on_drop(true)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

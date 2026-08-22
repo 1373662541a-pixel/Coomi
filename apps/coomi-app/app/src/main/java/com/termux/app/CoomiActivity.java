@@ -78,6 +78,7 @@ public class CoomiActivity extends Activity {
 
     /** Intent extra：直达前端 hash 路由，如 "#/catalog"。 */
     public static final String EXTRA_ROUTE = "coomi.route";
+    public static final String EXTRA_PREFILL_DRAFT = "coomi.prefill_draft";
     /** Return to the setup wizard instead of the dashboard when leaving a setup route. */
     public static final String EXTRA_RETURN_TO_SETUP = "coomi.return_to_setup";
 
@@ -279,20 +280,33 @@ public class CoomiActivity extends Activity {
         String token = mCoomiService != null ? mCoomiService.getEngineToken() : "";
         // 支持从控制台直达特定前端路由（如 SKILL/MCP 管理页 #/catalog）。
         String route = getIntent().getStringExtra(EXTRA_ROUTE);
+        String prefill = getIntent().getStringExtra(EXTRA_PREFILL_DRAFT);
         String url = "http://127.0.0.1:" + port + "/?token=" + token
             + (route != null && route.startsWith("#") ? route : "");
         final String target = url;
-        runOnUiThread(() -> mWebView.loadUrl(target));
+        runOnUiThread(() -> {
+            mWebView.loadUrl(target);
+            if (prefill != null && !prefill.isEmpty()) {
+                mWebView.postDelayed(() -> mWebView.evaluateJavascript(
+                    "window.dispatchEvent(new CustomEvent('coomi:prefill-draft',{detail:{sessionId:window.__coomiSessionId||'',text:" + JSONObject.quote(prefill) + "}}))", null), 800);
+            }
+        });
     }
 
     /** Reused singleTask instances switch SPA routes without reloading the WebView. */
     private void navigateToRoute(Intent intent) {
         if (mWebView == null || !mPageLoaded || intent == null) return;
         String route = intent.getStringExtra(EXTRA_ROUTE);
-        if (route == null || !route.startsWith("#/")) return;
-        String hashPath = route.substring(1);
-        runOnUiThread(() -> mWebView.evaluateJavascript(
-            "window.location.hash=" + JSONObject.quote(hashPath), null));
+        String prefill = intent.getStringExtra(EXTRA_PREFILL_DRAFT);
+        runOnUiThread(() -> {
+            if (route != null && route.startsWith("#/")) {
+                mWebView.evaluateJavascript("window.location.hash=" + JSONObject.quote(route.substring(1)), null);
+            }
+            if (prefill != null && !prefill.isEmpty()) {
+                mWebView.postDelayed(() -> mWebView.evaluateJavascript(
+                    "window.dispatchEvent(new CustomEvent('coomi:prefill-draft',{detail:{text:" + JSONObject.quote(prefill) + "}}))", null), 350);
+            }
+        });
     }
 
     private void configureWebView() {

@@ -77,7 +77,12 @@ impl HttpModelProvider {
                 body["parallel_tool_calls"] = Value::Bool(true);
             }
         }
-        apply_reasoning_effort(&mut body, request.reasoning_effort.as_deref(), false);
+        apply_model_parameters(
+            &self.config,
+            &mut body,
+            request.reasoning_effort.as_deref(),
+            Some(false),
+        );
         let response = self.send_with_reasoning_fallback(&endpoint, &body).await?;
         let value = checked_json(response, "response_body").await?;
         let message = value
@@ -130,7 +135,12 @@ impl HttpModelProvider {
                 body["parallel_tool_calls"] = Value::Bool(true);
             }
         }
-        apply_reasoning_effort(&mut body, request.reasoning_effort.as_deref(), false);
+        apply_model_parameters(
+            &self.config,
+            &mut body,
+            request.reasoning_effort.as_deref(),
+            Some(false),
+        );
         let response = self.send_with_reasoning_fallback(&endpoint, &body).await?;
         let status = response.status();
         if !status.is_success() {
@@ -274,7 +284,12 @@ impl HttpModelProvider {
                 body["parallel_tool_calls"] = Value::Bool(true);
             }
         }
-        apply_reasoning_effort(&mut body, request.reasoning_effort.as_deref(), true);
+        apply_model_parameters(
+            &self.config,
+            &mut body,
+            request.reasoning_effort.as_deref(),
+            Some(true),
+        );
         let response = self.send_with_reasoning_fallback(&endpoint, &body).await?;
         let value = checked_json(response, "response_body").await?;
         let mut content = String::new();
@@ -343,7 +358,12 @@ impl HttpModelProvider {
                 body["parallel_tool_calls"] = Value::Bool(true);
             }
         }
-        apply_reasoning_effort(&mut body, request.reasoning_effort.as_deref(), true);
+        apply_model_parameters(
+            &self.config,
+            &mut body,
+            request.reasoning_effort.as_deref(),
+            Some(true),
+        );
         let response = self.send_with_reasoning_fallback(&endpoint, &body).await?;
         let status = response.status();
         if !status.is_success() {
@@ -397,6 +417,12 @@ impl HttpModelProvider {
         if !provider_tools.is_empty() {
             body["tools"] = Value::Array(provider_tools);
         }
+        apply_model_parameters(
+            &self.config,
+            &mut body,
+            request.reasoning_effort.as_deref(),
+            None,
+        );
         let mut builder = self
             .client
             .post(endpoint)
@@ -488,6 +514,12 @@ impl HttpModelProvider {
         if !provider_tools.is_empty() {
             body["tools"] = Value::Array(provider_tools);
         }
+        apply_model_parameters(
+            &self.config,
+            &mut body,
+            request.reasoning_effort.as_deref(),
+            None,
+        );
         let mut builder = self
             .client
             .post(endpoint)
@@ -617,6 +649,105 @@ impl HttpModelProvider {
     }
 }
 
+fn apply_model_parameters(
+    config: &ProviderConfig,
+    body: &mut Value,
+    effort: Option<&str>,
+    standard_reasoning: Option<bool>,
+) {
+    let parameters = config.model_parameters.get(&config.model);
+    if let Some(temperature) = parameters
+        .and_then(|value| value.get("temperature"))
+        .and_then(Value::as_f64)
+        .filter(|value| (0.0..=2.0).contains(value))
+    {
+        match config.kind {
+            ProviderKind::GeminiNative => {
+                set_json_path(body, "generationConfig.temperature", json!(temperature));
+            }
+            _ => body["temperature"] = json!(temperature),
+        }
+    }
+    if let Some(top_k) = parameters
+        .and_then(|value| value.get("topK"))
+        .and_then(Value::as_u64)
+        .filter(|value| (1..=65_536).contains(value))
+    {
+        match config.kind {
+            ProviderKind::GeminiNative => {
+                set_json_path(body, "generationConfig.topK", json!(top_k));
+            }
+            _ => body["top_k"] = json!(top_k),
+        }
+    }
+
+    let reasoning_field = parameters
+        .and_then(|value| value.get("reasoningField"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let requested_effort = effort.filter(|value| *value != "auto");
+    if let Some(field) = reasoning_field {
+        remove_reasoning_fields(body);
+        let mapped = requested_effort.and_then(|level| {
+            parameters
+                .and_then(|value| value.get("reasoningMapping"))
+                .and_then(|mapping| mapping.get(level))
+                .and_then(parameter_value)
+        });
+        if let Some(value) = mapped {
+            set_json_path(body, field, value);
+            if field.starts_with("thinking.") && field != "thinking.type" {
+                set_json_path(body, "thinking.type", Value::String("enabled".into()));
+            }
+        }
+    } else if let Some(responses_api) = standard_reasoning {
+        apply_reasoning_effort(body, requested_effort, responses_api);
+    }
+}
+
+fn parameter_value(value: &Value) -> Option<Value> {
+    match value {
+        Value::String(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                serde_json::from_str(trimmed)
+                    .ok()
+                    .or_else(|| Some(Value::String(trimmed.to_owned())))
+            }
+        }
+        Value::Null => None,
+        value => Some(value.clone()),
+    }
+}
+
+fn set_json_path(target: &mut Value, path: &str, value: Value) {
+    fn set_segments(target: &mut Value, segments: &[&str], value: Value) {
+        let Some((head, tail)) = segments.split_first() else {
+            return;
+        };
+        if !target.is_object() {
+            *target = json!({});
+        }
+        let object = target.as_object_mut().expect("object created above");
+        if tail.is_empty() {
+            object.insert((*head).to_owned(), value);
+            return;
+        }
+        let child = object.entry((*head).to_owned()).or_insert_with(|| json!({}));
+        set_segments(child, tail, value);
+    }
+
+    let segments = path
+        .split('.')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    set_segments(target, &segments, value);
+}
+
 fn apply_reasoning_effort(body: &mut Value, effort: Option<&str>, responses_api: bool) {
     let Some(effort) = effort.filter(|value| *value != "auto") else {
         return;
@@ -629,13 +760,25 @@ fn apply_reasoning_effort(body: &mut Value, effort: Option<&str>, responses_api:
 }
 
 fn has_reasoning_field(body: &Value) -> bool {
-    body.get("reasoning_effort").is_some() || body.get("reasoning").is_some()
+    body.get("reasoning_effort").is_some()
+        || body.get("reasoning").is_some()
+        || body.get("thinking").is_some()
+        || body.get("enable_thinking").is_some()
+        || body.pointer("/generationConfig/thinkingConfig").is_some()
 }
 
 fn remove_reasoning_fields(body: &mut Value) {
     if let Some(object) = body.as_object_mut() {
         object.remove("reasoning_effort");
         object.remove("reasoning");
+        object.remove("thinking");
+        object.remove("enable_thinking");
+        if let Some(generation_config) = object
+            .get_mut("generationConfig")
+            .and_then(Value::as_object_mut)
+        {
+            generation_config.remove("thinkingConfig");
+        }
     }
 }
 
@@ -643,7 +786,9 @@ fn rejects_reasoning_field(body: &str) -> bool {
     let text = body.to_ascii_lowercase();
     let mentions_field = text.contains("reasoning_effort")
         || text.contains("reasoning.effort")
-        || text.contains("reasoning");
+        || text.contains("reasoning")
+        || text.contains("thinking")
+        || text.contains("budget_tokens");
     let rejects_field = text.contains("unknown")
         || text.contains("unsupported")
         || text.contains("unrecognized")

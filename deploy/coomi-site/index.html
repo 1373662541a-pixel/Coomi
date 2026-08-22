@@ -636,7 +636,7 @@
           <button class="platform-tab" type="button" role="tab" aria-selected="false" data-platform="desktop" data-platform-tab>桌面端</button>
         </div>
         <div class="actions">
-          <a id="downloadButtonAndroid" class="button button-primary" href="https://updates.septemc.com/coomi/android/Coomi-Android-arm64-v1.4.1.apk" data-stat-action="download" data-download-button="android">
+          <a id="downloadButtonAndroid" class="button button-primary" href="https://updates.septemc.com/coomi/android/Coomi-Android-arm64-v1.4.2.apk" data-stat-action="download" data-download-button="android">
             <span class="download-arrow" aria-hidden="true">↓</span>
             <span data-download-label="android">下载 APK</span>
           </a>
@@ -661,7 +661,7 @@
         </div>
         <div class="compatibility-item">
           <span class="compatibility-label">当前版本</span>
-          <span id="versionValue" class="compatibility-value">1.4.1</span>
+          <span id="versionValue" class="compatibility-value">1.4.2</span>
         </div>
       </div>
       <div class="container compatibility-grid" data-platform-panel="desktop">
@@ -684,9 +684,13 @@
       <div class="platform-panel" data-platform="android">
       <div class="container">
         <div class="changelog-platform-tag"><span class="tag">移动端</span></div>
-        <h2 class="changelog-title">v1.4.1 更新说明【稳定】</h2>
-        <p class="changelog-sub">2026-08-22 发布</p>
+        <h2 class="changelog-title">v1.4.2 更新说明【稳定】</h2>
+        <p class="changelog-sub">2026-08-23 发布</p>
         <ul class="changelog-list">
+          <li><strong>备份与导入体验</strong>：优化指定虚拟环境文件夹备份、智能备份布局与会话跳转，支持备份包正常导入恢复。</li>
+          <li><strong>人格与数字生命</strong>：修复人格预设保存和核心提示词注入链路，完善数字生命状态与主题适配。</li>
+          <li><strong>运行环境稳定性</strong>：加强 Termux/ProotLinux 路径协同、引擎恢复和 Root 授权启动兼容性，减少工具调用路径错误。</li>
+          <li><strong>自定义迭代（实验）</strong>：更新 GitHub Actions 优先的 CoomiDev 构建 Skill 与引导文案。</li>
           <li><strong>Termux/Proot 路径协同</strong>：统一宿主、Termux 和 ProotLinux 的逻辑路径映射，文件、补丁、Shell 和进程工具不再依赖固定目录硬编码。</li>
           <li><strong>运行环境诊断</strong>：新增运行环境 Skill、路径别名解析和 `runtime_doctor` 检查，Agent 可以识别当前环境并在 Termux 与 ProotLinux 间安全切换。</li>
           <li><strong>工具调用稳定性</strong>：修复 Proot 工作区路径转换、工具输出 UTF-8 边界处理和运行时允许目录校验，减少路径错误与引擎崩溃。</li>

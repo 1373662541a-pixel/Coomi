@@ -7,16 +7,18 @@ import { useConfigStore } from '@/stores/config'
 import { useSessionStore } from '@/stores/session'
 import PageHead from '@/components/PageHead.vue'
 import CoomiIcon from '@/components/CoomiIcon.vue'
+import ThemeSelect from '@/components/ThemeSelect.vue'
 
 interface LifeProfile {
   name: string
   address: string
+  preset?: string
+  personality?: Record<string, string>
   paused: boolean
   emotion: string
   attention: string
   bond: number
   needs: Record<string, number>
-  personality?: Record<string, string>
   memory_count: number
   updated_at_ms: number
 }
@@ -30,6 +32,12 @@ interface LifeStatus {
   background_heartbeat: boolean
 }
 
+interface IdentityConfig {
+  name: string
+  address: string
+  preset: string
+}
+
 const router = useRouter()
 const config = useConfigStore()
 const session = useSessionStore()
@@ -40,6 +48,15 @@ const error = ref('')
 const name = ref('Coomi Life')
 const address = ref('你')
 const preset = ref('balanced')
+const pendingIdentity = ref<IdentityConfig | null>(null)
+const presetOptions = [
+  { value: 'balanced', label: '均衡' }, { value: 'warm', label: '温柔' },
+  { value: 'cool', label: '高冷' }, { value: 'charming', label: '妩媚' },
+  { value: 'direct', label: '直接' }, { value: 'dismissive', label: '嫌弃' },
+  { value: 'rational', label: '理性' }, { value: 'playful', label: '俏皮' },
+  { value: 'quiet', label: '沉静' }, { value: 'sharp', label: '毒舌' },
+]
+const presetByLabel: Record<string, string> = Object.fromEntries(presetOptions.map(option => [option.label, option.value]))
 const memoryQuery = ref('')
 const memories = ref<string[]>([])
 const exportedPath = ref('')
@@ -54,6 +71,9 @@ async function refresh() {
     if (status.value.profile) {
       name.value = status.value.profile.name
       address.value = status.value.profile.address
+      const configuredPreset = status.value.profile.preset
+      const legacyLabel = status.value.profile.personality?.label
+      preset.value = configuredPreset || (legacyLabel ? presetByLabel[legacyLabel] : '') || preset.value || 'balanced'
     } else if (config.digitalLifeEnabled) {
       config.setDigitalLifeEnabled(false)
     }
@@ -88,14 +108,46 @@ function uninstall() {
 
 function bootstrap() {
   return run('bootstrap', () => apiSend('/api/cognitive/bootstrap', 'POST', {
-    profile_id: 'primary', name: name.value, address: address.value,
+    profile_id: 'primary', name: name.value, address: address.value, preset: preset.value,
   }), '觉醒完成')
 }
 
-function configure() {
-  return run('configure', () => apiSend('/api/cognitive/configure', 'POST', {
-    profile_id: 'primary', name: name.value, address: address.value, preset: preset.value,
+async function configure() {
+  const identity = pendingIdentity.value ?? {
+    name: name.value,
+    address: address.value,
+    preset: preset.value,
+  }
+  pendingIdentity.value = null
+  await run('configure', () => apiSend('/api/cognitive/configure', 'POST', {
+    profile_id: 'primary', ...identity,
   }), '配置已保存')
+  const queued = readPendingIdentity()
+  if (queued && profile.value) {
+    name.value = queued.name
+    address.value = queued.address
+    preset.value = queued.preset
+    void configure()
+  }
+}
+
+function readPendingIdentity(): IdentityConfig | null {
+  return pendingIdentity.value
+}
+
+function persistIdentity() {
+  if (!profile.value) return
+  pendingIdentity.value = {
+    name: name.value,
+    address: address.value,
+    preset: preset.value,
+  }
+  if (!busy.value) void configure()
+}
+
+function persistPreset(value: string) {
+  preset.value = value
+  persistIdentity()
 }
 
 function togglePause() {
@@ -188,12 +240,11 @@ onMounted(() => {
       <template v-if="status?.installed">
         <p class="sec-label">身份</p>
         <section class="group form-group">
-          <label><span>名称</span><input v-model="name" maxlength="48" /></label>
-          <label><span>称呼</span><input v-model="address" maxlength="48" /></label>
-          <label><span>人格预设</span><select v-model="preset"><option value="balanced">均衡</option><option value="warm">温暖</option><option value="direct">直接</option></select></label>
-          <div class="actions">
-            <button v-if="!profile" class="primary" :disabled="!!busy" @click="bootstrap">觉醒</button>
-            <button v-else class="primary" :disabled="!!busy" @click="configure">保存</button>
+          <label><span>数字生命名称</span><input v-model="name" maxlength="48" @change="persistIdentity" /></label>
+          <label><span>它对你的称呼</span><input v-model="address" maxlength="48" @change="persistIdentity" /></label>
+          <label><span>人格预设</span><ThemeSelect v-model="preset" :options="presetOptions" title="人格预设" aria-label="选择人格预设" @update:model-value="persistPreset" /></label>
+          <div v-if="!profile" class="actions">
+            <button class="primary" :disabled="!!busy" @click="bootstrap">觉醒</button>
           </div>
         </section>
 
@@ -256,8 +307,9 @@ onMounted(() => {
 .primary { background: var(--blue); color: #fff; }
 .secondary { background: var(--fill-strong); color: var(--text-2); }
 button:disabled { opacity: .45; }
-.form-group label { display: grid; grid-template-columns: 82px minmax(0, 1fr); align-items: center; gap: 10px; min-height: 56px; padding: 8px 13px; border-bottom: 1px solid var(--border); font-size: 13px; }
-.form-group input, .form-group select, .search input { min-width: 0; height: 38px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--page); color: var(--text); }
+.form-group label { display: grid; grid-template-columns: 108px minmax(0, 1fr); align-items: center; gap: 10px; min-height: 56px; padding: 8px 13px; border-bottom: 1px solid var(--border); font-size: 13px; }
+.form-group label > span { color: var(--text-2); font-size: 13px; line-height: 1.3; }
+.form-group input, .form-group select, .form-group :deep(.select-trigger), .search input { box-sizing: border-box; min-width: 0; width: 100%; height: 38px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--page); color: var(--text); font: inherit; }
 .metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .metrics > div:nth-child(odd) { border-right: 1px solid var(--border); }
 .path { overflow-wrap: anywhere; margin: 7px 2px 0; color: var(--text-3); font-size: 11px; }

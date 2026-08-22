@@ -15,9 +15,9 @@ const PROMPT = `我准备在 Coomi 的手机虚拟 Linux 环境中进行 Coomi �
 
 请先检查本地开发环境：
 1. 确认当前命令运行在 Runtime V2 的 Debian ProotLinux 中，源码目录为 ~/custom_coomi，持久 Build Kit 挂载为 /opt/coomi-dev。
-2. 先运行 coomidev-build doctor；如果缺少硬依赖，请逐项说明缺少的工具、架构或校验问题，不要把目录已创建当作工具链已就绪。
-3. 只使用 /opt/coomi-dev/current 中经过版本固定和 SHA-256 校验的 ARM64/glibc 工具链。禁止把 Termux 的 Android-PIE/Bionic 可执行文件混入 Debian 环境，也不要依赖 apt/dpkg 安装关键构建工具。
-4. 使用 file、readelf 和加载器信息验证原生工具，尤其不要把官方 Android SDK/NDK 中常见的 x86_64 aapt2、clang、lld 误当作 ARM64 主机工具。
+2. 这次迭代优先使用 GitHub Actions 构建 APK，不要一开始在手机上安装 Android SDK/NDK 或尝试本地编译。
+3. 先检查 gh、Git、远程仓库和 GitHub Actions 权限；如果缺少 gh 或认证失效，先完成认证并验证，不要把 Token 写入命令、日志或仓库。
+4. 本地环境只用于编辑、测试、提交和触发工作流。若需要诊断本地构建环境，再运行 coomidev-build doctor；不要把目录已创建当作工具链已就绪。
 
 然后带我完成 GitHub 环境配置：
 1. 引导我注册或登录 GitHub 账号。
@@ -34,9 +34,17 @@ const PROMPT = `我准备在 Coomi 的手机虚拟 Linux 环境中进行 Coomi �
 4. 将仓库的 main 分支克隆到 Coomi 虚拟 Linux 环境中的 ~/custom_coomi。
 5. 检查仓库、分支、远程地址和工作区状态。
 
-之后，请按照 coomi-custom-iteration Skill 的规则协助我进行自定义开发。每次修改前先检查项目规则、当前分支和工作区状态；完成后运行适当的测试，并根据我的选择提交 PR 或构建独立的 CoomiDev APK。
+之后，请按照 coomi-custom-iteration Skill 的规则协助我进行自定义开发。每次修改前先检查项目规则、当前分支和工作区状态；完成后运行适当的测试。
 
-若我要在手机本地构建，请先将涉及的构建配置 Linux 化：使用 POSIX 路径与命令，移除 npm.cmd、.cmd、Windows 盘符、反斜杠和 windows-x86_64 硬编码，同时保留 Windows 主机检测与环境变量覆盖。依次执行 doctor、Android APK 冒烟测试、Rust/NDK 冒烟测试、完整构建；完整包必须为 CoomiDev、包名 com.coomidev.android、默认端口 18765，并使用 assets/coomi-agent-dev.png。全部通过后再验证包名和签名并导出 APK。如果真实 ARM64 工具链无法验证，请明确停止本地构建并改用 GitHub Actions，不要绕过检查。`
+构建 CoomiDev APK 时，优先走 GitHub Actions：
+1. 在用户自己的 fork 中创建功能分支，提交必要的 Linux 化配置、CI 工作流和代码修改；不得直接提交官方仓库 main。
+2. 先检查仓库是否已有 CoomiDev 工作流；没有时，在用户 fork 的 .github/workflows/ 下创建或补齐工作流，使用固定的 Ubuntu runner、JDK/Node/Rust/Android 构建版本，并通过 COOMI_DEV_BUILD=1 构建 CoomiDev。
+3. 推送分支后使用 gh workflow list、gh workflow run 或 gh run rerun 触发工作流，使用 gh run watch --exit-status 持续等待，不要只看网页上的旧运行记录。
+4. 失败时先用 gh run view --log-failed 获取失败步骤，区分依赖、架构、签名、缓存和源码错误；修复后重新提交并重新触发，不要盲目重复运行。
+5. 成功后用 gh run download 下载 APK artifact，校验包名 com.coomidev.android、应用名 CoomiDev、端口 18765、ABI 和签名，再提供给用户安装；PR 和 APK 构建可以是两个独立工作流。
+6. 若用户选择发布，先在 fork 的分支完成验收，再按 Skill 规范提交 PR 到 TensorHub-ORG/Coomi:main。未经用户明确确认，不执行 push、发布 Release 或创建 PR。
+
+若用户明确要求手机本地构建，才将涉及的构建配置 Linux 化：使用 POSIX 路径与命令，移除 npm.cmd、.cmd、Windows 盘符、反斜杠和 windows-x86_64 硬编码，同时保留 Windows 主机检测与环境变量覆盖。依次执行 doctor、Android APK 冒烟测试、Rust/NDK 冒烟测试、完整构建；完整包必须为 CoomiDev、包名 com.coomidev.android、默认端口 18765，并使用 assets/coomi-agent-dev.png。全部通过后再验证包名和签名并导出 APK。如果真实 ARM64 工具链无法验证，立即停止本地构建并回到 GitHub Actions，不要绕过检查。`
 
 async function start() {
   if (busy.value) return
@@ -69,32 +77,31 @@ function goDashboard() {
     <PageHead title="自定义迭代（实验）" @back="goDashboard" />
     <main class="body">
       <section class="hero">
-        <span class="eyebrow">CoomiDev Workspace</span>
         <h1>全面自定义自己的 CoomiDev</h1>
-        <p>在手机虚拟 Linux 中完成源码修改、测试、PR 和独立 APK 构建，使用可诊断的版本化 ARM64 Build Kit，并始终与主应用隔离。</p>
+        <p>Coomi 是由 TensouHub 开源组织维护的 Agent 基座项目。我们非常欣喜地看到，Coomi-Android 收获了很多用户的认可与喜爱。开源生态之所以称为“开源”，也是因为众多开发者始终愿意共建、共享，相互交流、认可。</p>
+        <p>为此，我们开放自定义迭代能力，从零开始引导用户迈入开源社区，让每一位爱好者都有机会亲手打造属于自己的 Coomi，同时也能为社区提供独特的创新与改进。</p>
       </section>
-
       <section class="prep">
-        <div class="section-head"><h2>开始前自动准备</h2><span>一次配置，后续直接使用</span></div>
+        <div class="section-head"><h2>我们为你提供</h2><span>一次准备，持续共建</span></div>
         <div class="feature-list">
-          <article class="feature">
+            <article class="feature">
             <span class="feature-icon"><CoomiIcon name="shield" :size="17" /></span>
-            <span><b>专用 Skill</b><small>内置 ARM64 环境诊断、Linux 化、测试、PR 与 APK 构建规则</small></span>
+            <span><b>专用迭代 Skill</b><small>内置环境诊断、Linux 化、测试、提交 PR 与 CoomiDev 构建规范</small></span>
           </article>
-          <article class="feature">
+            <article class="feature">
             <span class="feature-icon"><CoomiIcon name="folder" :size="17" /></span>
-            <span><b>隔离工作区</b><small><code>~/custom_coomi</code> 与 <code>/opt/coomi-dev</code> 分离持久化</small></span>
+            <span><b>隔离开发工作区</b><small><code>~/custom_coomi</code> 与构建工具链独立保存，避免影响主应用</small></span>
           </article>
-          <article class="feature">
+            <article class="feature">
             <span class="feature-icon"><CoomiIcon name="git" :size="17" /></span>
-            <span><b>确认后提交</b><small>提交、推送和创建 PR 前先展示变更摘要</small></span>
+              <span><b>Git开源生态社区</b><small>对于用户的所有迭代和改进，Coomi都会提示你，引导你按规范提交PR和封装自己的APK</small></span>
           </article>
         </div>
       </section>
-
       <section class="auth">
-        <h2>GitHub 认证</h2>
-        <p class="note">首次进入会话后，Agent 会教你使用 <code>gh auth login</code> 设备码流程配置账号，并指导生成 SSH Key。私钥和认证信息只保存在虚拟环境中，不会写入聊天草稿或提交内容。</p>
+        <h2>开始前你需要准备</h2>
+        <p class="note">请先准备 GitHub 账号。需要提交 PR 时，再配置权限最小化的 Token（classic）；私钥和 Token 只保存在虚拟环境中，不要写入聊天、日志或提交内容。</p>
+        <p class="note">进入会话后，Agent 会检查工作区、Linux 工具链和项目规则，再带你选择提交 PR 或构建独立 CoomiDev。</p>
       </section>
       <p v-if="error" class="error">{{ error }}</p>
       <button class="primary" :disabled="busy" @click="start">
@@ -110,9 +117,8 @@ function goDashboard() {
 .page { display:flex; flex-direction:column; height:100%; background:var(--page); }
 .body { flex:1; overflow-y:auto; padding:16px 14px calc(var(--safe-bottom) + 28px); }
 .hero { position:relative; padding:18px 17px 19px; overflow:hidden; border:1px solid var(--border); border-radius:8px; background:var(--bg); box-shadow:var(--shadow-1); }
-.eyebrow { display:block; margin-bottom:7px; color:var(--blue); font-size:10.5px; font-weight:700; letter-spacing:0; }
 h1 { margin:0; color:var(--text); font-size:19px; line-height:1.35; }
-.hero p { max-width:34em; margin:7px 0 0; color:var(--text-2); font-size:12.8px; line-height:1.65; }
+.hero p { max-width:40em; margin:10px 0 0; color:var(--text-2); font-size:12.8px; line-height:1.75; }
 .prep { margin-top:19px; }
 .section-head { display:flex; align-items:baseline; justify-content:space-between; gap:10px; margin:0 3px 8px; }
 .section-head h2, .auth h2 { margin:0; color:var(--text); font-size:13px; font-weight:650; }

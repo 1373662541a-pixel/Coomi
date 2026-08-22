@@ -1,9 +1,9 @@
 ---
 name: coomi-custom-iteration
-description: Develop Coomi in a private fork, Linuxize its build, diagnose the mobile ARM64 Build Kit, submit a PR, or build an isolated CoomiDev APK.
-keywords: [coomi, custom, iteration, github, git, fork, clone, pull request, apk, coomidev, prootlinux]
+description: Develop Coomi in a private fork, use GitHub Actions to build an isolated CoomiDev APK, submit a PR, or diagnose the optional mobile ARM64 Build Kit.
+keywords: [coomi, custom, iteration, github, github-actions, actions, git, fork, clone, pull request, apk, coomidev, prootlinux]
 file_types: [rs, vue, ts, java, xml, gradle, md]
-tool_requirements: [shell, local_shell, git, gh, cargo, npm, gradle]
+tool_requirements: [shell, local_shell, git, gh, github_actions, cargo, npm, gradle]
 project_types: [coomi, rust, android, vue]
 risks: [network, destructive]
 ---
@@ -34,11 +34,11 @@ For a Coomi source checkout, preserve these ownership boundaries:
 
 ## Before editing
 
-1. Run `coomidev-build doctor` before any installation or build attempt. Report every missing hard dependency plainly; a prepared directory is not a ready toolchain.
-2. Confirm `COOMI_RUNTIME_BACKEND=proot_linux`, `git`, and `gh` are available.
-3. Confirm GitHub authentication with `gh auth status`; never print, paste, or save a token in chat, logs, source files, or commits.
-4. Inspect `git status`, the current branch, project rules, and available disk space. Keep at least 6 GiB free for a full build.
-5. Use a feature branch such as `codex/custom-<short-description>` based on the user's request.
+1. Confirm `COOMI_RUNTIME_BACKEND=proot_linux`, `git`, and `gh` are available. GitHub Actions is the default APK build route; the phone is an editing and orchestration environment, not the first choice for Android toolchain execution.
+2. Confirm GitHub authentication with `gh auth status`; never print, paste, or save a token in chat, logs, source files, or commits. The account must have permission to dispatch workflows and download artifacts in the user's fork.
+3. Inspect `git status`, the current branch, project rules, and available disk space. Keep at least 6 GiB free for local tests; Actions runners provide the Android build disk space.
+4. Use a feature branch such as `codex/custom-<short-description>` based on the user's request. Keep the fork's `main` and the official `TensorHub-ORG/Coomi:main` untouched.
+5. Only run `coomidev-build doctor` before a local build attempt or when diagnosing the optional local Build Kit. Do not delay normal GitHub Actions work because the phone does not have ARM64 Android compilers.
 
 ## ARM64 Build Kit invariants
 
@@ -73,13 +73,40 @@ For repository verification, check the fork, `main` branch, remotes, and clean/e
 
 Before pushing, summarize changed files and run the smallest relevant Rust tests, frontend build/type checks, and Android checks. Ask for confirmation immediately before commit, push, or PR creation. Use a PR body with Summary, Changes, Testing, Compatibility, Screenshots, and Risks. The target is `TensorHub-ORG/Coomi:main`, and the head should be the user's fork feature branch.
 
-## CoomiDev delivery
+## GitHub Actions CoomiDev delivery (default)
 
-Build only after confirming the user requested an APK. Validate in this order: `coomidev-build doctor`, `coomidev-build android-smoke`, `coomidev-build rust-smoke`, then `coomidev-build full`. Do not claim on-device build support is complete until all four stages pass.
+Use this route first because Android's official Linux host tools are generally x86_64 while the phone's guest is ARM64. The local ProotLinux environment can edit and test the checkout, but it must not pretend to be a complete Android build host.
+
+1. Ensure the user's fork contains the current feature branch and a reviewed workflow under `.github/workflows/`. The workflow must use a pinned Ubuntu runner/tool versions, checkout the requested branch, set `COOMI_DEV_BUILD=1`, and build `CoomiDev` with package `com.coomidev.android`, port `18765`, and `assets/coomi-agent-dev.png`.
+2. Keep build and release concerns separate: one job may run `doctor`, frontend/Rust checks, and APK packaging; a later release job may upload only the verified APK artifact. Do not put secrets, signing passwords, or private keys in workflow YAML or repository files.
+3. Before dispatch, inspect the workflow inputs and permissions. Prefer `contents: read` for build-only jobs; request `contents: write` or release permissions only when the user explicitly asks to publish a release.
+4. Trigger and observe the run from the guest:
+   ```sh
+   gh workflow list
+   gh workflow run <workflow.yml> --ref codex/custom-<short-description>
+   gh run list --workflow <workflow.yml> --branch codex/custom-<short-description> --limit 5
+   gh run watch <run-id> --exit-status
+   ```
+5. On failure, retrieve only the failed-step logs with `gh run view <run-id> --log-failed`. Classify the failure as source, dependency, architecture, signing, cache, or workflow permission; fix the smallest cause and dispatch a new run. Never loop-retry an unchanged failing run.
+6. Download artifacts only after `gh run watch` exits successfully: `gh run download <run-id> --name <artifact> --dir /home/coomi/CoomiDev-output`. Verify APK package, version, ABI, application label, default port, icon and signature before showing the path to the user.
+7. If a PR is requested, keep the successful run URL and test summary in the PR body. Ask for explicit confirmation immediately before `git push`, PR creation, release publication, or any fork write operation.
+
+### Workflow implementation checklist
+
+- Use `workflow_dispatch` inputs for the source ref, whether to upload an APK, and an optional release tag. Keep the default ref as the current feature branch so a stale `main` build cannot be mistaken for the user's iteration.
+- Use a fixed `ubuntu-24.04` runner with pinned setup actions. Set up JDK 17, Node/npm, Rust 1.95.0 plus `aarch64-linux-android`, and the Android SDK/NDK versions declared by the repository. Cache Gradle, Cargo and npm by lockfile; never cache signing keys or provider credentials.
+- Run `npm run type-check` / `npm run build`, the smallest relevant Rust tests, then `COOMI_DEV_BUILD=1 ./gradlew --no-daemon --max-workers=2 :app:assembleRelease`. Keep the checks before packaging so a failed test cannot produce a seemingly valid artifact.
+- Inject release signing through GitHub encrypted secrets or a protected fork environment. The workflow must fail when signing values are missing; never generate or print a private key in a log. For a preview build, use the repository's explicitly documented debug key and label the artifact as a preview.
+- After packaging, use `aapt2 dump badging` or `apkanalyzer` to check `com.coomidev.android`, `CoomiDev`, `arm64-v8a`, and the expected version. Run `apksigner verify --verbose`, then upload a single named artifact such as `coomidev-apk` together with checksums and the run URL.
+- Keep an optional release job behind an explicit input and environment approval. It may create a GitHub Release in the user's fork, but it must never push to or publish from `TensorHub-ORG/Coomi` without an explicitly confirmed release operation.
+
+## CoomiDev delivery (local fallback)
+
+Use this route only when the user explicitly requests a local APK or GitHub Actions is unavailable. Validate in this order: `coomidev-build doctor`, `coomidev-build android-smoke`, `coomidev-build rust-smoke`, then `coomidev-build full`. Do not claim on-device build support is complete until all four stages pass.
 
 The final build must set `COOMI_DEV_BUILD=1` and use application name `CoomiDev`, package `com.coomidev.android`, isolated app storage/runtime, default engine port `18765`, and bundled icon `assets/coomi-agent-dev.png`. Verify package identity and signature before exporting to `~/CoomiDev-output`; never replace or update `com.coomi.android`.
 
-If a required ARM64 artifact cannot be sourced and checksum-verified, stop the local build and offer the repository's GitHub Actions build as the fallback. Do not bypass architecture, loader, checksum, package identity, or signature checks.
+If a required ARM64 artifact cannot be sourced and checksum-verified, stop the local build and return to the GitHub Actions route. Do not bypass architecture, loader, checksum, package identity, or signature checks.
 
 ## Conflict and safety rules
 

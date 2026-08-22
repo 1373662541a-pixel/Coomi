@@ -88,16 +88,17 @@
 
                     <TextView
                         style="@style/Coomi.Text.Body"
-                        android:layout_width="wrap_content"
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:textStyle="bold"
                         android:text="@string/coomi_backup_action"/>
 
                     <TextView
                         style="@style/Coomi.Text.Caption"
-                        android:layout_width="wrap_content"
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="2dp"
+                        android:lineSpacingExtra="2dp"
                         android:text="@string/coomi_backup_action_desc"/>
                 </LinearLayout>
 
@@ -109,6 +110,115 @@
                     android:contentDescription="@null"/>
             </LinearLayout>
 
+            <LinearLayout
+                android:id="@+id/btn_backup_folder"
+                style="@style/Coomi.Row"
+                android:background="@drawable/coomi_bg_card"
+                android:clickable="true"
+                android:focusable="true"
+                android:minHeight="72dp"
+                android:paddingTop="@dimen/coomi_space_m"
+                android:paddingBottom="@dimen/coomi_space_m"
+                android:layout_marginBottom="@dimen/coomi_space_s">
+                <ImageView
+                    android:layout_width="@dimen/coomi_icon_m"
+                    android:layout_height="@dimen/coomi_icon_m"
+                    android:layout_gravity="top"
+                    android:src="@drawable/coomi_ic_folder"
+                    android:tint="?attr/coomiBlue"
+                    android:contentDescription="@null" />
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginStart="@dimen/coomi_space_m"
+                    android:orientation="vertical">
+                    <TextView
+                        style="@style/Coomi.Text.Body"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:textStyle="bold"
+                        android:text="指定文件夹备份" />
+                    <TextView
+                        style="@style/Coomi.Text.Caption"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:lineSpacingExtra="2dp"
+                        android:text="选择 ProotLinux 虚拟环境中的文件夹，导出为手机存储里的 ZIP 文件" />
+                </LinearLayout>
+                <ImageView
+                    android:layout_width="@dimen/coomi_icon_s"
+                    android:layout_height="@dimen/coomi_icon_s"
+                    android:layout_gravity="center_vertical"
+                    android:layout_marginStart="@dimen/coomi_space_s"
+                    android:src="@drawable/coomi_ic_chevron_right"
+                    android:tint="?attr/coomiText3"
+                    android:contentDescription="@null" />
+            </LinearLayout>
+
+            <TextView
+                style="@style/Coomi.Text.SectionLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/coomi_space_m"
+                android:text="智能备份" />
+            <LinearLayout
+                style="@style/Coomi.Card"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="@dimen/coomi_space_m">
+                <TextView
+                    style="@style/Coomi.Text.Caption"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="@dimen/coomi_space_s"
+                    android:lineSpacingExtra="2dp"
+                    android:text="可编辑提示词。执行时会在会话中创建一条新任务。" />
+                <EditText
+                    android:id="@+id/edit_smart_backup_prompt"
+                    style="@style/Coomi.Input"
+                    android:layout_width="match_parent"
+                    android:layout_height="112dp"
+                    android:gravity="top|start"
+                    android:inputType="textMultiLine"
+                    android:hint="备份提示词"
+                    android:scrollbars="vertical" />
+                <Button
+                    android:id="@+id/btn_smart_backup_run"
+                    style="@style/Coomi.Button"
+                    android:layout_width="match_parent"
+                    android:layout_height="@dimen/coomi_button_height"
+                    android:layout_marginTop="@dimen/coomi_space_m"
+                    android:minWidth="0dp"
+                    android:text="在会话中执行" />
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="@dimen/coomi_space_s"
+                    android:orientation="horizontal">
+                    <Button
+                        android:id="@+id/btn_smart_backup_reset"
+                        style="@style/Coomi.Button.Secondary"
+                        android:layout_width="0dp"
+                        android:layout_height="@dimen/coomi_button_height"
+                        android:layout_weight="1"
+                        android:layout_marginEnd="@dimen/coomi_space_xs"
+                        android:minWidth="0dp"
+                        android:text="重置" />
+                    <Button
+                        android:id="@+id/btn_smart_backup_save"
+                        style="@style/Coomi.Button.Secondary"
+                        android:layout_width="0dp"
+                        android:layout_height="@dimen/coomi_button_height"
+                        android:layout_weight="1"
+                        android:layout_marginStart="@dimen/coomi_space_xs"
+                        android:minWidth="0dp"
+                        android:text="保存" />
+                </LinearLayout>
+            </LinearLayout>
+
             <!-- ── 导入备份 ── -->
             <LinearLayout
                 android:id="@+id/btn_backup_import"
@@ -118,6 +228,7 @@
                 android:focusable="true"
                 android:paddingTop="@dimen/coomi_space_l"
                 android:paddingBottom="@dimen/coomi_space_l"
+                android:minHeight="88dp"
                 android:layout_marginBottom="@dimen/coomi_space_s">
 
                 <FrameLayout
@@ -143,16 +254,17 @@
 
                     <TextView
                         style="@style/Coomi.Text.Body"
-                        android:layout_width="wrap_content"
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:textStyle="bold"
                         android:text="@string/coomi_backup_import"/>
 
                     <TextView
                         style="@style/Coomi.Text.Caption"
-                        android:layout_width="wrap_content"
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="2dp"
+                        android:lineSpacingExtra="2dp"
                         android:text="@string/coomi_backup_import_desc"/>
                 </LinearLayout>
 

@@ -266,6 +266,33 @@ pub struct LegacyTermuxBackend {
     pub home: PathBuf,
 }
 
+impl LegacyTermuxBackend {
+    /// Resolve the Termux bootstrap roots from Coomi's config directory.
+    /// Android launches the engine with COOMI_HOME at
+    /// `<files>/home/.coomi`, while the bootstrap lives at `<files>/usr`.
+    pub fn from_coomi_home(coomi_home: &Path) -> Self {
+        let termux_home = coomi_home
+            .file_name()
+            .is_some_and(|name| name == ".coomi")
+            .then(|| coomi_home.parent())
+            .flatten()
+            .filter(|home| home.file_name().is_some_and(|name| name == "home"));
+        if let Some(termux_home) = termux_home
+            && let Some(files_root) = termux_home.parent()
+            && files_root.file_name().is_some_and(|name| name == "files")
+        {
+            return Self {
+                prefix: files_root.join("usr"),
+                home: termux_home.to_path_buf(),
+            };
+        }
+        Self {
+            prefix: coomi_home.join("files/usr"),
+            home: coomi_home.join("files/home"),
+        }
+    }
+}
+
 #[async_trait]
 impl RuntimeBackend for LegacyTermuxBackend {
     fn kind(&self) -> RuntimeBackendKind {
@@ -278,18 +305,45 @@ impl RuntimeBackend for LegacyTermuxBackend {
         command: &str,
         arguments: &[String],
     ) -> Result<RuntimeCommand> {
+        // Runtime callers use Linux-style absolute names (for example
+        // `/bin/sh`).  Those names belong to the selected runtime namespace;
+        // they must be resolved inside Termux's PREFIX instead of being
+        // appended as an absolute host path.
+        let program = termux_program_path(&self.prefix, command);
+        anyhow::ensure!(
+            program.is_file(),
+            "Termux executable is missing at {}; resolved PREFIX is {}",
+            program.display(),
+            self.prefix.display()
+        );
         let mut environment = minimal_environment(&self.home, &self.prefix.join("tmp"));
         environment.insert("PREFIX".into(), self.prefix.to_string_lossy().into_owned());
         environment.insert(
             "PATH".into(),
-            format!(
-                "{}/bin:{}/bin",
-                self.prefix.display(),
-                self.prefix.join("usr").display()
-            ),
+            format!("{}/bin:/system/bin", self.prefix.display()),
         );
+        environment.insert(
+            "LD_LIBRARY_PATH".into(),
+            self.prefix.join("lib").to_string_lossy().into_owned(),
+        );
+        let preload = self.prefix.join("lib/libtermux-exec-ld-preload.so");
+        if preload.is_file() {
+            environment.insert("LD_PRELOAD".into(), preload.to_string_lossy().into_owned());
+        }
+        environment.insert(
+            "SHELL".into(),
+            self.prefix.join("bin/bash").to_string_lossy().into_owned(),
+        );
+        environment.insert(
+            "SSL_CERT_FILE".into(),
+            self.prefix
+                .join("etc/tls/cert.pem")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        environment.insert("COOMI_RUNTIME_BACKEND".into(), "termux".into());
         Ok(RuntimeCommand {
-            program: self.prefix.join("bin").join(command),
+            program,
             arguments: arguments.to_vec(),
             environment,
             cwd: workspace.to_owned(),
@@ -303,6 +357,18 @@ impl RuntimeBackend for LegacyTermuxBackend {
         );
         Ok(())
     }
+}
+
+fn termux_program_path(prefix: &Path, command: &str) -> PathBuf {
+    let command = command.trim();
+    let relative = command
+        .strip_prefix("/bin/")
+        .or_else(|| command.strip_prefix("/usr/bin/"))
+        .or_else(|| command.strip_prefix('/'))
+        .unwrap_or(command);
+    // Termux's PREFIX already represents `/usr`; both Linux spellings map
+    // to PREFIX/bin, never PREFIX/usr/bin.
+    prefix.join("bin").join(relative)
 }
 
 #[derive(Clone, Debug)]
@@ -930,6 +996,62 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn termux_resolves_linux_shell_names_inside_prefix() {
+        let prefix = Path::new("/data/data/com.coomi.android/files/usr");
+        assert_eq!(
+            termux_program_path(prefix, "/bin/sh"),
+            prefix.join("bin/sh")
+        );
+        assert_eq!(
+            termux_program_path(prefix, "/usr/bin/env"),
+            prefix.join("bin/env")
+        );
+        assert_eq!(termux_program_path(prefix, "bash"), prefix.join("bin/bash"));
+    }
+
+    #[test]
+    fn termux_layout_is_derived_from_android_coomi_home() {
+        let backend = LegacyTermuxBackend::from_coomi_home(Path::new(
+            "/data/data/com.coomi.android/files/home/.coomi",
+        ));
+        assert_eq!(
+            backend.prefix,
+            PathBuf::from("/data/data/com.coomi.android/files/usr")
+        );
+        assert_eq!(
+            backend.home,
+            PathBuf::from("/data/data/com.coomi.android/files/home")
+        );
+    }
+
+    #[test]
+    fn termux_command_uses_android_native_environment() {
+        let root = tempfile::tempdir().expect("temporary Termux root");
+        let prefix = root.path().join("files/usr");
+        let home = root.path().join("files/home");
+        fs::create_dir_all(prefix.join("bin")).expect("create bin");
+        fs::create_dir_all(prefix.join("lib")).expect("create lib");
+        fs::create_dir_all(&home).expect("create home");
+        fs::write(prefix.join("bin/sh"), b"shell").expect("create shell");
+        let backend = LegacyTermuxBackend {
+            prefix,
+            home: home.clone(),
+        };
+        let command = backend
+            .command(&home, "/bin/sh", &["-lc".into(), "pwd".into()])
+            .expect("Termux command");
+        assert_eq!(command.program, backend.prefix.join("bin/sh"));
+        assert_eq!(
+            command.environment.get("LD_LIBRARY_PATH").map(String::as_str),
+            Some(backend.prefix.join("lib").to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            command.environment.get("COOMI_RUNTIME_BACKEND").map(String::as_str),
+            Some("termux")
+        );
+    }
 
     #[tokio::test]
     async fn bounded_runtime_reader_rejects_excess_output() {

@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import PageHead from '@/components/PageHead.vue'
 import CoomiIcon from '@/components/CoomiIcon.vue'
+import ThemeSelect from '@/components/ThemeSelect.vue'
 import { useConfigStore, type ProviderConfig, type ProviderStatus, type SubAgentConfig } from '@/stores/config'
 
 const router = useRouter()
@@ -10,6 +11,7 @@ const config = useConfigStore()
 const tab = ref<'providers' | 'subagents'>('providers')
 const subAgents = ref<SubAgentConfig[]>([])
 const fallbackId = ref<string>()
+const subAgentLimit = ref(20)
 const savedSnapshot = ref('')
 const savingSubAgents = ref(false)
 const subAgentMessage = ref('')
@@ -17,7 +19,8 @@ const subAgentError = ref('')
 
 const providers = computed(() => config.mergedProviders)
 const configuredProviders = computed(() => config.providers.filter(provider => provider.hasKey && provider.models.length > 0))
-const subAgentDirty = computed(() => JSON.stringify({ agents: subAgents.value, fallbackId: fallbackId.value }) !== savedSnapshot.value)
+const configuredProviderOptions = computed(() => configuredProviders.value.map(provider => ({ value: provider.id, label: provider.name, note: provider.id })))
+const subAgentDirty = computed(() => JSON.stringify({ agents: subAgents.value, fallbackId: fallbackId.value, maxAgents: subAgentLimit.value }) !== savedSnapshot.value)
 
 onMounted(async () => {
   await config.fetchProviders()
@@ -28,8 +31,9 @@ onMounted(async () => {
 function loadSubAgents() {
   subAgents.value = config.subAgentSettings.agents.map(agent => ({ ...agent }))
   fallbackId.value = config.subAgentSettings.fallbackId
+  subAgentLimit.value = Math.max(subAgents.value.length, Math.min(30, config.subAgentSettings.maxAgents || 20))
   sortFallbackFirst()
-  savedSnapshot.value = JSON.stringify({ agents: subAgents.value, fallbackId: fallbackId.value })
+  savedSnapshot.value = JSON.stringify({ agents: subAgents.value, fallbackId: fallbackId.value, maxAgents: subAgentLimit.value })
 }
 
 function modelsFor(providerId: string): string[] {
@@ -37,7 +41,7 @@ function modelsFor(providerId: string): string[] {
 }
 
 function addSubAgent() {
-  if (subAgents.value.length >= 20) return
+  if (subAgents.value.length >= subAgentLimit.value) return
   const provider = configuredProviders.value[0]
   const id = `sub-${Date.now().toString(36)}-${subAgents.value.length + 1}`
   subAgents.value.push({
@@ -52,6 +56,15 @@ function addSubAgent() {
 function updateSubAgentProvider(agent: SubAgentConfig) {
   const models = modelsFor(agent.providerId)
   if (!models.includes(agent.model)) agent.model = models[0] ?? ''
+}
+
+function setSubAgentProvider(agent: SubAgentConfig, providerId: string) {
+  agent.providerId = providerId
+  updateSubAgentProvider(agent)
+}
+
+function modelOptions(providerId: string) {
+  return modelsFor(providerId).map(model => ({ value: model, label: model }))
 }
 
 function removeSubAgent(id: string) {
@@ -82,10 +95,15 @@ async function saveSubAgents() {
     subAgentError.value = '请设置一个保底子代理'
     return
   }
+  if (!Number.isInteger(subAgentLimit.value) || subAgentLimit.value < subAgents.value.length || subAgentLimit.value > 30) {
+    subAgentError.value = `子代理上限必须在 ${Math.max(1, subAgents.value.length)} 到 30 之间`
+    return
+  }
   savingSubAgents.value = true
   const ok = await config.saveSubAgentSettings({
     agents: subAgents.value.map(agent => ({ ...agent, description: agent.description?.trim() })),
     fallbackId: fallbackId.value,
+    maxAgents: subAgentLimit.value,
   })
   savingSubAgents.value = false
   if (!ok) {
@@ -129,7 +147,7 @@ function backToDashboard() {
     <main class="body">
       <div class="tabs" role="tablist">
         <button :class="{ on: tab === 'providers' }" @click="tab = 'providers'">主模型</button>
-        <button :class="{ on: tab === 'subagents' }" @click="tab = 'subagents'">子代理 <span>{{ subAgents.length }}/20</span></button>
+        <button :class="{ on: tab === 'subagents' }" @click="tab = 'subagents'">子代理 <span>{{ subAgents.length }}/{{ subAgentLimit }}</span></button>
       </div>
       <p v-if="config.usingMock" class="banner">
         <CoomiIcon name="alert" :size="15" />
@@ -160,6 +178,11 @@ function backToDashboard() {
 
       <section v-if="tab === 'subagents'" class="subagent-panel">
         <p class="subagent-note">从已配置的提供商中选择模型。保底子代理始终置顶，未指定子代理时自动使用它。</p>
+        <div class="agent-limit">
+          <span><strong>子代理上限</strong><small>最多可配置 30 个</small></span>
+          <input v-model.number="subAgentLimit" type="range" :min="Math.max(1, subAgents.length)" max="30" step="1" aria-label="子代理上限" />
+          <output>{{ subAgentLimit }}</output>
+        </div>
         <p v-if="subAgentMessage" class="notice ok">{{ subAgentMessage }}</p>
         <p v-if="subAgentError" class="notice err">{{ subAgentError }}</p>
         <div v-if="configuredProviders.length === 0" class="empty-state">
@@ -176,13 +199,13 @@ function backToDashboard() {
               <button class="icon-btn remove" type="button" aria-label="删除子代理" @click="removeSubAgent(agent.id)"><CoomiIcon name="trash" :size="15" /></button>
             </div>
             <div class="agent-selects">
-              <label><span>提供商</span><select v-model="agent.providerId" @change="updateSubAgentProvider(agent)"><option v-for="provider in configuredProviders" :key="provider.id" :value="provider.id">{{ provider.name }}</option></select></label>
-              <label><span>模型</span><select v-model="agent.model"><option v-for="model in modelsFor(agent.providerId)" :key="model" :value="model">{{ model }}</option></select></label>
+              <label><span>提供商</span><ThemeSelect :model-value="agent.providerId" :options="configuredProviderOptions" title="选择子代理提供商" aria-label="子代理提供商" @update:model-value="setSubAgentProvider(agent, $event)" /></label>
+              <label><span>模型</span><ThemeSelect :model-value="agent.model" :options="modelOptions(agent.providerId)" title="选择子代理模型" aria-label="子代理模型" @update:model-value="agent.model = $event" /></label>
             </div>
             <input v-model="agent.description" class="description" maxlength="500" placeholder="用途或模型描述（可选）" />
           </article>
         </div>
-        <button v-if="configuredProviders.length && subAgents.length < 20" class="add-agent" type="button" @click="addSubAgent"><CoomiIcon name="plus" :size="16" />添加子代理</button>
+        <button v-if="configuredProviders.length && subAgents.length < subAgentLimit" class="add-agent" type="button" @click="addSubAgent"><CoomiIcon name="plus" :size="16" />添加子代理</button>
         <button class="save-agent" type="button" :disabled="savingSubAgents || !subAgentDirty" @click="saveSubAgents">{{ savingSubAgents ? '保存中...' : '保存子代理配置' }}</button>
       </section>
     </main>
@@ -226,6 +249,12 @@ function backToDashboard() {
 .status.current { color: var(--blue); background: var(--blue-soft); }
 .arrow { flex-shrink: 0; color: var(--text-3); }
 .subagent-note { margin:0 3px 11px; color:var(--text-3); font-size:12px; line-height:1.6; }
+.agent-limit { display:grid; grid-template-columns:minmax(108px, auto) minmax(0,1fr) 34px; align-items:center; gap:10px; min-height:58px; margin-bottom:10px; padding:8px 12px; border:1px solid var(--border); border-radius:8px; background:var(--bg); }
+.agent-limit > span { display:flex; flex-direction:column; line-height:1.35; }
+.agent-limit strong { color:var(--text); font-size:13px; }
+.agent-limit small { color:var(--text-3); font-size:10px; }
+.agent-limit input { width:100%; accent-color:var(--blue); }
+.agent-limit output { display:grid; place-items:center; width:34px; height:30px; border-radius:6px; background:var(--blue-soft); color:var(--blue); font-size:12px; font-weight:700; font-variant-numeric:tabular-nums; }
 .notice { margin:0 0 10px; padding:9px 11px; border-radius:var(--r-md); font-size:12.5px; line-height:1.5; }
 .notice.ok { color:var(--ok); background:var(--ok-soft); }
 .notice.err { color:var(--danger); background:var(--danger-soft); }
@@ -243,7 +272,7 @@ function backToDashboard() {
 .remove { width:30px; height:30px; color:var(--danger); }
 .agent-selects { display:grid; grid-template-columns:minmax(0, .8fr) minmax(0, 1.2fr); gap:7px; margin-top:9px; }
 .agent-selects label { display:flex; min-width:0; flex-direction:column; gap:4px; color:var(--text-3); font-size:10px; }
-.agent-selects select, .description { width:100%; min-width:0; min-height:36px; padding:0 9px; border:1px solid var(--border); border-radius:5px; background:var(--bg); color:var(--text); font-size:12px; }
+.agent-selects .select-trigger, .description { width:100%; min-width:0; min-height:36px; padding:0 9px; border:1px solid var(--border); border-radius:5px; background:var(--fill); color:var(--text); font-size:12px; }
 .description { margin-top:7px; }
 .add-agent, .save-agent { display:flex; align-items:center; justify-content:center; gap:6px; width:100%; min-height:42px; margin-top:10px; border-radius:8px; font-size:13px; }
 .add-agent { border:1px solid var(--border); background:var(--bg); color:var(--blue); }

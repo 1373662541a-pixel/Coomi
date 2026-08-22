@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import PageHead from '@/components/PageHead.vue'
 import CoomiIcon from '@/components/CoomiIcon.vue'
 import ModelPickerSheet from '@/components/ModelPickerSheet.vue'
+import ThemeSelect, { type ThemeSelectOption } from '@/components/ThemeSelect.vue'
 import {
   BUILTIN_PROVIDER_PRESETS,
   useConfigStore,
@@ -53,8 +54,15 @@ const pendingDelete = ref(false)
 const pendingClear = ref(false)
 const pendingBack = ref(false)
 const customContextWindow = ref(64)
+const expandedHelpModel = ref<string | null>(null)
 const CONTEXT_WINDOW_PRESETS = [128000, 256000, 512000, 1048576]
 const SAVE_FEEDBACK_MIN_MS = 200
+const REASONING_LEVELS = [
+  { key: 'low', label: '低' },
+  { key: 'medium', label: '中' },
+  { key: 'high', label: '高' },
+  { key: 'xhigh', label: '超高' },
+] as const
 
 const providerId = computed(() => {
   const value = route.params.id
@@ -78,6 +86,11 @@ const protocols: { value: ProviderProtocol; label: string }[] = [
   { value: 'openai_responses', label: 'OpenAI Responses' },
   { value: 'anthropic_messages', label: 'Anthropic Messages' },
   { value: 'gemini_native', label: 'Google Gemini (Native)' },
+]
+const protocolOptions: ThemeSelectOption[] = protocols.map(item => ({ ...item }))
+const providerContextOptions: ThemeSelectOption[] = [
+  ...CONTEXT_WINDOW_PRESETS.map(value => ({ value: String(value), label: formatContextWindow(value) })),
+  { value: '0', label: '自定义' },
 ]
 
 function normalizeProtocol(value?: string): ProviderProtocol {
@@ -160,6 +173,111 @@ function modelParams(model: string): ModelParameters {
   if (!draft.value) return {}
   draft.value.modelParameters[model] ||= {}
   return draft.value.modelParameters[model]
+}
+
+function updateOptionalNumber(model: string, key: 'temperature' | 'topK', event: Event) {
+  const input = event.target as HTMLInputElement
+  const params = modelParams(model)
+  if (input.value.trim() === '') {
+    delete params[key]
+    return
+  }
+  const value = Number(input.value)
+  if (!Number.isFinite(value)) return
+  params[key] = key === 'temperature'
+    ? Math.max(0, Math.min(2, value))
+    : Math.max(1, Math.min(65536, Math.round(value)))
+}
+
+function updateProviderContext(value: string) {
+  if (!draft.value) return
+  draft.value.contextWindow = Number(value)
+}
+
+function modelContextOptions(model: string): ThemeSelectOption[] {
+  return [
+    { value: 'default', label: `默认 ${formatContextWindow(draft.value?.contextWindow || 256000)}` },
+    ...CONTEXT_WINDOW_PRESETS.map(value => ({ value: String(value), label: formatContextWindow(value) })),
+    { value: 'custom', label: '自定义' },
+  ]
+}
+
+function updateModelContextSelection(model: string, value: string) {
+  updateModelContextWindow(model, { target: { value } } as unknown as Event)
+}
+
+function reasoningFieldOptions(): ThemeSelectOption[] {
+  switch (draft.value?.protocol) {
+    case 'openai_responses':
+      return [
+        { value: 'reasoning.effort', label: 'reasoning.effort', note: 'OpenAI Responses 标准字段' },
+        { value: 'reasoning_effort', label: 'reasoning_effort', note: '部分兼容服务使用' },
+      ]
+    case 'anthropic_messages':
+      return [
+        { value: 'thinking.budget_tokens', label: 'thinking.budget_tokens', note: 'Anthropic 扩展思考预算' },
+      ]
+    case 'gemini_native':
+      return [
+        { value: 'generationConfig.thinkingConfig.thinkingLevel', label: 'thinkingLevel', note: 'Gemini 推理级别' },
+        { value: 'generationConfig.thinkingConfig.thinkingBudget', label: 'thinkingBudget', note: 'Gemini 推理 token 预算' },
+      ]
+    default:
+      return [
+        { value: 'reasoning_effort', label: 'reasoning_effort', note: 'OpenAI Compatible 常用字段' },
+        { value: 'reasoning.effort', label: 'reasoning.effort', note: 'Responses / 部分兼容服务' },
+        { value: 'thinking.budget_tokens', label: 'thinking.budget_tokens', note: 'Anthropic 风格预算字段' },
+        { value: 'enable_thinking', label: 'enable_thinking', note: '部分国产模型布尔字段' },
+      ]
+  }
+}
+
+function defaultReasoningField(): string {
+  return reasoningFieldOptions()[0]?.value ?? 'reasoning_effort'
+}
+
+function defaultReasoningMapping(field: string): NonNullable<ModelParameters['reasoningMapping']> {
+  if (field.endsWith('budget_tokens') || field.endsWith('thinkingBudget')) {
+    return { low: '1024', medium: '4096', high: '8192', xhigh: '16384' }
+  }
+  if (field.endsWith('thinkingLevel')) {
+    return { low: 'LOW', medium: 'MEDIUM', high: 'HIGH', xhigh: 'HIGH' }
+  }
+  if (field === 'enable_thinking') {
+    return { low: 'true', medium: 'true', high: 'true', xhigh: 'true' }
+  }
+  return { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh' }
+}
+
+function setReasoningField(model: string, field: string) {
+  const params = modelParams(model)
+  params.reasoningField = field
+  params.reasoningMapping = defaultReasoningMapping(field)
+}
+
+function updateReasoningMapping(model: string, level: 'low' | 'medium' | 'high' | 'xhigh', event: Event) {
+  ensureReasoningMapping(model)
+  const params = modelParams(model)
+  params.reasoningMapping![level] = (event.target as HTMLInputElement).value.trim()
+}
+
+function ensureReasoningMapping(model: string) {
+  const params = modelParams(model)
+  if (!params.reasoningField) params.reasoningField = defaultReasoningField()
+  if (!params.reasoningMapping) params.reasoningMapping = defaultReasoningMapping(params.reasoningField)
+}
+
+function toggleModelHelp(model: string) {
+  if (expandedHelpModel.value === model) {
+    expandedHelpModel.value = null
+    return
+  }
+  ensureReasoningMapping(model)
+  expandedHelpModel.value = model
+}
+
+function reasoningSummary(model: string): string {
+  return modelParams(model).reasoningField ? '已映射' : '协议默认'
 }
 function setOverride(model: string, key: keyof CapabilityOverride, event: Event) {
   if (!draft.value) return
@@ -365,6 +483,16 @@ function removeModel(model: string) {
   const windows = { ...draft.value.modelContextWindows }
   delete windows[model]
   draft.value.modelContextWindows = windows
+  const descriptions = { ...draft.value.modelDescriptions }
+  const parameters = { ...draft.value.modelParameters }
+  const capabilities = { ...draft.value.capabilityOverrides }
+  delete descriptions[model]
+  delete parameters[model]
+  delete capabilities[model]
+  draft.value.modelDescriptions = descriptions
+  draft.value.modelParameters = parameters
+  draft.value.capabilityOverrides = capabilities
+  if (expandedHelpModel.value === model) expandedHelpModel.value = null
 }
 
 async function clearBuiltin() {
@@ -466,19 +594,25 @@ function openModelConfig() {
         </label>
         <label class="field">
           <span>协议</span>
-          <select v-model="draft.protocol" class="input">
-            <option v-for="item in protocols" :key="item.value" :value="item.value">{{ item.label }}</option>
-          </select>
+          <ThemeSelect
+            class="form-select"
+            :model-value="draft.protocol"
+            :options="protocolOptions"
+            title="选择提供商协议"
+            aria-label="提供商协议"
+            @update:model-value="draft.protocol = normalizeProtocol($event)"
+          />
         </label>
         <label class="field">
           <span>默认上下文窗口</span>
-          <select v-model.number="draft.contextWindow" class="input">
-            <option :value="128000">128k</option>
-            <option :value="256000">256k</option>
-            <option :value="512000">512k</option>
-            <option :value="1048576">1024k</option>
-            <option :value="0">自定义</option>
-          </select>
+          <ThemeSelect
+            class="form-select"
+            :model-value="String(draft.contextWindow)"
+            :options="providerContextOptions"
+            title="选择默认上下文窗口"
+            aria-label="默认上下文窗口"
+            @update:model-value="updateProviderContext"
+          />
           <input v-if="draft.contextWindow === 0" v-model.number="customContextWindow" class="input" type="number" min="32" max="1048" placeholder="单位：k" />
         </label>
         <label class="toggle"><input v-model="draft.supportsWebSearch" type="checkbox" /><span>使用供应商原生 Web Search</span></label>
@@ -513,26 +647,26 @@ function openModelConfig() {
             <div class="model-head">
               <code :title="model">{{ model }}</code>
               <input class="model-description" v-model="draft.modelDescriptions[model]" placeholder="模型描述（可选）" />
+              <button class="icon-btn delete-model" type="button" aria-label="移除模型" @click="removeModel(model)"><CoomiIcon name="trash" :size="14" /></button>
             </div>
             <div class="model-controls">
-              <label class="model-param"><span>温度</span>
-                <input type="number" min="0" max="2" step="0.1" placeholder="默认" v-model.number="modelParams(model).temperature" />
+              <label class="model-param"><span>温度<small>默认 1.0</small></span>
+                <input type="number" min="0" max="2" step="0.1" placeholder="1.0" :value="modelParams(model).temperature ?? ''" @input="updateOptionalNumber(model, 'temperature', $event)" />
               </label>
-              <label class="model-param"><span>推理</span>
-                <select v-model="modelParams(model).reasoningEffort"><option value="">默认</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">超高</option></select>
+              <label class="model-param"><span>Top-k<small>默认不发送</small></span>
+                <input type="number" min="1" max="65536" step="1" placeholder="默认" :value="modelParams(model).topK ?? ''" @input="updateOptionalNumber(model, 'topK', $event)" />
               </label>
+              <div class="model-param"><span>推理映射<small>Coomi 四档</small></span><button type="button" class="mapping-trigger" @click="toggleModelHelp(model)">{{ reasoningSummary(model) }}</button></div>
               <label class="model-param model-context"><span>上下文窗口</span>
                 <span class="context-fields">
-                  <select
+                  <ThemeSelect
                     class="model-window"
-                    :value="modelContextSelection(model)"
+                    :model-value="modelContextSelection(model)"
+                    :options="modelContextOptions(model)"
+                    :title="`${model} 上下文窗口`"
                     :aria-label="`${model} 上下文窗口`"
-                    @change="updateModelContextWindow(model, $event)"
-                  >
-                    <option value="default">默认 {{ formatContextWindow(draft.contextWindow) }}</option>
-                    <option v-for="value in CONTEXT_WINDOW_PRESETS" :key="value" :value="value">{{ formatContextWindow(value) }}</option>
-                    <option value="custom">自定义</option>
-                  </select>
+                    @update:model-value="updateModelContextSelection(model, $event)"
+                  />
                   <input
                     v-if="modelContextSelection(model) === 'custom'"
                     class="model-window-custom"
@@ -545,8 +679,29 @@ function openModelConfig() {
                   />
                 </span>
               </label>
-              <button class="icon-btn danger-icon" aria-label="移除模型" @click="removeModel(model)"><CoomiIcon name="close" :size="15" /></button>
+              <button class="parameter-help" type="button" :class="{ on: expandedHelpModel === model }" aria-label="参数调节指南" @click="toggleModelHelp(model)">?</button>
             </div>
+            <section v-if="expandedHelpModel === model" class="parameter-guide">
+              <div class="guide-title"><strong>参数建议与推理映射</strong><span>留空即使用模型默认值</span></div>
+              <p>温度越低越稳定，代码与工具任务建议 0–0.4；创意任务可使用 0.7–1.2。Top-k 会限制候选词范围，仅在提供商支持时填写。</p>
+              <div class="reasoning-field">
+                <span>原模型推理字段</span>
+                <ThemeSelect
+                  :model-value="modelParams(model).reasoningField || defaultReasoningField()"
+                  :options="reasoningFieldOptions()"
+                  title="选择原模型推理字段"
+                  aria-label="原模型推理字段"
+                  @update:model-value="setReasoningField(model, $event)"
+                />
+              </div>
+              <div class="mapping-grid">
+                <label v-for="level in REASONING_LEVELS" :key="level.key">
+                  <span>Coomi {{ level.label }}</span>
+                  <input :value="modelParams(model).reasoningMapping?.[level.key] || ''" :placeholder="level.key" @input="updateReasoningMapping(model, level.key, $event)" />
+                </label>
+              </div>
+              <p class="mapping-note">对话设置中的推理档位会按上表转换后写入 <code>{{ modelParams(model).reasoningField }}</code>；自动档不发送该字段。</p>
+            </section>
             <div class="capability-overrides">
               <span>模型能力</span>
               <label><input type="checkbox" :checked="capabilityEnabled(model, 'text')" @change="setOverride(model, 'text', $event)" />文本</label>
@@ -604,6 +759,7 @@ function openModelConfig() {
 .input::placeholder { color: var(--text-3); }
 .input:focus { border-color: var(--blue-border); outline: none; }
 .input[readonly] { background: var(--fill); color: var(--text-2); }
+.form-select { min-height: 44px; padding: 0 12px; border-color: var(--border); border-radius: var(--r-md); background: var(--bg); color: var(--text); font-size: 14px; }
 .input-action { display: flex; align-items: stretch; gap: 7px; }
 .input-action .input { flex: 1; min-width: 0; }
 .input-action > button { display: grid; place-items: center; flex: 0 0 45px; border-radius: var(--r-sm); background: var(--fill-strong); color: var(--blue); }
@@ -616,14 +772,19 @@ function openModelConfig() {
 .discover { flex-shrink: 0; min-height: 44px; padding: 0 12px; }
 .subnote { margin: 8px 3px 12px; color: var(--text-3); font-size: 12px; line-height: 1.55; }
 .model-list { overflow: hidden; border-radius: var(--r-card); background: var(--bg); box-shadow: var(--shadow-1); }
-.model-item { min-height: 52px; padding: 10px 11px; }
-.model-item + .model-item { border-top: 1px solid var(--border); }
-.model-head { display: grid; grid-template-columns: minmax(0, 1fr) minmax(84px, 38%); align-items: center; gap: 7px; }
+.model-item { min-height: 52px; padding: 11px; }
+.model-item + .model-item { border-top: 2px solid var(--border-strong); }
+.model-head { display: grid; grid-template-columns: minmax(0, 1fr) minmax(84px, 38%) 28px; align-items: center; gap: 7px; }
 .model-head code { min-width: 0; overflow: hidden; color: var(--text); font-family: var(--font-mono); font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
-.model-description { width: 100%; min-width: 0; min-height: 28px; padding: 0 7px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--text-2); font-size: 10.5px; }
-.model-controls { display: grid; grid-template-columns: 64px 76px minmax(0, 1fr) 28px; align-items: end; gap: 6px; margin-top: 9px; }
+.model-description { width: 100%; min-width: 0; min-height: 30px; padding: 0 8px; border: 1px solid var(--border); border-radius: 5px; background: var(--fill); color: var(--text-2); font-size: 10.5px; }
+.delete-model { width: 28px; height: 30px; border-radius:50%; color: var(--danger); }
+.delete-model:active { background:var(--danger-soft); }
+.model-controls { display: grid; grid-template-columns: minmax(50px,.72fr) minmax(54px,.78fr) minmax(62px,.9fr) minmax(78px,1.25fr) 24px; align-items: end; gap: 5px; margin-top: 10px; }
 .model-param { display: flex; min-width: 0; flex-direction: column; gap: 3px; color: var(--text-3); font-size: 9.5px; }
-.model-param input, .model-param select { width: 100%; min-width: 0; min-height: 30px; padding: 0 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--text-2); font-size: 11px; }
+.model-param > span:first-child { display:flex; min-width:0; height:26px; flex-direction:column; justify-content:flex-end; line-height:1.15; white-space:nowrap; }
+.model-param small { display:block; overflow:hidden; color:var(--text-3); font-size:7.5px; font-weight:400; text-overflow:ellipsis; }
+.model-param input { width: 100%; min-width: 0; min-height: 30px; padding: 0 6px; border: 1px solid var(--border); border-radius: 5px; background: var(--fill); color: var(--text-2); font-size: 10.5px; }
+.mapping-trigger { width:100%; min-width:0; min-height:30px; padding:0 5px; overflow:hidden; border:1px solid var(--border); border-radius:5px; background:var(--fill); color:var(--text-2); font-size:10px; text-overflow:ellipsis; white-space:nowrap; }
 .context-fields { display: flex; min-width: 0; gap: 4px; }
 .capability-overrides { display: grid; grid-template-columns: auto repeat(3, minmax(0, 1fr)); align-items: center; gap: 8px; margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--border); color: var(--text-2); font-size: 11px; }
 .capability-overrides > span { color: var(--text-3); font-size: 9.5px; }
@@ -632,7 +793,20 @@ function openModelConfig() {
 .model-categories { margin-top: 0; }
 .model-window { flex: 1; }
 .model-window-custom { flex: 0 0 45px; }
-.danger-icon { width: 28px; height: 30px; color: var(--danger); }
+.parameter-help { display:grid; place-items:center; width:24px; height:24px; margin-bottom:3px; border:1px solid var(--border-strong); border-radius:50%; background:var(--fill); color:var(--text-3); font-size:12px; font-weight:700; }
+.parameter-help.on { border-color:var(--blue-border); background:var(--blue-soft); color:var(--blue); }
+.parameter-guide { margin-top:9px; padding:10px; border:1px solid var(--border); border-radius:7px; background:var(--fill); color:var(--text-2); }
+.guide-title { display:flex; align-items:baseline; justify-content:space-between; gap:8px; }
+.guide-title strong { color:var(--text); font-size:12px; }
+.guide-title span { color:var(--text-3); font-size:9.5px; }
+.parameter-guide > p { margin:5px 0 0; font-size:10.5px; line-height:1.55; }
+.reasoning-field { display:grid; grid-template-columns:92px minmax(0,1fr); align-items:center; gap:7px; margin-top:9px; }
+.reasoning-field > span { font-size:10.5px; }
+.mapping-grid { display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); gap:5px; margin-top:8px; }
+.mapping-grid label { display:flex; min-width:0; flex-direction:column; gap:3px; color:var(--text-3); font-size:8.5px; }
+.mapping-grid input { width:100%; min-width:0; height:29px; padding:0 5px; border:1px solid var(--border); border-radius:5px; background:var(--bg); color:var(--text); font-size:10px; }
+.parameter-guide .mapping-note { color:var(--text-3); }
+.mapping-note code { overflow-wrap:anywhere; color:var(--blue); font-family:var(--font-mono); }
 .empty { padding: 20px 12px; text-align: center; color: var(--text-3); font-size: 13px; }
 .danger-area { display: flex; justify-content: center; margin-top: 24px; }
 .danger-link { min-height: 36px; padding: 0 12px; color: var(--danger); font-size: 13px; }

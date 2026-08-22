@@ -84,6 +84,8 @@ public class CoomiDashboardActivity extends Activity {
     private View mStorageSettingsButton;
     private View mAppearanceButton;
     private View mBackupButton;
+    private View mMaintenanceButton;
+    private View mUsageButton;
     private View mFeedbackButton;
     private final ArrayList<Uri> mFeedbackImageUris = new ArrayList<>();
     private TextView mFeedbackImageCount;
@@ -146,6 +148,8 @@ public class CoomiDashboardActivity extends Activity {
         mCheckUpdateDesc.setText(getString(R.string.coomi_dash_check_update_desc, BuildConfig.VERSION_NAME));
         checkUpdateSilently();
         mBackupButton = findViewById(R.id.btn_backup_data);
+        mMaintenanceButton = findViewById(R.id.btn_maintenance);
+        mUsageButton = findViewById(R.id.btn_usage);
         mFeedbackButton = findViewById(R.id.btn_feedback);
         mPermissionSettingsButton = findViewById(R.id.btn_permission_settings);
         mStorageSettingsButton = findViewById(R.id.btn_storage_settings);
@@ -174,6 +178,8 @@ public class CoomiDashboardActivity extends Activity {
             startActivity(new Intent(this, CoomiAppearanceActivity.class)));
         mBackupButton.setOnClickListener(v ->
             startActivity(new Intent(this, CoomiBackupActivity.class)));
+        mMaintenanceButton.setOnClickListener(v -> openCoomiRoute("#/maintenance"));
+        mUsageButton.setOnClickListener(v -> openCoomiRoute("#/usage"));
         mFeedbackButton.setOnClickListener(v -> showFeedbackDialog());
         mPermissionSettingsButton.setOnClickListener(v -> openPermissionSettings());
         mStorageSettingsButton.setOnClickListener(v -> openStorageSettings());

@@ -124,28 +124,23 @@ impl CoreTools {
 
     pub fn with_config_home(mut self, home: PathBuf) -> Self {
         let _ = CatalogInstaller::new(&home).install_runtime_environment_skill();
+        let legacy = LegacyTermuxBackend::from_coomi_home(&home);
         self.policy = self.policy.clone().with_allowed_roots([
             home.join("runtime-v2").join("home"),
             home.join("runtime-v2").join("tmp"),
         ]);
         self.path_map = RuntimePathMap::new(self.cwd.clone())
             .with_runtime_root(home.join("runtime-v2"))
-            .with_termux(
-                home.join("files").join("home"),
-                home.join("files").join("usr"),
-            );
-        let prefix = home.join("files").join("usr");
-        let legacy_home = home.join("files").join("home");
+            .with_termux(legacy.home.clone(), legacy.prefix.clone());
+        let prefix = legacy.prefix.clone();
+        let legacy_home = legacy.home.clone();
         let mut processes =
             ProcessManager::default().with_runtime_backend(Arc::new(LegacyTermuxBackend {
-                prefix,
-                home: legacy_home,
+                prefix: prefix.clone(),
+                home: legacy_home.clone(),
             }));
         if let Ok(manager) = RuntimeManager::open(&home)
-            && let Ok(backend) = manager.backend(
-                home.join("files").join("usr"),
-                home.join("files").join("home"),
-            )
+            && let Ok(backend) = manager.backend(prefix, legacy_home)
             && backend.kind() == RuntimeBackendKind::ProotLinux
         {
             processes = processes.with_runtime_backend(Arc::from(backend));
@@ -1044,6 +1039,14 @@ impl CoreTools {
             .as_ref()
             .map(|home| home.join("runtime-v2").join("state.json").is_file())
             .unwrap_or(false);
+        let termux = self
+            .config_home
+            .as_ref()
+            .map(|home| LegacyTermuxBackend::from_coomi_home(home));
+        let termux_shell = termux
+            .as_ref()
+            .map(|backend| backend.prefix.join("bin/sh"));
+        let termux_available = termux_shell.as_ref().is_some_and(|path| path.is_file());
         let ssh = self
             .path_map
             .host_runtime_home()
@@ -1053,7 +1056,13 @@ impl CoreTools {
             serde_json::json!({
                 "environments": {
                     "host": {"available": true, "role": "Android file APIs and exports"},
-                    "termux": {"available": self.config_home.is_some(), "role": "Android-native tools"},
+                    "termux": {
+                        "available": termux_available,
+                        "role": "Android-native tools",
+                        "prefix": termux.as_ref().map(|backend| backend.prefix.display().to_string()),
+                        "home": termux.as_ref().map(|backend| backend.home.display().to_string()),
+                        "shell": termux_shell.map(|path| path.display().to_string())
+                    },
                     "proot": {"available": proot, "role": "Linux userland tools"}
                 },
                 "paths": {

@@ -6,7 +6,7 @@
  * ⊕ 展开指令面板：Android SAF 文件导入 + 可滚动的斜杠指令列表。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { PERMISSION_MODES, useConfigStore } from '@/stores/config'
+import { PERMISSION_MODES, REASONING_EFFORTS, useConfigStore } from '@/stores/config'
 import { useSessionStore } from '@/stores/session'
 import { useRouter } from 'vue-router'
 import CoomiIcon from './CoomiIcon.vue'
@@ -21,13 +21,14 @@ const SLASH_COMMANDS = [
   { name: '/plan', desc: '进入计划模式' },
   { name: '/mcp', desc: '管理 MCP 服务器' },
   { name: '/skills', desc: '查看可用技能' },
-  { name: '/memory', desc: '查看 Coomi 内建持久记忆（非 MCP/Skill）' },
+  { name: '/memory', desc: '查看 Coomi 内建持久记忆' },
   { name: '/compact', desc: '立即压缩当前上下文' },
 ]
 
 const text = ref('')
 const textarea = ref<HTMLTextAreaElement | null>(null)
 const quickOpen = ref(false)
+const lifeStatsOpen = ref(false)
 const transferText = ref('')
 const transferProgress = ref(0)
 const textareaScrollable = ref(false)
@@ -98,6 +99,7 @@ async function insertSlash(cmd: string) {
 }
 
 function toggleQuick() { quickOpen.value = !quickOpen.value }
+function toggleLifeStats() { lifeStatsOpen.value = !lifeStatsOpen.value }
 
 function importFiles() { quickOpen.value = false; window.CoomiAndroid?.importFiles?.() }
 function authorizeFolder() { quickOpen.value = false; window.CoomiAndroid?.authorizeFolder?.() }
@@ -121,7 +123,7 @@ function onFileExported(event: Event) {
 }
 function onPrefillDraft(event: Event) {
   const detail = (event as CustomEvent<{ sessionId?: string; text?: string }>).detail ?? {}
-  if (detail.sessionId !== session.sessionId || typeof detail.text !== 'string') return
+  if ((detail.sessionId && detail.sessionId !== session.sessionId) || typeof detail.text !== 'string') return
   text.value = detail.text
   void nextTick(autoGrow)
 }
@@ -178,8 +180,10 @@ watch(text, () => {
     <div v-if="transferText" class="transfer">
       <span>{{ transferText }}</span><progress :value="transferProgress" max="100" />
     </div>
-    <div v-if="quickOpen" class="quick-scrim" @click="quickOpen = false" />
+    <div v-if="quickOpen || lifeStatsOpen" class="quick-scrim" @click="quickOpen = false; lifeStatsOpen = false" />
     <div v-if="quickOpen" class="quick">
+      <p class="qhead reasoning-head">推理强度</p>
+      <div class="reasoning-options"><button v-for="item in REASONING_EFFORTS" :key="item.value" :class="{ selected: config.reasoningEffort === item.value }" @click="session.setReasoningEffort(item.value)">{{ item.label }}</button></div>
       <p class="qhead">指令</p>
       <div v-if="hasNative" class="file-actions">
         <button class="qchip file" @click="importFiles"><CoomiIcon name="fileRead" :size="15" />选择文件</button>
@@ -193,9 +197,24 @@ watch(text, () => {
     </div>
 
     <div class="field" :class="{ busy: session.isBusy }">
-      <span v-if="config.digitalLifeEnabled" class="life-orbit" aria-label="数字生命模式">
+      <button v-if="config.digitalLifeEnabled" class="life-orbit" aria-label="查看数字生命统计" title="查看生命统计" @click="toggleLifeStats">
         <i class="orbit outer" /><i class="orbit inner" />
-      </span>
+      </button>
+      <div v-if="lifeStatsOpen" class="life-stats-card">
+        <header><span>生命状态</span><button aria-label="关闭" @click="lifeStatsOpen = false"><CoomiIcon name="close" :size="14" /></button></header>
+        <div class="life-waveform" aria-label="数字生命动态状态波形">
+          <svg viewBox="0 0 320 100" preserveAspectRatio="none" aria-hidden="true">
+            <path class="wave wave-upper upper-back" d="M0 50C20 47 26 28 46 29C65 30 66 45 84 39C102 33 101 15 117 12C133 9 136 38 153 39C169 40 177 29 191 34C207 40 210 48 225 48C243 48 247 30 264 32C282 34 285 45 301 43C310 42 316 48 320 50V50H0Z" />
+            <path class="wave wave-upper upper-main" d="M0 50C17 46 27 17 47 20C68 23 68 43 87 34C104 26 103 5 119 4C137 3 137 35 153 36C169 37 177 21 192 29C207 37 209 48 225 47C242 46 248 20 264 24C281 28 283 45 300 40C309 38 316 47 320 50V50H0Z" />
+            <path class="wave wave-upper upper-front" d="M0 50C22 48 33 35 49 36C65 37 72 46 87 42C104 37 105 23 119 20C135 17 139 43 155 44C171 45 179 35 193 39C208 43 214 49 228 49C245 49 250 37 265 38C282 39 291 48 304 46C312 45 317 49 320 50V50H0Z" />
+            <path class="wave wave-lower lower-back" d="M0 50C19 53 26 73 46 71C65 69 66 55 84 61C102 67 101 85 117 88C133 91 136 62 153 61C169 60 177 71 191 66C207 60 210 52 225 52C243 52 247 70 264 68C282 66 285 55 301 57C310 58 316 52 320 50V50H0Z" />
+            <path class="wave wave-lower lower-main" d="M0 50C17 54 27 83 47 80C68 77 68 57 87 66C104 74 103 95 119 96C137 97 137 65 153 64C169 63 177 79 192 71C207 63 209 52 225 53C242 54 248 80 264 76C281 72 283 55 300 60C309 62 316 53 320 50V50H0Z" />
+            <path class="wave wave-lower lower-front" d="M0 50C22 52 33 65 49 64C65 63 72 54 87 58C104 63 105 77 119 80C135 83 139 57 155 56C171 55 179 65 193 61C208 57 214 51 228 51C245 51 250 63 265 62C282 61 291 52 304 54C312 55 317 51 320 50V50H0Z" />
+            <path class="wave-baseline" d="M0 50H320" />
+          </svg>
+        </div>
+        <div class="life-stats-grid"><span>当前模式<strong>数字生命</strong></span><span>推理档位<strong>{{ REASONING_EFFORTS.find(i => i.value === config.reasoningEffort)?.label }}</strong></span><span>会话状态<strong>{{ session.isBusy ? '运行中' : '待命' }}</strong></span><span>动态流<strong>已连接</strong></span></div>
+      </div>
       <div class="input-clip">
         <textarea
           ref="textarea"
@@ -260,7 +279,7 @@ watch(text, () => {
   width: 27px; height: 27px; margin-left: -13.5px;
   border-radius: 50%; background: var(--bg);
   box-shadow: 0 0 0 3px var(--bg), 0 0 13px color-mix(in srgb, var(--blue) 38%, transparent);
-  pointer-events: none;
+  border: 0; padding: 0; cursor: pointer;
 }
 .orbit { position: absolute; inset: 3px; border-radius: 50%; }
 .orbit.outer {
@@ -319,13 +338,38 @@ watch(text, () => {
 /* 指令面板浮层：可滚动卡片 */
 .quick-scrim { position: fixed; inset: 0; z-index: 1; }
 .quick {
-  position: absolute; z-index: 2; left: 10px; right: 10px; bottom: calc(100% - 6px);
+  position: absolute; z-index: 2; left: 10px; right: 10px; bottom: calc(100% + 4px);
   max-height: min(56vh, 360px); overflow-y: auto;
   padding: 10px 12px 12px;
   border: 1px solid var(--border); border-radius: var(--r-card);
   background: var(--bg); box-shadow: var(--shadow-2);
   animation: coomi-cascade .18s ease both;
 }
+.reasoning-head { margin-top: 3px; }
+.reasoning-options { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:4px; margin-bottom:8px; }
+.reasoning-options button { position:relative; min-width:0; height:32px; overflow:visible; isolation:isolate; border-radius:6px; background:var(--fill); color:var(--text-2); font-size:12px; }
+.reasoning-options button::after { content:''; position:absolute; z-index:-1; inset:-3px; border-radius:9px; opacity:0; background:radial-gradient(circle, color-mix(in srgb,var(--blue) 34%,transparent), transparent 68%); pointer-events:none; }
+.reasoning-options button.selected { background:var(--blue-soft); color:var(--blue); font-weight:650; }
+.reasoning-options button.selected::after { opacity:1; animation:reasoning-ripple 1.8s ease-out infinite; }
+.reasoning-options button:nth-child(2).selected::after { inset:-5px; }
+.reasoning-options button:nth-child(3).selected::after { inset:-8px; }
+.reasoning-options button:nth-child(4).selected::after, .reasoning-options button:nth-child(5).selected::after { inset:-11px; }
+.life-stats-card { position:absolute; z-index:4; left:12px; right:12px; bottom:calc(100% + 10px); overflow:hidden; padding:11px 12px 12px; border:1px solid color-mix(in srgb,var(--blue) 35%,var(--border)); border-radius:13px; background:color-mix(in srgb,var(--bg) 94%,var(--blue-soft)); box-shadow:0 8px 28px color-mix(in srgb,var(--blue) 20%,transparent); animation:life-card-in .2s ease both; }
+.life-stats-card header { display:flex; align-items:center; justify-content:space-between; color:var(--text); font-size:12px; font-weight:650; }
+.life-stats-card header button { display:grid; place-items:center; width:24px; height:24px; border-radius:50%; background:var(--fill); color:var(--text-2); }
+.life-waveform { position:relative; height:64px; margin:9px 1px 10px; overflow:hidden; border-radius:7px; background:linear-gradient(to bottom, color-mix(in srgb,var(--blue-soft) 28%,transparent), transparent 50%, color-mix(in srgb,var(--blue-soft) 20%,transparent)); }
+.life-waveform svg { display:block; width:100%; height:100%; overflow:visible; }
+.wave { transform-origin:160px 50px; vector-effect:non-scaling-stroke; animation:life-wave-breathe 3.4s ease-in-out infinite alternate; }
+.wave-upper { fill:color-mix(in srgb,var(--orange) 48%,var(--bg)); stroke:color-mix(in srgb,var(--orange) 72%,var(--bg)); stroke-width:1.2; }
+.wave-lower { fill:color-mix(in srgb,var(--blue) 52%,var(--bg)); stroke:color-mix(in srgb,var(--blue) 76%,var(--bg)); stroke-width:1.2; }
+.upper-back,.lower-back { opacity:.55; animation-duration:4.5s; animation-delay:-1.1s; }
+.upper-front,.lower-front { opacity:.7; animation-duration:2.8s; animation-delay:-.55s; }
+.wave-baseline { fill:none; stroke:var(--border-strong); stroke-width:1.4; vector-effect:non-scaling-stroke; opacity:.9; }
+.life-stats-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:7px 12px; }.life-stats-grid span { display:flex; justify-content:space-between; gap:8px; color:var(--text-3); font-size:11px; }.life-stats-grid strong { color:var(--text-2); font-weight:600; }
+@keyframes life-card-in { from { opacity:0; transform:translateY(5px) scale(.98); } to { opacity:1; transform:none; } }
+@keyframes reasoning-ripple { 0%,100% { transform:scale(.92); opacity:.35; } 50% { transform:scale(1.12); opacity:.9; } }
+@keyframes life-wave-breathe { 0% { transform:translateX(-1.5px) scaleY(.9); opacity:.72; } 50% { transform:translateX(0) scaleY(1.04); opacity:1; } 100% { transform:translateX(1.5px) scaleY(.94); opacity:.8; } }
+@media (prefers-reduced-motion: reduce) { .wave { animation-duration:8s; } }
 .qhead { margin-bottom: 8px; font-size: 12px; font-weight: 600; color: var(--text-3); }
 .file-actions { display: flex; gap: 7px; margin-bottom: 8px; }
 .qchip.file { display: inline-flex; align-items: center; gap: 5px; color: var(--blue); }

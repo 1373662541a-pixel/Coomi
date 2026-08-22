@@ -59,6 +59,8 @@ pub struct ProviderConfig {
     pub model_context_windows: BTreeMap<String, u64>,
     /// 用户在提供商页面为各模型手动配置的图像理解能力。
     pub model_vision_support: BTreeMap<String, bool>,
+    /// 用户为每个模型配置的采样参数与推理档位映射。
+    pub model_parameters: BTreeMap<String, Value>,
     pub capabilities: coomi_engine::ModelCapabilities,
     pub remote_compaction_mode: RemoteCompactionMode,
 }
@@ -76,6 +78,7 @@ impl std::fmt::Debug for ProviderConfig {
             .field("fast_model", &self.fast_model)
             .field("model_context_windows", &self.model_context_windows)
             .field("model_vision_support", &self.model_vision_support)
+            .field("model_parameters", &self.model_parameters)
             .field("capabilities", &self.capabilities)
             .field("remote_compaction_mode", &self.remote_compaction_mode)
             .finish()
@@ -257,6 +260,17 @@ impl ProviderRegistry {
                         .collect(),
                     model_context_windows: provider.model_context_windows,
                     model_vision_support,
+                    model_parameters: provider
+                        .extra
+                        .get("modelParameters")
+                        .and_then(Value::as_object)
+                        .map(|parameters| {
+                            parameters
+                                .iter()
+                                .map(|(model, value)| (model.clone(), value.clone()))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                     capabilities,
                     remote_compaction_mode: provider.remote_compaction_mode,
                 },

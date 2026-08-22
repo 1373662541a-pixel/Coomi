@@ -19,10 +19,18 @@ export interface ProviderConfig {
   capabilityOverrides?: Record<string, CapabilityOverride>
 }
 
-export interface ModelParameters { temperature?: number; topP?: number; maxOutputTokens?: number; reasoningEffort?: string }
+export interface ModelParameters {
+  temperature?: number
+  topK?: number
+  topP?: number
+  maxOutputTokens?: number
+  reasoningEffort?: string
+  reasoningField?: string
+  reasoningMapping?: Partial<Record<'low' | 'medium' | 'high' | 'xhigh', string>>
+}
 export interface CapabilityOverride { text?: boolean; vision?: boolean; image_generation?: boolean; reasoning?: boolean }
 export interface SubAgentConfig { id: string; providerId: string; model: string; description?: string }
-export interface SubAgentSettings { agents: SubAgentConfig[]; fallbackId?: string }
+export interface SubAgentSettings { agents: SubAgentConfig[]; fallbackId?: string; maxAgents: number }
 
 export type ProviderProtocol = 'openai_compatible' | 'openai_responses' | 'anthropic_messages' | 'gemini_native'
 export type ProviderStatus = 'unconfigured' | 'configured' | 'current'
@@ -174,7 +182,7 @@ export const useConfigStore = defineStore('config', () => {
   const reasoningEffort = ref<ReasoningEffort>(REASONING_EFFORTS.some(item => item.value === savedEffort) ? savedEffort! : 'auto')
   const savedRounds = Number(localStorage.getItem('coomi.maxToolRounds'))
   const maxToolRounds = ref([192, 256, 512].includes(savedRounds) ? savedRounds : 192)
-  const subAgentSettings = ref<SubAgentSettings>({ agents: [] })
+  const subAgentSettings = ref<SubAgentSettings>({ agents: [], maxAgents: 20 })
   const connectionSettings = ref<ConnectionSettings>({
     providerRetryCount: readStoredInt('coomi.providerRetryCount', 0, 10, DEFAULT_CONNECTION_SETTINGS.providerRetryCount),
     wsRetryCount: readStoredInt('coomi.wsRetryCount', 0, 30, DEFAULT_CONNECTION_SETTINGS.wsRetryCount),
@@ -335,6 +343,7 @@ export const useConfigStore = defineStore('config', () => {
       subAgentSettings.value = {
         agents: (data.agents ?? []).map(agent => ({ ...agent })),
         fallbackId: data.fallbackId,
+        maxAgents: Math.max(1, Math.min(30, data.maxAgents || 20)),
       }
       return true
     } catch (e) {
@@ -348,6 +357,7 @@ export const useConfigStore = defineStore('config', () => {
       subAgentSettings.value = {
         agents: value.agents.map(agent => ({ ...agent })),
         fallbackId: value.fallbackId,
+        maxAgents: value.maxAgents,
       }
       return true
     }
@@ -356,6 +366,7 @@ export const useConfigStore = defineStore('config', () => {
       subAgentSettings.value = {
         agents: (saved.agents ?? []).map(agent => ({ ...agent })),
         fallbackId: saved.fallbackId,
+        maxAgents: Math.max(1, Math.min(30, saved.maxAgents || value.maxAgents)),
       }
       return true
     } catch (e) {

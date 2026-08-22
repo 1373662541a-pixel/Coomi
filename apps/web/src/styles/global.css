@@ -261,6 +261,8 @@ body {
 #app { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; }
 button { font-family: inherit; cursor: pointer; border: none; background: none; color: inherit; padding: 0; }
 input, textarea { font-family: inherit; color: inherit; }
+select { color-scheme: inherit; }
+select option, select optgroup { background: var(--bg); color: var(--text); }
 a { color: var(--blue); text-decoration: none; }
 h1, h2, h3 { margin: 0; font-weight: 650; }
 

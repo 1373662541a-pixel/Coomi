@@ -13,6 +13,9 @@ import android.os.Handler;
 import android.os.Looper;
 import android.provider.MediaStore;
 import android.view.View;
+import android.view.LayoutInflater;
+import android.view.Window;
+import android.view.WindowManager;
 import android.widget.TextView;
 import android.widget.Toast;
 import android.widget.ArrayAdapter;
@@ -21,6 +24,8 @@ import android.widget.CheckBox;
 import android.widget.Spinner;
 import android.widget.Switch;
 import android.widget.ProgressBar;
+import android.widget.EditText;
+import android.widget.Button;
 
 import androidx.documentfile.provider.DocumentFile;
 
@@ -72,6 +77,7 @@ public class CoomiBackupActivity extends Activity {
     private Spinner mAutoKeep;
     private CheckBox mAutoCharging;
     private CheckBox mAutoWifi;
+    private EditText mSmartPrompt;
     private TextView mAutoStatus;
     private final Handler mStatusHandler = new Handler(Looper.getMainLooper());
     private final Runnable mStatusRefresh = new Runnable() {
@@ -101,6 +107,21 @@ public class CoomiBackupActivity extends Activity {
         findViewById(R.id.btn_backup_back).setOnClickListener(v -> finish());
         mBackupAction.setOnClickListener(v -> backupData());
         mBackupImport.setOnClickListener(v -> pickBackupZip());
+        findViewById(R.id.btn_backup_folder).setOnClickListener(v -> chooseVirtualFolderForBackup());
+        mSmartPrompt = findViewById(R.id.edit_smart_backup_prompt);
+        String defaultPrompt = "请检查 Coomi 当前工作区和配置，识别重要文件与设置，排除缓存和构建产物，生成一份可恢复的备份清单，并执行安全备份。";
+        mSmartPrompt.setText(getPreferences(MODE_PRIVATE).getString("smart_backup_prompt", defaultPrompt));
+        findViewById(R.id.btn_smart_backup_save).setOnClickListener(v -> getPreferences(MODE_PRIVATE).edit().putString("smart_backup_prompt", mSmartPrompt.getText().toString()).apply());
+        findViewById(R.id.btn_smart_backup_reset).setOnClickListener(v -> mSmartPrompt.setText(defaultPrompt));
+        findViewById(R.id.btn_smart_backup_run).setOnClickListener(v -> {
+            String prompt = mSmartPrompt.getText().toString().trim();
+            getPreferences(MODE_PRIVATE).edit().putString("smart_backup_prompt", prompt).apply();
+            Intent intent = new Intent(this, com.termux.app.CoomiActivity.class);
+            intent.putExtra(com.termux.app.CoomiActivity.EXTRA_ROUTE, "#/");
+            intent.putExtra(com.termux.app.CoomiActivity.EXTRA_PREFILL_DRAFT, prompt);
+            intent.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+            startActivity(intent);
+        });
         bindAutoBackupControls();
     }
 
@@ -155,6 +176,57 @@ public class CoomiBackupActivity extends Activity {
             | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
             | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
         startActivityForResult(intent, REQ_AUTO_DIRECTORY);
+    }
+
+    private void chooseVirtualFolderForBackup() {
+        final View content = LayoutInflater.from(this).inflate(R.layout.dialog_coomi_backup_folder, null, false);
+        final EditText input = content.findViewById(R.id.edit_backup_folder_path);
+        input.setText("/home/coomi");
+        AlertDialog dialog = new AlertDialog.Builder(this)
+            .setTitle("选择虚拟环境文件夹")
+            .setView(content)
+            .setNegativeButton("取消", null)
+            .setPositiveButton("导出", null)
+            .create();
+        dialog.setOnShowListener(ignored -> {
+            Button positive = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+            positive.setOnClickListener(v -> {
+                try {
+                    String guestPath = input.getText().toString().trim();
+                    File folder = resolveVirtualFolder(guestPath);
+                    dialog.dismiss();
+                    exportSelectedFolder(folder, guestPath);
+                } catch (Exception error) {
+                    input.setError(error.getMessage());
+                    input.requestFocus();
+                }
+            });
+            Window window = dialog.getWindow();
+            if (window != null) {
+                int width = (int) (getResources().getDisplayMetrics().widthPixels * 0.92f);
+                window.setLayout(width, WindowManager.LayoutParams.WRAP_CONTENT);
+                window.setBackgroundDrawableResource(R.drawable.coomi_bg_dialog);
+                CoomiTheme.applyCustomColors(this, window.getDecorView());
+            }
+        });
+        dialog.show();
+    }
+
+    private File resolveVirtualFolder(String raw) throws Exception {
+        String value = raw == null ? "" : raw.trim();
+        if (value.equals("~")) value = "/home/coomi";
+        if (value.startsWith("~/")) value = "/home/coomi/" + value.substring(2);
+        if (!value.startsWith("/home/coomi")
+            || (value.length() > "/home/coomi".length() && value.charAt("/home/coomi".length()) != '/')) {
+            throw new IllegalArgumentException("只能备份 ProotLinux 的 /home/coomi 目录及其子目录");
+        }
+        File root = new File(TermuxConstants.TERMUX_HOME_DIR_PATH).getCanonicalFile();
+        String relative = value.substring("/home/coomi".length());
+        while (relative.startsWith("/")) relative = relative.substring(1);
+        File folder = new File(root, relative).getCanonicalFile();
+        if (!isInside(root, folder)) throw new IllegalArgumentException("虚拟环境路径无效");
+        if (!folder.isDirectory()) throw new IllegalArgumentException("文件夹不存在：" + value);
+        return folder;
     }
 
     private void loadAutoBackupControls() {
@@ -322,6 +394,41 @@ public class CoomiBackupActivity extends Activity {
                 CoomiAutoBackup.OPERATION_LOCK.unlock();
             }
         }).start();
+    }
+
+    private void exportSelectedFolder(File directory, String guestPath) {
+        setBackupControlsEnabled(false);
+        showBackupProgress("正在打包指定文件夹", 0, 0);
+        new Thread(() -> {
+            File zip = new File(getCacheDir(), "coomi-folder-" + System.currentTimeMillis() + ".zip");
+            try (ZipOutputStream zos = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(zip)))) {
+                addTextEntry(zos, "selected-folder/name.txt", directory.getName() == null ? "selected" : directory.getName());
+                addTextEntry(zos, "selected-folder/path.txt", guestPath);
+                addFileTree(zos, directory, "selected-folder/data");
+                runOnUiThread(() -> {
+                    mPendingBackup = zip;
+                    showBackupProgress("打包完成，请选择保存位置", zip.length(), zip.length());
+                    Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                    intent.addCategory(Intent.CATEGORY_OPENABLE); intent.setType("application/zip");
+                    intent.putExtra(Intent.EXTRA_TITLE, "coomi-folder-" + new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date()) + ".zip");
+                    startActivityForResult(intent, REQ_EXPORT);
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> { finishBackupProgress("指定文件夹备份失败：" + e.getMessage()); Toast.makeText(this, "备份失败：" + e.getMessage(), Toast.LENGTH_LONG).show(); });
+            }
+        }).start();
+    }
+
+    private void addFileTree(ZipOutputStream zos, File directory, String prefix) throws Exception {
+        File[] children = directory.listFiles();
+        if (children == null) return;
+        for (File child : children) {
+            String name = child.getName();
+            if (name == null || name.contains("..") || name.contains("/")) continue;
+            String entry = prefix + "/" + name;
+            if (child.isDirectory()) addFileTree(zos, child, entry);
+            else if (child.isFile()) addFileEntry(zos, entry, child);
+        }
     }
 
     private void setBackupControlsEnabled(boolean enabled) {
@@ -586,6 +693,14 @@ public class CoomiBackupActivity extends Activity {
         File userData = new File(tmp, "user-data");
         if (userData.isDirectory()) {
             try { copyRecursive(userData, new File(TermuxConstants.TERMUX_HOME_DIR_PATH)); } catch (Exception ignored) { }
+        }
+        File selectedData = new File(tmp, "selected-folder/data");
+        if (selectedData.isDirectory()) {
+            try {
+                String name = readFile(new File(tmp, "selected-folder/name.txt")).trim();
+                if (name.isEmpty() || name.contains("/") || name.contains("\\") || name.equals(".")) name = "restored-folder";
+                copyRecursive(selectedData, new File(TermuxConstants.TERMUX_HOME_DIR_PATH, name));
+            } catch (Exception ignored) { }
         }
 
         // 1) 会话历史

@@ -18,6 +18,10 @@ pub struct CognitiveState {
     pub version: u32,
     pub name: String,
     pub address: String,
+    #[serde(default)]
+    pub preset: String,
+    #[serde(default)]
+    pub personality: BTreeMap<String, String>,
     pub paused: bool,
     pub emotion: String,
     pub attention: String,
@@ -34,6 +38,14 @@ pub struct CognitiveTurnContext {
     pub memories: Vec<String>,
     pub personality: BTreeMap<String, String>,
     pub relationship: String,
+    #[serde(default)]
+    pub life_name: String,
+    #[serde(default)]
+    pub user_address: String,
+    #[serde(default)]
+    pub personality_label: String,
+    #[serde(default)]
+    pub personality_instruction: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -50,6 +62,7 @@ pub trait CognitiveRuntime: Send + Sync {
         profile_id: &str,
         name: &str,
         address: &str,
+        preset: &str,
     ) -> Result<CognitiveState>;
     async fn configure(
         &self,
@@ -64,6 +77,7 @@ pub trait CognitiveRuntime: Send + Sync {
         profile_id: &str,
         user_text: &str,
         assistant_text: &str,
+        shared_memory_count: Option<u64>,
     ) -> Result<CognitiveState>;
     async fn get_state(&self, profile_id: &str) -> Result<CognitiveState>;
     async fn recall_memory(
@@ -217,10 +231,11 @@ impl CognitiveRuntime for StdioCognitiveRuntime {
         profile_id: &str,
         name: &str,
         address: &str,
+        preset: &str,
     ) -> Result<CognitiveState> {
         self.call(
             "bootstrap",
-            json!({"profile_id": validate_profile_id(profile_id), "name": name, "address": address}),
+            json!({"profile_id": validate_profile_id(profile_id), "name": name, "address": address, "preset": preset}),
         )
         .await
     }
@@ -257,6 +272,7 @@ impl CognitiveRuntime for StdioCognitiveRuntime {
         profile_id: &str,
         user_text: &str,
         assistant_text: &str,
+        shared_memory_count: Option<u64>,
     ) -> Result<CognitiveState> {
         self.call(
             "after_turn",
@@ -264,6 +280,7 @@ impl CognitiveRuntime for StdioCognitiveRuntime {
                 "profile_id": validate_profile_id(profile_id),
                 "user_text": bounded_text(user_text),
                 "assistant_text": bounded_text(assistant_text),
+                "shared_memory_count": shared_memory_count,
             }),
         )
         .await

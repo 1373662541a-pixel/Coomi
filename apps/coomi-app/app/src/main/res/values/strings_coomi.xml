@@ -145,6 +145,10 @@
     <string name="coomi_home_saved">已保存</string>
     <string name="coomi_dash_backup">备份与导入</string>
     <string name="coomi_dash_backup_desc">完整备份会话、永久统计、MCP 与 Skill</string>
+    <string name="coomi_dash_maintenance">清理工具</string>
+    <string name="coomi_dash_maintenance_desc">扫描并清理安全缓存与临时文件</string>
+    <string name="coomi_dash_usage">使用统计</string>
+    <string name="coomi_dash_usage_desc">按时间范围查看 Token 用量流水</string>
     <string name="coomi_dash_section_support">支持</string>
     <string name="coomi_dash_feedback">反馈建议</string>
     <string name="coomi_dash_feedback_desc">告诉我们你的建议或遇到的问题</string>

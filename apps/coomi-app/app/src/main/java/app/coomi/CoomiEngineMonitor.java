@@ -49,6 +49,7 @@ public class CoomiEngineMonitor extends Service {
     private boolean mBound = false;
     private boolean mIsMonitoring = false;
     private int mRestartAttempts = 0;
+    private int mUnhealthyChecks = 0;
     private boolean mRestartInFlight = false;
     private String mCurrentStatus = "Starting...";
 
@@ -202,14 +203,38 @@ public class CoomiEngineMonitor extends Service {
 
         mCoomiService.getEngineStatus(result -> {
             if (!result.success) return;
-            boolean running = result.stdout.trim().equals("running");
-            if (running) {
+            String status = result.stdout.trim();
+            if ("running".equals(status)) {
+                mUnhealthyChecks = 0;
                 mRestartAttempts = 0;
                 updateStatus("运行中");
-            } else {
+            } else if ("starting".equals(status)) {
+                // `starting` also means the native process is alive but its
+                // 2-second HTTP health probe timed out. Model inference and
+                // heavy tools can briefly delay that endpoint; restarting at
+                // this point aborts an otherwise healthy turn.
+                if (runningTaskCount() > 0) {
+                    mUnhealthyChecks = 0;
+                    updateStatus("忙碌中");
+                    return;
+                }
+                mUnhealthyChecks++;
+                if (mUnhealthyChecks < 3) {
+                    updateStatus("启动中…");
+                    return;
+                }
+                Logger.logWarn(LOG_TAG, "Engine process stayed unhealthy for "
+                    + mUnhealthyChecks + " checks; restarting while idle");
+                mUnhealthyChecks = 0;
+                updateStatus("重启中…");
+                restartEngine();
+            } else if ("stopped".equals(status)) {
+                mUnhealthyChecks = 0;
                 Logger.logInfo(LOG_TAG, "Engine not running, restarting...");
                 updateStatus("重启中…");
                 restartEngine();
+            } else {
+                Logger.logWarn(LOG_TAG, "Ignoring unknown engine status: " + status);
             }
         });
     }
