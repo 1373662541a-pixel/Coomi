@@ -13,6 +13,7 @@ use std::path::PathBuf;
 const MCP_CATALOG: &str = include_str!("../mcp.json");
 const SKILL_CATALOG: &str = include_str!("../skills.json");
 const CUSTOM_ITERATION_SKILL: &str = include_str!("../coomi-custom-iteration.md");
+const RUNTIME_ENVIRONMENT_SKILL: &str = include_str!("../runtime-environments.md");
 const COOMIDEV_ENV: &str = include_str!("../../../../tools/mobile-build/coomidev-env.sh");
 const COOMIDEV_DOCTOR: &str = include_str!("../../../../tools/mobile-build/coomidev-doctor.sh");
 const COOMIDEV_BUILD: &str = include_str!("../../../../tools/mobile-build/build-coomidev.sh");
@@ -164,19 +165,35 @@ impl CatalogInstaller {
         Ok(destination)
     }
 
+    /// Install the bundled runtime coordination guidance. This is local and
+    /// idempotent so a fresh runtime can route Host/Termux/Proot work before
+    /// any network-backed Skill installation is available.
+    pub fn install_runtime_environment_skill(&self) -> Result<PathBuf> {
+        let destination = self.home.join("skills").join("runtime-environments");
+        fs::create_dir_all(&destination)?;
+        fs::write(destination.join("SKILL.md"), RUNTIME_ENVIRONMENT_SKILL)?;
+        save_skill_metadata(
+            &self.home,
+            &SkillEntry {
+                id: "runtime-environments".into(),
+                name: "Runtime Environments".into(),
+                description: "Route tools across Host, Termux, and ProotLinux without mixing paths or binaries.".into(),
+                repository: "TensorHub-ORG/Coomi".into(),
+                git_ref: "main".into(),
+                subdir: "".into(),
+            },
+            &destination,
+            "bundled",
+        )?;
+        Ok(destination)
+    }
+
     /// Install Coomi-owned Build Kit helpers into the persistent Runtime V2
     /// home. Compiler artifacts are deliberately not bundled here: the doctor
     /// must report not-ready until a pinned, checksum-verified kit is selected.
     pub fn install_custom_iteration_buildkit(&self) -> Result<PathBuf> {
         let root = self.home.join("runtime-v2").join("home").join(".coomi-dev");
-        for directory in [
-            "bin",
-            "toolchains",
-            "cache",
-            "state",
-            "logs",
-            "keys",
-        ] {
+        for directory in ["bin", "toolchains", "cache", "state", "logs", "keys"] {
             fs::create_dir_all(root.join(directory))?;
         }
         write_executable(&root.join("bin/coomidev-env"), COOMIDEV_ENV)?;
@@ -219,10 +236,7 @@ impl CatalogInstaller {
             let bytes = fs::read(&config_path)
                 .with_context(|| format!("failed to read {}", config_path.display()))?;
             if let Ok(mut document) = serde_json::from_slice::<Value>(&bytes) {
-                if let Some(skills) = document
-                    .get_mut("skills")
-                    .and_then(Value::as_object_mut)
-                {
+                if let Some(skills) = document.get_mut("skills").and_then(Value::as_object_mut) {
                     skills.remove(id);
                     fs::write(&config_path, serde_json::to_vec_pretty(&document)?)
                         .with_context(|| format!("failed to write {}", config_path.display()))?;
@@ -295,19 +309,12 @@ impl CatalogInstaller {
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes))
             .context("skill archive is not a valid zip")?;
         // codeload zip 的根目录形如 {repo}-{ref}/，把其中 {subdir}/ 的内容解压到目标。
-        let repo_basename = entry
-            .repository
-            .rsplit('/')
-            .next()
-            .unwrap_or("repository");
+        let repo_basename = entry.repository.rsplit('/').next().unwrap_or("repository");
         // GitHub normalizes slashes in branch names in codeload archive roots
         // (for example codex/feat/x becomes repo-codex-feat-x).
         let root_prefixes = [
             format!("{repo_basename}-{}/", entry.git_ref),
-            format!(
-                "{repo_basename}-{}/",
-                entry.git_ref.replace('/', "-")
-            ),
+            format!("{repo_basename}-{}/", entry.git_ref.replace('/', "-")),
         ];
         for index in 0..archive.len() {
             let mut file = archive
@@ -525,8 +532,14 @@ mod tests {
     #[test]
     fn root_subdir_accepts_skill_files_at_repository_root() {
         assert!(matches_skill_subdir("shizuku-skill-main/SKILL.md", "."));
-        assert!(matches_skill_subdir("shizuku-skill-main/agents/openai.yaml", "."));
-        assert!(!matches_skill_subdir("shizuku-skill-main/other/SKILL.md", "agents"));
+        assert!(matches_skill_subdir(
+            "shizuku-skill-main/agents/openai.yaml",
+            "."
+        ));
+        assert!(!matches_skill_subdir(
+            "shizuku-skill-main/other/SKILL.md",
+            "agents"
+        ));
     }
 }
 

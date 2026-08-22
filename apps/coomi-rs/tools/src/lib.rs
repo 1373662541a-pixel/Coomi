@@ -20,13 +20,16 @@ use coomi_security::HookEvent;
 use coomi_security::HookRunner;
 use coomi_security::SecurityPolicy;
 use coomi_services::AutoConfigIntent;
+use coomi_services::LegacyTermuxBackend;
 use coomi_services::McpRuntime;
 use coomi_services::MemoryManager;
 use coomi_services::MemoryScope;
 use coomi_services::MemoryType;
+use coomi_services::PathNamespace;
 use coomi_services::RuntimeBackend;
 use coomi_services::RuntimeBackendKind;
 use coomi_services::RuntimeManager;
+use coomi_services::RuntimePathMap;
 use coomi_services::apply_auto_config;
 use coomi_telemetry::Telemetry;
 use ignore::WalkBuilder;
@@ -50,6 +53,7 @@ const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 pub struct CoreTools {
     cwd: PathBuf,
+    path_map: RuntimePathMap,
     policy: SecurityPolicy,
     skills_directory: Option<PathBuf>,
     config_home: Option<PathBuf>,
@@ -67,6 +71,7 @@ pub struct CoreTools {
 impl CoreTools {
     pub fn new(cwd: PathBuf, policy: SecurityPolicy) -> Self {
         Self {
+            path_map: RuntimePathMap::new(cwd.clone()),
             cwd,
             policy,
             skills_directory: None,
@@ -118,6 +123,24 @@ impl CoreTools {
     }
 
     pub fn with_config_home(mut self, home: PathBuf) -> Self {
+        let _ = CatalogInstaller::new(&home).install_runtime_environment_skill();
+        self.policy = self.policy.clone().with_allowed_roots([
+            home.join("runtime-v2").join("home"),
+            home.join("runtime-v2").join("tmp"),
+        ]);
+        self.path_map = RuntimePathMap::new(self.cwd.clone())
+            .with_runtime_root(home.join("runtime-v2"))
+            .with_termux(
+                home.join("files").join("home"),
+                home.join("files").join("usr"),
+            );
+        let prefix = home.join("files").join("usr");
+        let legacy_home = home.join("files").join("home");
+        let mut processes =
+            ProcessManager::default().with_runtime_backend(Arc::new(LegacyTermuxBackend {
+                prefix,
+                home: legacy_home,
+            }));
         if let Ok(manager) = RuntimeManager::open(&home)
             && let Ok(backend) = manager.backend(
                 home.join("files").join("usr"),
@@ -125,9 +148,9 @@ impl CoreTools {
             )
             && backend.kind() == RuntimeBackendKind::ProotLinux
         {
-            self.processes =
-                Arc::new(ProcessManager::default().with_runtime_backend(Arc::from(backend)));
+            processes = processes.with_runtime_backend(Arc::from(backend));
         }
+        self.processes = Arc::new(processes);
         self.config_home = Some(home);
         self
     }
@@ -177,6 +200,7 @@ impl CoreTools {
             "close_agent" => self.close_agent(&call.arguments).await,
             "list_skills" => self.list_skills(),
             "read_skill" => self.read_skill(&call.arguments).await,
+            "runtime_doctor" => self.runtime_doctor(),
             "memory_list" => self.memory_list(),
             "memory_read" => self.memory_read(&call.arguments),
             "memory_search" => self.memory_search(&call.arguments),
@@ -438,13 +462,12 @@ impl CoreTools {
             .skip(1)
             .take(max_entries)
             .map(|entry| {
-                let display = entry.path().strip_prefix(&self.cwd).unwrap_or(entry.path());
                 let suffix = if entry.file_type().is_some_and(|kind| kind.is_dir()) {
                     "/"
                 } else {
                     ""
                 };
-                format!("{}{suffix}", display.display())
+                format!("{}{suffix}", self.display_path(entry.path()))
             })
             .collect::<Vec<_>>();
         entries.sort();
@@ -485,7 +508,7 @@ impl CoreTools {
         {
             return ToolResult::error("patch was not approved");
         }
-        match patch::apply_patch(&self.policy, patch_text) {
+        match patch::apply_patch_with_paths(&self.policy, Some(&self.path_map), patch_text) {
             Ok(output) => ToolResult::success(output),
             Err(error) => ToolResult::error(error),
         }
@@ -839,7 +862,13 @@ impl CoreTools {
         approval: &dyn ApprovalHandler,
         operation: &str,
     ) -> ToolResult {
-        let path = string_arg(&call.arguments, "path").map(ToOwned::to_owned);
+        let path = string_arg(&call.arguments, "path").and_then(|value| {
+            self.path_map
+                .resolve(value, None)
+                .ok()
+                .map(|resolved| resolved.host_path.to_string_lossy().into_owned())
+                .or_else(|| Some(value.to_owned()))
+        });
         let suggested_name = string_arg(&call.arguments, "suggested_name").map(ToOwned::to_owned);
         let request = FileTransferRequest {
             request_id: format!("file-{}", uuid::Uuid::new_v4()),
@@ -1002,6 +1031,43 @@ impl CoreTools {
             }
             None => ToolResult::success("no MCP servers configured"),
         }
+    }
+
+    fn runtime_doctor(&self) -> ToolResult {
+        let runtime_home = self
+            .path_map
+            .host_runtime_home()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "not configured".into());
+        let proot = self
+            .config_home
+            .as_ref()
+            .map(|home| home.join("runtime-v2").join("state.json").is_file())
+            .unwrap_or(false);
+        let ssh = self
+            .path_map
+            .host_runtime_home()
+            .map(|home| home.join(".ssh").is_dir())
+            .unwrap_or(false);
+        ToolResult::success(
+            serde_json::json!({
+                "environments": {
+                    "host": {"available": true, "role": "Android file APIs and exports"},
+                    "termux": {"available": self.config_home.is_some(), "role": "Android-native tools"},
+                    "proot": {"available": proot, "role": "Linux userland tools"}
+                },
+                "paths": {
+                    "host_workspace": self.cwd,
+                    "guest_workspace": "/workspace",
+                    "host_runtime_home": runtime_home,
+                    "guest_home": "/home/coomi",
+                    "guest_build_kit": "/opt/coomi-dev",
+                    "guest_tmp": "/tmp"
+                },
+                "ssh": {"guest_home_ssh_directory": ssh, "recommended_known_hosts": "/home/coomi/.ssh/known_hosts"}
+            })
+            .to_string(),
+        )
     }
 
     fn list_skills(&self) -> ToolResult {
@@ -1511,8 +1577,11 @@ impl CoreTools {
             };
             for (line_index, line) in content.lines().enumerate() {
                 if regex.is_match(line) {
-                    let display = entry.path().strip_prefix(&self.cwd).unwrap_or(entry.path());
-                    output.push(format!("{}:{}:{line}", display.display(), line_index + 1));
+                    output.push(format!(
+                        "{}:{}:{line}",
+                        self.display_path(entry.path()),
+                        line_index + 1
+                    ));
                     if output.len() >= max_results {
                         break;
                     }
@@ -1544,7 +1613,11 @@ impl CoreTools {
         let timeout_ms = u64_arg(&call.arguments, "timeout_ms")
             .unwrap_or(DEFAULT_TIMEOUT_MS)
             .clamp(1_000, 300_000);
-        let mut process = match self.processes.runtime_shell(&self.cwd, command) {
+        let environment = call.arguments.get("environment").and_then(Value::as_str);
+        let mut process = match self
+            .processes
+            .runtime_shell(&self.cwd, command, environment)
+        {
             Ok(Some(process)) => process,
             Ok(None) => platform_shell(command),
             Err(error) => {
@@ -1580,9 +1653,17 @@ impl CoreTools {
     }
 
     fn checked_path(&self, value: &str, write: bool) -> Result<PathBuf, String> {
+        let requested_namespace = match string_namespace(value) {
+            Some(namespace) => Some(namespace),
+            None => None,
+        };
+        let resolved = self
+            .path_map
+            .resolve(value, requested_namespace)
+            .map_err(|error| error.to_string())?;
         let path = self
             .policy
-            .resolve_path(value)
+            .resolve_path(&resolved.host_path)
             .map_err(|error| error.to_string())?;
         let decision = if write {
             self.policy.assess_write(&path)
@@ -1593,6 +1674,13 @@ impl CoreTools {
             Decision::Allow => Ok(path),
             Decision::Ask(reason) | Decision::Deny(reason) => Err(reason),
         }
+    }
+
+    fn display_path(&self, path: &std::path::Path) -> String {
+        self.path_map
+            .resolve(path, Some(PathNamespace::Host))
+            .map(|resolved| resolved.guest_path.display().to_string())
+            .unwrap_or_else(|_| path.display().to_string())
     }
 
     fn truncate(&self, mut output: String) -> String {
@@ -1677,6 +1765,7 @@ impl ToolRuntime for CoreTools {
                     "type": "object",
                     "properties": {
                         "command": {"type": "string"},
+                        "environment": {"type": "string", "enum": ["auto", "host", "termux", "proot"]},
                         "timeout_ms": {"type": "integer", "minimum": 1000, "maximum": 300000}
                     },
                     "required": ["command"],
@@ -1718,6 +1807,7 @@ impl ToolRuntime for CoreTools {
                     "properties": {
                         "action": {"type": "string", "enum": ["exec", "write", "wait", "terminate"]},
                         "command": {"type": "string"},
+                        "environment": {"type": "string", "enum": ["auto", "host", "termux", "proot"]},
                         "session_id": {"type": "string"},
                         "input": {"type": "string"},
                         "close_stdin": {"type": "boolean"},
@@ -1726,6 +1816,11 @@ impl ToolRuntime for CoreTools {
                     "required": ["action"],
                     "additionalProperties": false
                 }),
+            },
+            ToolSpec {
+                name: "runtime_doctor".into(),
+                description: "Report Host, Termux, and ProotLinux availability plus the active path mapping and SSH runtime directories.".into(),
+                parameters: json!({"type": "object", "properties": {}, "additionalProperties": false}),
             },
             ToolSpec {
                 name: "apply_patch".into(),
@@ -2173,6 +2268,22 @@ fn string_arg<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
 }
 
+fn string_namespace(value: &str) -> Option<PathNamespace> {
+    if value == "/workspace"
+        || value.starts_with("/workspace/")
+        || value == "/home/coomi"
+        || value.starts_with("/home/coomi/")
+        || value == "/opt/coomi-dev"
+        || value.starts_with("/opt/coomi-dev/")
+        || value == "/tmp"
+        || value.starts_with("/tmp/")
+    {
+        Some(PathNamespace::Guest)
+    } else {
+        None
+    }
+}
+
 fn usize_arg(value: &Value, key: &str) -> Option<usize> {
     value
         .get(key)
@@ -2561,6 +2672,31 @@ mod tests {
             .await;
         assert!(result.success);
         assert_eq!(std::fs::read_to_string(file).expect("read result"), "after");
+    }
+
+    #[tokio::test]
+    async fn file_tools_translate_proot_workspace_paths() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        let file = workspace.join("guest.txt");
+        std::fs::write(&file, "guest path works").expect("write fixture");
+        let policy =
+            SecurityPolicy::new(&workspace, AccessMode::FullAccess).expect("security policy");
+        let tools =
+            CoreTools::new(workspace.clone(), policy).with_config_home(root.path().join("coomi"));
+        let result = tools
+            .call(
+                &ToolCall {
+                    id: "guest-path".into(),
+                    name: "read_file".into(),
+                    arguments: json!({"path": "/workspace/guest.txt"}),
+                },
+                &Deny,
+            )
+            .await;
+        assert!(result.success, "{}", result.output);
+        assert!(result.output.contains("guest path works"));
     }
 
     #[tokio::test]

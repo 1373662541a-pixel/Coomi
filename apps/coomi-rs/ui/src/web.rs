@@ -5970,6 +5970,9 @@ Access policy: {policy}",
         policy = policy.label(),
     ));
     prompt.push_str(
+        "\nRuntime routing: shell/local_shell accept environment=auto|host|termux|proot. Use proot for Linux userland tools, termux for Android-native tools, and host for file APIs/exports. File tools accept /workspace, /home/coomi, /opt/coomi-dev, and /tmp and translate them to host paths before security checks.",
+    );
+    prompt.push_str(
         "\n\nCoomi source checkout architecture (when the current repository is Coomi):\n\
 - apps/coomi-app: native Android shell, dashboard, lifecycle, APK assets and Gradle packaging\n\
 - apps/coomi-rs: Rust engine, provider bridge, tools, Skills/MCP catalogs, runtime manager and local Web API\n\

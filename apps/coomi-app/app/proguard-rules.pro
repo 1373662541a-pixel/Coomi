@@ -7,8 +7,6 @@
 # For more details, see
 #   http://developer.android.com/guide/developing/tools/proguard.html
 
--dontobfuscate
-
 # Keep Shizuku runtime classes untouched to avoid release-only startup regressions.
 -keep class moe.shizuku.** {
     <fields>;
@@ -57,3 +55,16 @@
 -dontwarn android.os.SELinux
 #-renamesourcefileattribute SourceFile
 #-keepattributes SourceFile,LineNumberTable
+
+# The WebView bridge is discovered by the Android JavascriptInterface annotation rather
+# than by a Java call site. Keep annotated methods and their parameter metadata while
+# allowing unrelated implementation details to be optimized and renamed.
+-keepclassmembers class * {
+    @android.webkit.JavascriptInterface <methods>;
+}
+-keepattributes RuntimeVisibleAnnotations,RuntimeInvisibleAnnotations,RuntimeVisibleParameterAnnotations,RuntimeInvisibleParameterAnnotations
+
+# Preserve JNI entry points used by the terminal emulator and the Rust bridge.
+-keepclasseswithmembernames,includedescriptorclasses class * {
+    native <methods>;
+}

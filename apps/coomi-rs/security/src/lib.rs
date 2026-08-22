@@ -39,6 +39,7 @@ pub enum Decision {
 #[derive(Clone, Debug)]
 pub struct SecurityPolicy {
     workspace: PathBuf,
+    allowed_roots: Vec<PathBuf>,
     mode: AccessMode,
     /// 工作区内的私有屏蔽区（如 .coomi/sessions）：任何模式（含 FullAccess）都不可访问。
     blocked: Vec<PathBuf>,
@@ -55,6 +56,7 @@ impl SecurityPolicy {
             .with_context(|| format!("invalid workspace {}", workspace.as_ref().display()))?;
         Ok(Self {
             workspace,
+            allowed_roots: Vec::new(),
             mode,
             blocked: Vec::new(),
             blocked_aliases: Vec::new(),
@@ -86,19 +88,31 @@ impl SecurityPolicy {
             .iter()
             .filter_map(|path| {
                 let ancestors = path.ancestors().collect::<Vec<_>>();
-                let coomi = ancestors
-                    .iter()
-                    .position(|component| component.file_name().and_then(|n| n.to_str()) == Some(".coomi"))?;
+                let coomi = ancestors.iter().position(|component| {
+                    component.file_name().and_then(|n| n.to_str()) == Some(".coomi")
+                })?;
                 let relative = ancestors[..=coomi]
                     .iter()
                     .rev()
-                    .map(|component| component.file_name().unwrap_or_default().to_string_lossy().into_owned())
+                    .map(|component| {
+                        component
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned()
+                    })
                     .collect::<Vec<_>>()
                     .join("/");
                 let tail = ancestors[..coomi]
                     .iter()
                     .rev()
-                    .map(|component| component.file_name().unwrap_or_default().to_string_lossy().into_owned())
+                    .map(|component| {
+                        component
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned()
+                    })
                     .collect::<Vec<_>>();
                 let mut forms = vec![
                     format!("~/{relative}"),
@@ -131,6 +145,24 @@ impl SecurityPolicy {
         self.mode
     }
 
+    /// Add controlled runtime roots (for example Proot's persistent home) to
+    /// the file-tool allowlist without weakening the active access mode.
+    pub fn with_allowed_roots(mut self, roots: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.allowed_roots
+            .extend(roots.into_iter().filter_map(|path| {
+                normalize_path(&path).ok().and_then(|path| {
+                    if path.exists() {
+                        path.canonicalize().ok()
+                    } else {
+                        Some(path)
+                    }
+                })
+            }));
+        self.allowed_roots.sort();
+        self.allowed_roots.dedup();
+        self
+    }
+
     pub fn resolve_path(&self, value: impl AsRef<Path>) -> Result<PathBuf> {
         let value = value.as_ref();
         let joined = if value.is_absolute() {
@@ -159,20 +191,17 @@ impl SecurityPolicy {
         // 一律拒绝——shell 是文件工具之外唯一能读到这些路径的通道。
         for alias in &self.blocked_aliases {
             if trimmed.contains(alias.to_string_lossy().as_ref()) {
-                return Decision::Deny(
-                    "命令引用了被「全局会话记忆」策略屏蔽的私有目录".into(),
-                );
+                return Decision::Deny("命令引用了被「全局会话记忆」策略屏蔽的私有目录".into());
             }
         }
         // 兜底：屏蔽区生效时，含 ~ / $HOME / ${HOME} 的写法无法静态判定，
         // 转人工确认（防止 `cat ~/.coomi/sessions/...` 之类绕过字面匹配）。
         if !self.blocked_aliases.is_empty()
-            && (trimmed.contains('~')
-                || trimmed.contains("$HOME")
-                || trimmed.contains("${HOME}"))
+            && (trimmed.contains('~') || trimmed.contains("$HOME") || trimmed.contains("${HOME}"))
         {
             return Decision::Ask(
-                "命令使用了 ~ / $HOME 引用，可能访问被「全局会话记忆」屏蔽的私有目录，请确认".into(),
+                "命令使用了 ~ / $HOME 引用，可能访问被「全局会话记忆」屏蔽的私有目录，请确认"
+                    .into(),
             );
         }
 
@@ -211,9 +240,11 @@ impl SecurityPolicy {
         if self.mode == AccessMode::FullAccess {
             return Decision::Allow;
         }
-        if !path.starts_with(&self.workspace) {
+        if !path.starts_with(&self.workspace)
+            && !self.allowed_roots.iter().any(|root| path.starts_with(root))
+        {
             return Decision::Deny(format!(
-                "path is outside workspace {}",
+                "path is outside allowed workspace/runtime roots (workspace: {})",
                 self.workspace.display()
             ));
         }

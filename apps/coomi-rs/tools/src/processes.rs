@@ -45,7 +45,8 @@ pub struct ProcessManager {
     runtime_limit: Duration,
     output_limit: usize,
     memory_limit: u64,
-    runtime_backend: Option<Arc<dyn RuntimeBackend>>,
+    termux_backend: Option<Arc<dyn RuntimeBackend>>,
+    proot_backend: Option<Arc<dyn RuntimeBackend>>,
 }
 
 impl Default for ProcessManager {
@@ -54,7 +55,8 @@ impl Default for ProcessManager {
             runtime_limit: Duration::from_secs(30 * 60),
             output_limit: 16 * 1024 * 1024,
             memory_limit: 512 * 1024 * 1024,
-            runtime_backend: None,
+            termux_backend: None,
+            proot_backend: None,
         }
     }
 }
@@ -97,15 +99,22 @@ async fn kill_managed(process: &Arc<AsyncMutex<ManagedProcess>>) {
 
 impl ProcessManager {
     pub fn with_runtime_backend(mut self, backend: Arc<dyn RuntimeBackend>) -> Self {
-        self.runtime_backend =
-            (backend.kind() == RuntimeBackendKind::ProotLinux).then_some(backend);
+        match backend.kind() {
+            RuntimeBackendKind::LegacyTermux => self.termux_backend = Some(backend),
+            RuntimeBackendKind::ProotLinux => self.proot_backend = Some(backend),
+        }
         self
     }
 
     /// Build a one-shot shell command using the configured runtime backend.
     /// `None` means the caller should use the platform host shell.
-    pub fn runtime_shell(&self, cwd: &Path, command: &str) -> anyhow::Result<Option<Command>> {
-        let Some(backend) = &self.runtime_backend else {
+    pub fn runtime_shell(
+        &self,
+        cwd: &Path,
+        command: &str,
+        environment: Option<&str>,
+    ) -> anyhow::Result<Option<Command>> {
+        let Some(backend) = self.backend(environment)? else {
             return Ok(None);
         };
         Ok(Some(
@@ -138,7 +147,12 @@ impl ProcessManager {
             .and_then(Value::as_u64)
             .unwrap_or(10_000)
             .min(60_000);
-        let mut process = if let Some(backend) = &self.runtime_backend {
+        let environment = arguments.get("environment").and_then(Value::as_str);
+        let backend = match self.backend(environment) {
+            Ok(backend) => backend,
+            Err(error) => return ToolResult::error(error.to_string()),
+        };
+        let mut process = if let Some(backend) = backend {
             match backend.command(cwd, "/bin/sh", &["-lc".into(), command.into()]) {
                 Ok(command) => command.into_tokio(),
                 Err(error) => {
@@ -251,6 +265,29 @@ impl ProcessManager {
             .expect("process registry lock")
             .insert(session_id.clone(), managed);
         ToolResult::success(format!("process running\nsession_id: {session_id}"))
+    }
+
+    fn backend(
+        &self,
+        environment: Option<&str>,
+    ) -> anyhow::Result<Option<&Arc<dyn RuntimeBackend>>> {
+        match environment.unwrap_or("auto") {
+            "auto" => Ok(self.proot_backend.as_ref().or(self.termux_backend.as_ref())),
+            "proot" | "proot_linux" => self
+                .proot_backend
+                .as_ref()
+                .map(Some)
+                .ok_or_else(|| anyhow::anyhow!("ProotLinux environment is not ready")),
+            "termux" => self
+                .termux_backend
+                .as_ref()
+                .map(Some)
+                .ok_or_else(|| anyhow::anyhow!("Termux environment is not available")),
+            "host" => Ok(None),
+            value => {
+                anyhow::bail!("environment must be auto, host, termux, or proot (received {value})")
+            }
+        }
     }
 
     async fn write(&self, arguments: &Value) -> ToolResult {

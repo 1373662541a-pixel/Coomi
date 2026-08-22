@@ -374,6 +374,9 @@ confirmation, authorization, or compliance with any regulations.",
         policy.label()
     ));
     prompt.push_str(
+        "\nRuntime environments: `host` handles Android file APIs and exports; `termux` handles Android-native tools; `proot` handles Linux userland tools. Shell tools accept environment=auto|host|termux|proot. Guest aliases are /workspace, /home/coomi, /opt/coomi-dev, and /tmp; file tools translate these aliases automatically.",
+    );
+    prompt.push_str(
         "\nAll file references shown to the user and every path passed to file export must be normalized absolute paths. Never return a relative path for a created, edited, downloaded, referenced, or exported file. Resolve relative tool output against the working directory before presenting it.",
     );
     prompt.push_str(

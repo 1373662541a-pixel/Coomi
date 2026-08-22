@@ -1,5 +1,6 @@
 use coomi_security::Decision;
 use coomi_security::SecurityPolicy;
+use coomi_services::RuntimePathMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -36,14 +37,23 @@ struct PreparedChange {
     new_content: Option<Vec<u8>>,
 }
 
+#[allow(dead_code)]
 pub fn apply_patch(policy: &SecurityPolicy, patch: &str) -> Result<String, String> {
+    apply_patch_with_paths(policy, None, patch)
+}
+
+pub fn apply_patch_with_paths(
+    policy: &SecurityPolicy,
+    path_map: Option<&RuntimePathMap>,
+    patch: &str,
+) -> Result<String, String> {
     let operations = parse_patch(patch)?;
     if operations.is_empty() {
         return Err("patch contains no file operations".into());
     }
     let mut prepared = Vec::with_capacity(operations.len());
     for operation in operations {
-        prepared.push(prepare_change(policy, operation)?);
+        prepared.push(prepare_change(policy, path_map, operation)?);
     }
     apply_prepared(&prepared)?;
 
@@ -67,11 +77,12 @@ pub fn apply_patch(policy: &SecurityPolicy, patch: &str) -> Result<String, Strin
 
 fn prepare_change(
     policy: &SecurityPolicy,
+    path_map: Option<&RuntimePathMap>,
     operation: PatchOperation,
 ) -> Result<PreparedChange, String> {
     match operation {
         PatchOperation::Add { path, content } => {
-            let path = checked_write_path(policy, &path)?;
+            let path = checked_write_path(policy, path_map, &path)?;
             Ok(PreparedChange {
                 source: path.clone(),
                 destination: path.clone(),
@@ -81,7 +92,7 @@ fn prepare_change(
             })
         }
         PatchOperation::Delete { path } => {
-            let path = checked_write_path(policy, &path)?;
+            let path = checked_write_path(policy, path_map, &path)?;
             let previous = fs::read(&path)
                 .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
             Ok(PreparedChange {
@@ -97,9 +108,9 @@ fn prepare_change(
             move_to,
             chunks,
         } => {
-            let source = checked_write_path(policy, &path)?;
+            let source = checked_write_path(policy, path_map, &path)?;
             let destination = match move_to {
-                Some(path) => checked_write_path(policy, &path)?,
+                Some(path) => checked_write_path(policy, path_map, &path)?,
                 None => source.clone(),
             };
             let previous = fs::read(&source)
@@ -121,9 +132,18 @@ fn prepare_change(
     }
 }
 
-fn checked_write_path(policy: &SecurityPolicy, value: &str) -> Result<PathBuf, String> {
+fn checked_write_path(
+    policy: &SecurityPolicy,
+    path_map: Option<&RuntimePathMap>,
+    value: &str,
+) -> Result<PathBuf, String> {
+    let host = path_map
+        .map(|map| map.resolve(value, None).map(|resolved| resolved.host_path))
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .unwrap_or_else(|| PathBuf::from(value));
     let path = policy
-        .resolve_path(value)
+        .resolve_path(&host)
         .map_err(|error| error.to_string())?;
     match policy.assess_write(&path) {
         Decision::Allow => Ok(path),
