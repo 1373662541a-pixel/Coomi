@@ -24,6 +24,30 @@ let timer: ReturnType<typeof setTimeout> | null = null
 let last = 0
 
 const isUser = computed(() => props.msg.kind === 'user')
+const isAssistant = computed(() => props.msg.kind === 'assistant')
+const editing = ref(false)
+const editDraft = ref('')
+const msgContent = computed(() => (props.msg.kind === 'user' ? props.msg.content : props.msg.content))
+
+function startEdit() {
+  if (streaming.value) return
+  editDraft.value = props.msg.content
+  editing.value = true
+}
+function cancelEdit() { editing.value = false; editDraft.value = '' }
+async function saveEdit() {
+  const mid = (props.msg as { mid?: string }).mid
+  const ok = await session.editMessage(mid || '', editDraft.value)
+  if (ok) editing.value = false
+}
+async function removeMessage() {
+  const mid = (props.msg as { mid?: string }).mid
+  if (mid) await session.deleteMessage(mid)
+}
+function regenerateResponse() {
+  const mid = (props.msg as { mid?: string }).mid
+  if (mid) session.regenerate(mid)
+}
 const streaming = computed(() => props.msg.kind === 'assistant' && props.msg.streaming)
 const src = computed(() => (props.msg.kind === 'assistant' ? props.msg.content : ''))
 
@@ -118,17 +142,40 @@ async function copyAll() {
 
 <template>
   <div v-if="isUser" class="row user">
-    <div class="bubble cascade">{{ msg.content }}</div>
+    <div class="wrap user-wrap">
+      <template v-if="editing">
+        <textarea v-model="editDraft" class="edit-box" rows="2" />
+        <div class="acts user-acts">
+          <button class="act" @click="cancelEdit"><span>取消</span></button>
+          <button class="act primary" @click="saveEdit"><span>保存</span></button>
+        </div>
+      </template>
+      <template v-else>
+        <div class="bubble cascade">{{ msg.content }}</div>
+        <div class="acts user-acts">
+          <button class="act" @click="startEdit"><span>编辑</span></button>
+          <button class="act" @click="removeMessage"><span>删除</span></button>
+        </div>
+      </template>
+    </div>
   </div>
 
   <div v-else class="assistant">
     <div v-for="(h, i) in blocks" :key="i" class="md blk cascade" v-html="h" />
     <FileInline v-if="filePaths.length" :paths="filePaths" />
     <span v-if="streaming" class="stream-caret" />
-    <div v-if="!streaming && blocks.length" class="acts">
+    <div v-if="!streaming" class="acts">
       <button class="act" @click="copyAll">
         <CoomiIcon :name="copied ? 'check' : 'copy'" :size="15" />
         <span>{{ copied ? '已复制' : '复制' }}</span>
+      </button>
+      <button class="act" @click="regenerateResponse">
+        <CoomiIcon name="refresh" :size="15" />
+        <span>重新回答</span>
+      </button>
+      <button class="act" @click="removeMessage">
+        <CoomiIcon name="trash" :size="15" />
+        <span>删除</span>
       </button>
     </div>
   </div>
@@ -148,6 +195,16 @@ async function copyAll() {
 .assistant { max-width: 100%; color: var(--text); }
 .blk + .blk { margin-top: 10px; }
 
+.user-wrap { display: flex; flex-direction: column; align-items: flex-end; }
+.edit-box {
+  width: 100%; min-width: 240px; max-width: 420px;
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: 12px;
+  font-size: 14px; line-height: 1.5; color: var(--text);
+  background: var(--bg-elev); resize: vertical;
+}
+.user-acts { justify-content: flex-end; }
+.act { color: var(--text-3); }
+.act.primary { color: var(--blue); font-weight: 600; }
 .acts { display: flex; gap: 4px; margin-top: 8px; }
 .act {
   display: inline-flex; align-items: center; gap: 5px;

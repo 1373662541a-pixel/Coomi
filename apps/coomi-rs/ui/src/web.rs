@@ -797,6 +797,9 @@ pub async fn serve(
                 .delete(delete_session),
         )
         .route("/api/sessions/{id}/cwd", post(set_session_cwd))
+        .route("/api/sessions/{id}/messages/{msg_id}/edit", post(edit_session_message))
+        .route("/api/sessions/{id}/messages/{msg_id}", delete(delete_session_message))
+        .route("/api/sessions/{id}/messages/{msg_id}/truncate", post(truncate_session_message))
         .route("/api/fs/list", get(fs_list))
         .route("/api/fs/raw", get(fs_raw))
         .route("/api/fs/mkdir", post(fs_mkdir))
@@ -2033,6 +2036,79 @@ async fn delete_session(
         .delete(session_id)
         .map_err(|error| ApiError::internal(format!("failed to delete session {id}: {error:#}")))?;
     Ok(Json(json!({ "deleted": deleted })))
+}
+
+#[derive(Deserialize)]
+struct MessageEdit {
+    /// 新的消息正文（改文本用）。
+    content: String,
+}
+
+/// 编辑一条消息的正文。以引擎磁盘为权威源，改后前端应重新拉取会话。
+async fn edit_session_message(
+    State(state): State<AppState>,
+    AxumPath((id, msg_id)): AxumPath<(String, String)>,
+    Json(input): Json<MessageEdit>,
+) -> Result<Json<Value>, ApiError> {
+    let store = SessionStore::new(&state.home);
+    let session_id =
+        Uuid::parse_str(&id).map_err(|_| ApiError::bad_request("invalid session id"))?;
+    let content = input.content.trim();
+    if content.is_empty() {
+        return Err(ApiError::bad_request("message content must not be empty"));
+    }
+    let mut session = store
+        .load(session_id)
+        .map_err(|error| ApiError::internal(format!("failed to load session {id}: {error:#}")))?;
+    session
+        .edit_message(&msg_id, content)
+        .map_err(|error| ApiError::bad_request(format!("failed to edit message: {error:#}")))?;
+    store
+        .save(&session)
+        .map_err(|error| ApiError::internal(format!("failed to save session {id}: {error:#}")))?;
+    Ok(Json(json!({ "edited": true, "id": msg_id, "content": content })))
+}
+
+/// 删除一条消息。若删除 assistant，会连带其后 tool 结果；删除后前端应重新拉取会话。
+async fn delete_session_message(
+    State(state): State<AppState>,
+    AxumPath((id, msg_id)): AxumPath<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let store = SessionStore::new(&state.home);
+    let session_id =
+        Uuid::parse_str(&id).map_err(|_| ApiError::bad_request("invalid session id"))?;
+    let mut session = store
+        .load(session_id)
+        .map_err(|error| ApiError::internal(format!("failed to load session {id}: {error:#}")))?;
+    let removed = session
+        .delete_message(&msg_id)
+        .map_err(|error| ApiError::bad_request(format!("failed to delete message: {error:#}")))?;
+    store
+        .save(&session)
+        .map_err(|error| ApiError::internal(format!("failed to save session {id}: {error:#}")))?;
+    Ok(Json(json!({ "deleted": true, "id": msg_id, "removed": removed })))
+}
+
+/// 截断会话到指定消息 id 之前（删除该消息及其后所有内容），返回被删除的消息数。
+/// 用于「以该提问为起点重新回答」的前置截断。注意：此端点只改会话记录，
+/// 不会自动回滚工作区（工作区回滚由 WS 的 retry_message 结合 git 快照处理）。
+async fn truncate_session_message(
+    State(state): State<AppState>,
+    AxumPath((id, msg_id)): AxumPath<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let store = SessionStore::new(&state.home);
+    let session_id =
+        Uuid::parse_str(&id).map_err(|_| ApiError::bad_request("invalid session id"))?;
+    let mut session = store
+        .load(session_id)
+        .map_err(|error| ApiError::internal(format!("failed to load session {id}: {error:#}")))?;
+    let removed = session
+        .truncate_from(&msg_id)
+        .map_err(|error| ApiError::bad_request(format!("failed to truncate message: {error:#}")))?;
+    store
+        .save(&session)
+        .map_err(|error| ApiError::internal(format!("failed to save session {id}: {error:#}")))?;
+    Ok(Json(json!({ "truncated": true, "id": msg_id, "removed": removed })))
 }
 
 #[derive(Deserialize)]
@@ -5040,6 +5116,63 @@ async fn handle_command(
             });
             *task.abort.lock().unwrap_or_else(|p| p.into_inner()) = Some(spawned.abort_handle());
         }
+        "regenerate_response" => {
+            // 重新生成某条 assistant 回复：删除该回复及其后所有消息，
+            // 找到它对应的 user 提问，用该提问重新调用 run_turn。
+            let msg_id = payload
+                .get("msg_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_default();
+            if msg_id.is_empty() {
+                context.send_error(envelope_id, "regenerate_response requires a msg_id");
+                return;
+            }
+            let task = Arc::clone(&context.task);
+            if task.running.swap(true, Ordering::SeqCst) {
+                context.send_error(envelope_id, "a turn is already running");
+                return;
+            }
+            let begin_result = begin_managed_task(state, session_id, &task, "agent_retry");
+            if let Err(error) = begin_result {
+                task.running.store(false, Ordering::SeqCst);
+                context.send_error(
+                    envelope_id,
+                    format!("failed to create retry task: {error:#}"),
+                );
+                return;
+            }
+            persist_task_checkpoints(state);
+            context.send_ack(envelope_id);
+            let turn_state = state.clone();
+            let turn_session_id = session_id.to_owned();
+            let turn_context = Arc::clone(&context);
+            let turn_task = Arc::clone(&task);
+            let turn_msg_id = msg_id.to_owned();
+            let spawned = tokio::spawn(async move {
+                let result = regenerate_response(
+                    &turn_state,
+                    &turn_session_id,
+                    &turn_msg_id,
+                    Arc::clone(&turn_context),
+                    Arc::clone(&turn_task),
+                )
+                .await;
+                let failed = result.is_err();
+                if let Err(error) = result {
+                    turn_task.push_event(json!({"event_type":"agent_error","message":format!("{error:#}"),"is_fatal":false}));
+                }
+                turn_task.push_event(json!({"event_type":"turn_end"}));
+                turn_task.finish(if failed { "failed" } else { "completed" });
+                persist_task_checkpoints(&turn_state);
+                turn_task
+                    .abort
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .take();
+            });
+            *task.abort.lock().unwrap_or_else(|p| p.into_inner()) = Some(spawned.abort_handle());
+        }
         _ => context.send_error(envelope_id, format!("unsupported command: {command}")),
     }
 }
@@ -5061,6 +5194,41 @@ async fn retry_turn(
         "no user message to retry"
     );
     task.push_event(json!({"event_type":"connection_retry","attempt":1,"max_attempts":1,"delay":0,"message":"正在恢复上一轮任务"}));
+    run_turn(state, session_id, "", true, context, task).await
+}
+
+/// 重新生成一条 assistant 回复：定位其对应的 user 提问，删除该回复及其后所有
+/// 消息（保留提问本身及其之前的历史），再以该提问为 prompt 重新调用 run_turn。
+async fn regenerate_response(
+    state: &AppState,
+    session_id: &str,
+    msg_id: &str,
+    context: Arc<ConnectionContext>,
+    task: Arc<SessionTask>,
+) -> Result<()> {
+    let store = SessionStore::new(&state.home);
+    let id = Uuid::parse_str(session_id).context("invalid session id")?;
+    let mut session = store.load(id).context("failed to load session for regenerate")?;
+    // 定位该 assistant 消息，并找到它之前最近的一条 user 提问。
+    let index = session
+        .find_message(msg_id)
+        .ok_or_else(|| anyhow::anyhow!("message {msg_id} not found in session"))?;
+    anyhow::ensure!(
+        index > 0,
+        "cannot regenerate the first message; it has no preceding user question"
+    );
+    anyhow::ensure!(
+        session.messages[..index]
+            .iter()
+            .any(|m| m.role == coomi_engine::Role::User && !m.internal),
+        "no user question precedes message {msg_id}"
+    );
+    // 从该 assistant 开始截断（删除它及其后所有），保留提问及之前历史。
+    let _removed = session.truncate_from(msg_id).context("failed to truncate after message")?;
+    store.save(&session).context("failed to save truncated session")?;
+    task.push_event(json!({"event_type":"connection_retry","attempt":1,"max_attempts":1,"delay":0,"message":"正在重新生成回复"}));
+    // 用 recovery 模式继续：历史已截断到该提问为止，引擎基于保留的提问重新生成回复，
+    // 且不会重复追加提问（continue_interrupted_turn 只追加内部恢复提示）。
     run_turn(state, session_id, "", true, context, task).await
 }
 

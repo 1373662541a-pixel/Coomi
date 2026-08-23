@@ -20,8 +20,8 @@ export interface ToolCard {
   imageMissing?: boolean
 }
 
-export interface AssistantMessage { kind: 'assistant'; id: string; content: string; streaming: boolean }
-export interface UserMessage { kind: 'user'; id: string; content: string }
+export interface AssistantMessage { kind: 'assistant'; id: string; mid: string; content: string; streaming: boolean }
+export interface UserMessage { kind: 'user'; id: string; mid: string; content: string }
 export interface ReasoningBlock { kind: 'reasoning'; id: string; content: string; expanded: boolean }
 
 export interface QuestionCard {
