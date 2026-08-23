@@ -64,7 +64,7 @@ export const useSessionStore = defineStore('session', () => {
     // 首条用户消息作为会话标题，抽屉里就不会全是「新对话」。
     const isFirst = !timeline.value.some(t => t.kind === 'user')
     if (isFirst) sessions.touch(sessionId.value, { title: sessions.deriveTitle(trimmed) })
-    timeline.value.push({ kind: 'user', id: nextId(), content: trimmed })
+    timeline.value.push({ kind: 'user', id: nextId(), mid: '', content: trimmed })
     runState.value = 'thinking'
     transport.value?.send({ command: 'send_guide', key })
     persistSoon()
@@ -382,13 +382,13 @@ export const useSessionStore = defineStore('session', () => {
     const isFirst = !timeline.value.some(t => t.kind === 'user')
     if (isFirst) sessions.touch(sessionId.value, { title: sessions.deriveTitle(trimmed) })
     if (isBusy.value) {
-      timeline.value.push({ kind: 'user', id: nextId(), content: trimmed })
+      timeline.value.push({ kind: 'user', id: nextId(), mid: '', content: trimmed })
       transport.value?.send({ command: 'jump_in', text: trimmed })
       persistSoon()
       return
     }
     turnToolTrace = []
-    timeline.value.push({ kind: 'user', id: nextId(), content: trimmed })
+    timeline.value.push({ kind: 'user', id: nextId(), mid: '', content: trimmed })
     runState.value = 'thinking'
     transport.value?.send({ command: 'send_message', text: trimmed })
     persistSoon()
@@ -475,9 +475,9 @@ export const useSessionStore = defineStore('session', () => {
         continue
       }
       if (m.role === 'user') {
-        items.push({ kind: 'user', id: nextId(), content: m.content })
+        items.push({ kind: 'user', id: nextId(), mid: m.id ?? '', content: m.content })
       } else if (m.role === 'assistant') {
-        if (m.content) items.push({ kind: 'assistant', id: nextId(), content: m.content, streaming: false })
+        if (m.content) items.push({ kind: 'assistant', id: nextId(), mid: m.id ?? '', content: m.content, streaming: false })
         for (const tc of m.tool_calls ?? []) {
           items.push({
             kind: 'tool', callId: tc.id, toolName: tc.name,
@@ -580,9 +580,49 @@ export const useSessionStore = defineStore('session', () => {
     }
   }
 
+  /** 编辑单条消息正文（改文本），成功后从引擎重新拉取时间线。 */
+  async function editMessage(mid: string, content: string): Promise<boolean> {
+    const trimmed = content.trim()
+    if (!mid || !trimmed) return false
+    try {
+      const res = await authedFetch(`/api/sessions/${sessionId.value}/messages/${encodeURIComponent(mid)}/edit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: trimmed }),
+      })
+      if (!res.ok) return false
+      await restoreFromEngine(sessionId.value)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** 删除单条消息（assistant 会连带其后 tool 结果），成功后刷新时间线。 */
+  async function deleteMessage(mid: string): Promise<boolean> {
+    if (!mid) return false
+    try {
+      const res = await authedFetch(`/api/sessions/${sessionId.value}/messages/${encodeURIComponent(mid)}`, {
+        method: 'DELETE',
+      })
+      if (!res.ok) return false
+      await restoreFromEngine(sessionId.value)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** 重新生成某条 assistant 回复：定位其提问，截断其后并重新生成。 */
+  function regenerate(mid: string) {
+    if (!mid || isBusy.value) return
+    runState.value = 'thinking'
+    transport.value?.send({ command: 'regenerate_response', msg_id: mid })
+  }
+
   function appendAssistant(content: string) {
     if (!currentAssistant) {
-      timeline.value.push({ kind: 'assistant', id: nextId(), content: '', streaming: true })
+      timeline.value.push({ kind: 'assistant', id: nextId(), mid: '', content: '', streaming: true })
       // 必须拿 push 之后数组里的那个对象：ref 会把它包成代理，
       // 直接改 push 进去的原始对象不触发渲染，流式文本就只会停在第一片。
       currentAssistant = timeline.value[timeline.value.length - 1] as AssistantMessage
@@ -662,7 +702,7 @@ export const useSessionStore = defineStore('session', () => {
     if (notice?.kind === 'notice') Object.assign(notice, patch)
   }
 
-  return { sessionId, mode, timeline, runState, usage, retryConfirmation, cwd, loop, isBusy, pendingApproval, pendingQuestion, connect, reconnect, disconnect, flushPersistence, sendMessage, cancel, approve, answerQuestion, setPermissionMode, setReasoningEffort, setMaxToolRounds, setSessionMode, togglePlanMode, selectModel, retryInterruptedTurn, dismissRetry, completeFileTransfer, newSession, openSession, deleteSession, setSessionCwd, sendGuide, consentToolFailureFeedback, finishToolFailureFeedback }
+  return { sessionId, mode, timeline, runState, usage, retryConfirmation, cwd, loop, isBusy, pendingApproval, pendingQuestion, connect, reconnect, disconnect, flushPersistence, sendMessage, cancel, approve, answerQuestion, setPermissionMode, setReasoningEffort, setMaxToolRounds, setSessionMode, togglePlanMode, selectModel, retryInterruptedTurn, dismissRetry, completeFileTransfer, newSession, openSession, deleteSession, setSessionCwd, editMessage, deleteMessage, regenerate, sendGuide, consentToolFailureFeedback, finishToolFailureFeedback }
 })
 
 function fmtTokens(n: number): string { return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n) }
@@ -758,6 +798,7 @@ function persistActiveSessionId(id: string) {
 
 /** 引擎磁盘上会话文件的原始消息结构（与 coomi-engine 的 ChatMessage 对应）。 */
 interface ChatMessageJson {
+  id?: string
   role: 'system' | 'user' | 'assistant' | 'tool'
   content: string
   tool_calls?: Array<{

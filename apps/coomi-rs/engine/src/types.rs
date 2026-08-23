@@ -95,6 +95,10 @@ pub enum Role {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ChatMessage {
+    /// 稳定消息 id：供前端精确定位单条消息做编辑/删除/重新回答。
+    /// 旧会话无 id 时惰性生成（serde default 兼容），会话加载时补齐。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
     pub role: Role,
     pub content: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -130,6 +134,7 @@ impl ChatMessage {
             sanitize_json_encoded_data(&mut call.arguments);
         }
         Self {
+            id: new_message_id(),
             role: Role::Assistant,
             content: sanitize_long_encoded_data(&content.into()),
             tool_calls,
@@ -143,6 +148,7 @@ impl ChatMessage {
 
     pub fn tool(call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
+            id: new_message_id(),
             role: Role::Tool,
             content: sanitize_long_encoded_data(&content.into()),
             tool_calls: Vec::new(),
@@ -156,6 +162,7 @@ impl ChatMessage {
 
     fn plain(role: Role, content: impl Into<String>) -> Self {
         Self {
+            id: new_message_id(),
             role,
             content: sanitize_long_encoded_data(&content.into()),
             tool_calls: Vec::new(),
@@ -187,6 +194,11 @@ impl ChatMessage {
         message.provider_items.push(item);
         message
     }
+}
+
+/// 生成一条稳定的消息 id（UUID v4 字符串）。
+fn new_message_id() -> String {
+    uuid::Uuid::new_v4().to_string()
 }
 
 /// Replace very long inline encodings before they enter model context or persistence.

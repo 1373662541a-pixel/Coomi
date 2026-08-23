@@ -98,6 +98,55 @@ impl Session {
     pub fn touch(&mut self) {
         self.updated_at = Utc::now();
     }
+
+    /// 按 id 定位消息在 `messages` 中的下标。找不到返回 None。
+    pub fn find_message(&self, id: &str) -> Option<usize> {
+        self.messages.iter().position(|message| message.id == id)
+    }
+
+    /// 编辑单条消息正文（仅改文本；工具调用/角色不动）。
+    /// 找不到该 id 时报错。
+    pub fn edit_message(&mut self, id: &str, new_content: &str) -> Result<()> {
+        let index = self
+            .find_message(id)
+            .ok_or_else(|| anyhow::anyhow!("message {id} not found in session"))?;
+        self.messages[index].content = new_content.to_owned();
+        self.touch();
+        Ok(())
+    }
+
+    /// 截断到指定消息 id 及其之后：保留 `[0, index)`，删除 `[index, len)`。
+    /// 用于「以该提问为起点重新回答」—— 截断掉该提问及其后的回复/工具结果。
+    pub fn truncate_from(&mut self, id: &str) -> Result<usize> {
+        let index = self
+            .find_message(id)
+            .ok_or_else(|| anyhow::anyhow!("message {id} not found in session"))?;
+        let removed = self.messages.len() - index;
+        self.messages.truncate(index);
+        self.touch();
+        Ok(removed)
+    }
+
+    /// 删除指定消息（含其后的工具结果消息），返回删除的消息数。
+    /// 若该消息指向一条 assistant，会连同它关联的 tool 结果一起删除。
+    pub fn delete_message(&mut self, id: &str) -> Result<usize> {
+        let index = self
+            .find_message(id)
+            .ok_or_else(|| anyhow::anyhow!("message {id} not found in session"))?;
+        let role = self.messages[index].role;
+        let mut removed = 1;
+        // 删除 assistant 时，把紧随其后的 tool 结果消息也一并移除（它们属于该回复）。
+        if role == crate::Role::Assistant {
+            while index + removed < self.messages.len()
+                && self.messages[index + removed].role == crate::Role::Tool
+            {
+                removed += 1;
+            }
+        }
+        self.messages.drain(index..index + removed);
+        self.touch();
+        Ok(removed)
+    }
 }
 
 impl SessionStore {
@@ -694,5 +743,65 @@ mod tests {
             ChatMessage::assistant("hello world", Vec::new()),
         ];
         assert_eq!(derive_summary(&short), "hi → hello world");
-    }
-}
+      }
+  
+      #[test]
+      fn messages_get_unique_and_stable_ids() {
+          let mut session = Session::new("provider", "model", PathBuf::from("/tmp"));
+          session.messages.push(ChatMessage::user("first"));
+          session.messages.push(ChatMessage::assistant("reply", Vec::new()));
+          let id0 = session.messages[0].id.clone();
+          let id1 = session.messages[1].id.clone();
+          assert!(!id0.is_empty());
+          assert!(!id1.is_empty());
+          assert_ne!(id0, id1, "message ids should be unique");
+      }
+
+      #[test]
+      fn edit_message_changes_content_only() {
+          let mut session = Session::new("provider", "model", PathBuf::from("/tmp"));
+          session.messages.push(ChatMessage::user("old question"));
+          let id = session.messages[0].id.clone();
+          session.edit_message(&id, "new question").expect("edit");
+          assert_eq!(session.messages[0].content, "new question");
+          assert_eq!(session.messages[0].role, crate::Role::User);
+          assert!(session.edit_message("no-such-id", "x").is_err());
+      }
+
+      #[test]
+      fn delete_assistant_removes_following_tool_results() {
+          let mut session = Session::new("provider", "model", PathBuf::from("/tmp"));
+          let user = ChatMessage::user("do something");
+          let user_id = user.id.clone();
+          session.messages.push(user);
+          let assistant = ChatMessage::assistant("done", Vec::new());
+          let assistant_id = assistant.id.clone();
+          session.messages.push(assistant);
+          session.messages.push(ChatMessage::tool("call-1", "result"));
+          session.messages.push(ChatMessage::tool("call-2", "result2"));
+          assert_eq!(session.messages.len(), 4);
+          let removed = session.delete_message(&assistant_id).expect("delete");
+          assert_eq!(removed, 3, "delete assistant should remove following tool results");
+          assert_eq!(session.messages.len(), 1);
+          assert_eq!(session.messages[0].id, user_id);
+      }
+
+      #[test]
+      fn truncate_from_drops_message_and_the_rest() {
+          let mut session = Session::new("provider", "model", PathBuf::from("/tmp"));
+          let q1 = ChatMessage::user("q1");
+          let a1 = ChatMessage::assistant("a1", Vec::new());
+          let q2 = ChatMessage::user("q2");
+          let a2 = ChatMessage::assistant("a2", Vec::new());
+          let q2_id = q2.id.clone();
+          session.messages.push(q1);
+          session.messages.push(a1);
+          session.messages.push(q2);
+          session.messages.push(a2);
+          let removed = session.truncate_from(&q2_id).expect("truncate");
+          assert_eq!(removed, 2);
+          assert_eq!(session.messages.len(), 2);
+          assert_eq!(session.messages[0].content, "q1");
+          assert_eq!(session.messages[1].content, "a1");
+      }
+  }
