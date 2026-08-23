@@ -608,6 +608,321 @@ pub struct UserInputRequest {
 
 pub type UserInputResponse = BTreeMap<String, String>;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Workflow 可编排多步骤执行（作为 Coomi 拓展能力，落点在 .coomi/workflows/<id>/）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 单个步骤可绑定的执行能力（混合声明式）。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum StepAction {
+    /// 一次独立的模型调用，使用本步骤自己的 prompt（可配置是否隔离上下文）。
+    Model {
+        prompt: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        /// 是否使用隔离的子会话上下文；缺省跟随 workflow 的 model_isolation 设置。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        isolate: Option<bool>,
+    },
+    /// 直接调用一个具体工具（不经过模型推理）。
+    Tool {
+        tool: String,
+        #[serde(default)]
+        arguments: serde_json::Value,
+    },
+    /// 在工作目录执行一条 shell 命令。
+    Script {
+        command: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_s: Option<u64>,
+    },
+    /// 嵌套执行一个已注册的子 workflow（组合复用）。
+    SubWorkflow {
+        #[serde(default)]
+        workflow: String,
+    },
+}
+
+/// 步骤的完成状态。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowStepState {
+    Pending,
+    Waiting,
+    Running,
+    Succeeded,
+    Failed,
+    Skipped,
+    Cancelled,
+}
+
+impl Default for WorkflowStepState {
+    fn default() -> Self {
+        Self::Pending
+    }
+}
+
+/// 一个可编排的步骤。`depends_on` 是其前置步骤 id，构成 DAG 边。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkflowStep {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub action: StepAction,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    #[serde(default)]
+    pub retry: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_s: Option<u64>,
+    #[serde(default)]
+    pub state: WorkflowStepState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    #[serde(default)]
+    pub attempts: u32,
+}
+
+impl WorkflowStep {
+    pub fn new(id: impl Into<String>, name: impl Into<String>, action: StepAction) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            description: String::new(),
+            action,
+            depends_on: Vec::new(),
+            retry: 0,
+            timeout_s: None,
+            state: WorkflowStepState::Pending,
+            result: None,
+            attempts: 0,
+        }
+    }
+
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = description.into();
+        self
+    }
+
+    pub fn depends_on(mut self, ids: &[&str]) -> Self {
+        self.depends_on = ids.iter().map(|s| (*s).to_string()).collect();
+        self
+    }
+
+    pub fn with_retry(mut self, retry: u32) -> Self {
+        self.retry = retry;
+        self
+    }
+}
+
+/// workflow 整体状态。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowStatus {
+    Pending,
+    Running,
+    Paused,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl Default for WorkflowStatus {
+    fn default() -> Self {
+        Self::Pending
+    }
+}
+
+/// workflow 的来源（用于区分内置/用户/模型生成）。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowOrigin {
+    Model,
+    User,
+    Imported,
+    Builtin,
+}
+
+impl Default for WorkflowOrigin {
+    fn default() -> Self {
+        Self::User
+    }
+}
+
+impl WorkflowOrigin {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::User => "user",
+            Self::Imported => "imported",
+            Self::Builtin => "builtin",
+        }
+    }
+}
+
+/// 一个可编排工作流的完整定义（定义文件落点为 .coomi/workflows/<id>/workflow.json）。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkflowState {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub steps: Vec<WorkflowStep>,
+    #[serde(default)]
+    pub status: WorkflowStatus,
+    #[serde(default)]
+    pub origin: WorkflowOrigin,
+    /// Model 类型步骤默认是否隔离上下文。
+    #[serde(default)]
+    pub model_isolation: bool,
+    /// workflow 定义运行时的临时变量（步骤之间传递数据的通道）。
+    #[serde(default)]
+    pub variables: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
+impl WorkflowState {
+    pub fn new(id: impl Into<String>, name: impl Into<String>, steps: Vec<WorkflowStep>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            description: String::new(),
+            steps,
+            status: WorkflowStatus::Pending,
+            origin: WorkflowOrigin::User,
+            model_isolation: false,
+            variables: BTreeMap::new(),
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
+    /// 校验依赖图：无自环、无未知依赖、无重复 id、每个依赖最终可执行。
+    /// 返回给定步骤的拓扑可执行顺序（DAG，允许多个无依赖的根并行）。
+    pub fn validate(&self) -> Result<(), String> {
+        if self.id.trim().is_empty() {
+            return Err("workflow id must not be empty".into());
+        }
+        if self.steps.is_empty() {
+            return Err("workflow must contain at least one step".into());
+        }
+        let mut seen = std::collections::HashSet::new();
+        for step in &self.steps {
+            if step.id.trim().is_empty() {
+                return Err("step id must not be empty".into());
+            }
+            if !seen.insert(step.id.as_str()) {
+                return Err(format!("duplicate step id `{}`", step.id));
+            }
+        }
+        for step in &self.steps {
+            for dep in &step.depends_on {
+                if dep == &step.id {
+                    return Err(format!(
+                        "step `{}` depends on itself",
+                        step.id
+                    ));
+                }
+                if !seen.contains(dep.as_str()) {
+                    return Err(format!(
+                        "step `{}` depends on unknown step `{}`",
+                        step.id, dep
+                    ));
+                }
+            }
+        }
+        self.topological_order()?;
+        Ok(())
+    }
+
+    /// 返回一个拓扑顺序。若存在循环或未知依赖则报错。
+    pub fn topological_order(&self) -> Result<Vec<String>, String> {
+        let mut indegree: BTreeMap<String, usize> = BTreeMap::new();
+        let mut dependents: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for step in &self.steps {
+            indegree.entry(step.id.clone()).or_insert(0);
+            dependents.entry(step.id.clone()).or_default();
+        }
+        for step in &self.steps {
+            for dep in &step.depends_on {
+                // indegree 是「步骤自身有多少条入边」= depends_on 数量。
+                if let Some(deg) = indegree.get_mut(&step.id) {
+                    *deg += 1;
+                }
+                // dependents 是「被依赖者的后继」= 依赖它的步骤。
+                if let Some(children) = dependents.get_mut(dep) {
+                    children.push(step.id.clone());
+                }
+            }
+        }
+        // Kahn's algorithm
+        let mut queue: Vec<String> = indegree
+            .iter()
+            .filter(|(_, deg)| **deg == 0)
+            .map(|(id, _)| id.clone())
+            .collect();
+        queue.sort();
+        let mut order: Vec<String> = Vec::new();
+        let mut temp = queue;
+        while let Some(node) = temp.first().cloned() {
+            temp.remove(0);
+            order.push(node.clone());
+            if let Some(children) = dependents.get(&node) {
+                for child in children {
+                    if let Some(deg) = indegree.get_mut(child) {
+                        *deg = deg.saturating_sub(1);
+                        if *deg == 0 {
+                            temp.push(child.clone());
+                        }
+                    }
+                }
+            }
+            temp.sort();
+            temp.dedup();
+        }
+        if order.len() != self.steps.len() {
+            return Err("workflow dependency graph contains a cycle".into());
+        }
+        Ok(order)
+    }
+
+    /// 返回当前"可执行"的步骤 id：所有依赖已 succeeded 自身仍 Pending。
+    pub fn ready_steps(&self) -> Vec<String> {
+        let state_of = |id: &str| {
+            self.steps
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| s.state)
+        };
+        let mut ready = Vec::new();
+        for step in &self.steps {
+            if step.state != WorkflowStepState::Pending {
+                continue;
+            }
+            let all_deps_ok = step
+                .depends_on
+                .iter()
+                .all(|dep| state_of(dep) == Some(WorkflowStepState::Succeeded));
+            if all_deps_ok {
+                ready.push(step.id.clone());
+            }
+        }
+        ready
+    }
+
+    /// 所有步骤是否都到达终态。
+    pub fn is_terminal(&self) -> bool {
+        self.steps
+            .iter()
+            .all(|s| matches!(s.state, WorkflowStepState::Succeeded | WorkflowStepState::Failed | WorkflowStepState::Skipped | WorkflowStepState::Cancelled))
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FileTransferRequest {
     pub request_id: String,
@@ -764,5 +1079,152 @@ mod encoding_tests {
         let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature";
         let input = format!("hash={hash} jwt={jwt}");
         assert_eq!(sanitize_long_encoded_data(&input), input);
+    }
+}
+
+#[cfg(test)]
+mod workflow_tests {
+    use super::{StepAction, WorkflowState, WorkflowStep, WorkflowStepState};
+
+    fn model_step(id: &str, name: &str, deps: &[&str]) -> WorkflowStep {
+        WorkflowStep::new(id, name, StepAction::Model { prompt: "hi".into(), model: None, isolate: None })
+            .depends_on(deps)
+    }
+
+    fn linear_workflow() -> WorkflowState {
+        WorkflowState::new(
+            "wf-1",
+            "linear",
+            vec![
+                model_step("a", "A", &[]),
+                model_step("b", "B", &["a"]),
+                model_step("c", "C", &["b"]),
+            ],
+        )
+    }
+
+    #[test]
+    fn topological_order_is_respected() {
+        let wf = linear_workflow();
+        wf.validate().expect("valid");
+        assert_eq!(wf.topological_order().unwrap(), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn parallel_branches_are_detected() {
+        let wf = WorkflowState::new(
+            "wf-2",
+            "parallel",
+            vec![
+                model_step("root", "root", &[]),
+                model_step("left", "L", &["root"]),
+                model_step("right", "R", &["root"]),
+                model_step("join", "join", &["left", "right"]),
+            ],
+        );
+        wf.validate().expect("valid");
+        // root 先，然后 left/right 可并行（顺序不定但都在 join 前）
+        let order = wf.topological_order().unwrap();
+        assert_eq!(order[0], "root");
+        assert_eq!(order[3], "join");
+        assert!(order.contains(&"left".to_string()));
+        assert!(order.contains(&"right".to_string()));
+    }
+
+    #[test]
+    fn cycle_is_rejected() {
+        let wf = WorkflowState::new(
+            "wf-3",
+            "cycle",
+            vec![
+                model_step("a", "A", &["b"]),
+                model_step("b", "B", &["a"]),
+            ],
+        );
+        assert!(wf.validate().is_err());
+    }
+
+    #[test]
+    fn unknown_dependency_is_rejected() {
+        let wf = WorkflowState::new(
+            "wf-4",
+            "bad-dep",
+            vec![model_step("a", "A", &["missing"])],
+        );
+        assert!(wf.validate().is_err());
+    }
+
+    #[test]
+    fn self_dependency_is_rejected() {
+        let wf = WorkflowState::new(
+            "wf-5",
+            "self-dep",
+            vec![model_step("a", "A", &["a"])],
+        );
+        assert!(wf.validate().is_err());
+    }
+
+    #[test]
+    fn duplicate_step_id_is_rejected() {
+        let wf = WorkflowState::new(
+            "wf-6",
+            "dup",
+            vec![model_step("a", "A", &[]), model_step("a", "A2", &[])],
+        );
+        assert!(wf.validate().is_err());
+    }
+
+    #[test]
+    fn empty_steps_are_rejected() {
+        let wf = WorkflowState::new("wf-7", "empty", vec![]);
+        assert!(wf.validate().is_err());
+    }
+
+    #[test]
+    fn ready_steps_only_include_unblocked_pending() {
+        let mut wf = linear_workflow();
+        // 初始只有根 a 就绪
+        assert_eq!(wf.ready_steps(), vec!["a"]);
+        // 标记 a 成功，b 就绪
+        wf.steps[0].state = WorkflowStepState::Succeeded;
+        assert_eq!(wf.ready_steps(), vec!["b"]);
+        // a 仍 pending 时 b 不因 c 就绪
+        wf.steps[1].state = WorkflowStepState::Pending;
+        wf.steps[0].state = WorkflowStepState::Pending;
+        assert_eq!(wf.ready_steps(), vec!["a"]);
+    }
+
+    #[test]
+    fn is_terminal_when_all_finished() {
+        let mut wf = linear_workflow();
+        for step in &mut wf.steps {
+            step.state = WorkflowStepState::Succeeded;
+        }
+        assert!(wf.is_terminal());
+        wf.steps[0].state = WorkflowStepState::Running;
+        assert!(!wf.is_terminal());
+    }
+
+    #[test]
+    fn validate_accepts_diamond() {
+        let wf = WorkflowState::new(
+            "wf-8",
+            "diamond",
+            vec![
+                model_step("a", "A", &[]),
+                model_step("b", "B", &["a"]),
+                model_step("c", "C", &["a"]),
+                model_step("d", "D", &["b", "c"]),
+            ],
+        );
+        wf.validate().expect("diamond valid");
+    }
+
+    #[test]
+    fn model_step_defaults_to_pending() {
+        let step = model_step("s", "S", &[]);
+        assert_eq!(step.state, WorkflowStepState::Pending);
+        assert_eq!(step.attempts, 0);
+        assert!(step.result.is_none());
     }
 }
