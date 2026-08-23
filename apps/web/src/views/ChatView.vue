@@ -183,6 +183,13 @@ watch(() => session.pendingQuestion?.callId, (id, previous) => {
           <button class="retry-primary" @click="session.retryInterruptedTurn()">继续重试</button>
         </div>
       </div>
+      <div v-if="session.undoConfirm" class="retry-confirm">
+        <div><CoomiIcon name="arrowLeft" :size="16" /><span>确定回撤这一轮？将撤回该轮执行与产生的所有修改，并返回上一轮状态。</span></div>
+        <div class="retry-actions">
+          <button class="retry-secondary" @click="session.cancelUndo()">取消</button>
+          <button class="retry-primary" @click="session.confirmUndo()">确认回撤</button>
+        </div>
+      </div>
       <StatusBar />
       <Composer />
     </div>

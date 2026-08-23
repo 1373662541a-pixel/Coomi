@@ -19,6 +19,8 @@ export interface FileTransferResultCommand { command: 'file_transfer_result'; re
 export interface SendGuideCommand { command: 'send_guide'; key: string }
 export interface RetryTurnCommand { command: 'retry_turn' }
 export interface RegenerateResponseCommand { command: 'regenerate_response'; msg_id: string }
+export interface EditTurnCommand { command: 'edit_turn'; msg_id: string; text: string }
+export interface UndoTurnCommand { command: 'undo_turn'; msg_id: string }
 export interface SetReasoningEffortCommand { command: 'set_reasoning_effort'; effort: ReasoningEffort }
 export interface SetMaxToolRoundsCommand { command: 'set_max_tool_rounds'; rounds: number }
 export interface AckEventCommand { command: 'ack_event'; event_seq: number }
@@ -27,7 +29,8 @@ export type AgentCommand =
   | SendMessageCommand | CancelCommand | JumpInCommand | ApproveToolCommand
   | AnswerQuestionCommand | SetPermissionModeCommand | SetSessionModeCommand | EnterPlanModeCommand
   | ExitPlanModeCommand | SelectModelCommand | FileTransferResultCommand
-  | SendGuideCommand | RetryTurnCommand | RegenerateResponseCommand | SetReasoningEffortCommand | SetMaxToolRoundsCommand | AckEventCommand
+  | SendGuideCommand | RetryTurnCommand | RegenerateResponseCommand | EditTurnCommand | UndoTurnCommand
+  | SetReasoningEffortCommand | SetMaxToolRoundsCommand | AckEventCommand
 
 export const PROTOCOL_VERSION = 1
 export type EnvelopeType = 'event' | 'command' | 'ack' | 'error'

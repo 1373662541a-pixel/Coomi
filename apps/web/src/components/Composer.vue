@@ -177,6 +177,10 @@ watch(text, () => {
 
 <template>
   <div class="composer">
+    <div v-if="session.pendingEdit" class="edit-banner">
+      <span>正在编辑上一条消息，发送将覆盖该轮执行</span>
+      <button @click="session.cancelEditMessage()">取消编辑</button>
+    </div>
     <div v-if="transferText" class="transfer">
       <span>{{ transferText }}</span><progress :value="transferProgress" max="100" />
     </div>
@@ -262,6 +266,15 @@ watch(text, () => {
 
 <style scoped>
 .composer { position: relative; padding: 6px 10px calc(var(--safe-bottom) + 8px); background: var(--bg); }
+.edit-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  margin: 0 2px 6px; padding: 6px 12px;
+  border: 1px solid color-mix(in srgb, var(--blue) 40%, var(--border));
+  border-radius: var(--r-pill);
+  background: var(--blue-soft); color: var(--blue);
+  font-size: 12px;
+}
+.edit-banner button { border: 0; background: none; color: var(--blue); font-weight: 650; }
 .transfer { display: flex; align-items: center; gap: 8px; margin: 0 2px 6px; font-size: 11.5px; color: var(--text-2); }
 .transfer span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .transfer progress { width: 76px; height: 4px; accent-color: var(--blue); }

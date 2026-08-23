@@ -5173,6 +5173,80 @@ async fn handle_command(
             });
             *task.abort.lock().unwrap_or_else(|p| p.into_inner()) = Some(spawned.abort_handle());
         }
+        "edit_turn" => {
+            // 编辑覆盖：以新文本替换某轮 user 提问（缺省最后一条）并重新执行。
+            let text = payload
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            if text.is_empty() {
+                context.send_error(envelope_id, "edit_turn requires a non-empty text");
+                return;
+            }
+            let msg_id = payload
+                .get("msg_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let task = Arc::clone(&context.task);
+            if task.running.swap(true, Ordering::SeqCst) {
+                context.send_error(envelope_id, "a turn is already running");
+                return;
+            }
+            if let Err(error) = begin_managed_task(state, session_id, &task, "agent_edit") {
+                task.running.store(false, Ordering::SeqCst);
+                context.send_error(envelope_id, format!("failed to create edit task: {error:#}"));
+                return;
+            }
+            persist_task_checkpoints(state);
+            context.send_ack(envelope_id);
+            let turn_state = state.clone();
+            let turn_session_id = session_id.to_owned();
+            let turn_msg_id = msg_id.to_owned();
+            let turn_text = text.to_owned();
+            let turn_context = Arc::clone(&context);
+            let turn_task = Arc::clone(&task);
+            let spawned = tokio::spawn(async move {
+                let result = edit_turn(
+                    &turn_state,
+                    &turn_session_id,
+                    &turn_msg_id,
+                    &turn_text,
+                    Arc::clone(&turn_context),
+                    Arc::clone(&turn_task),
+                )
+                .await;
+                let failed = result.is_err();
+                if let Err(error) = result {
+                    turn_task.push_event(json!({"event_type":"agent_error","message":format!("{error:#}"),"is_fatal":false}));
+                }
+                turn_task.push_event(json!({"event_type":"turn_end"}));
+                turn_task.finish(if failed { "failed" } else { "completed" });
+                persist_task_checkpoints(&turn_state);
+                turn_task
+                    .abort
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .take();
+            });
+            *task.abort.lock().unwrap_or_else(|p| p.into_inner()) = Some(spawned.abort_handle());
+        }
+        "undo_turn" => {
+            // 回撤：删除目标轮次（缺省最后一条 user 提问开始）及之后全部消息。
+            let msg_id = payload
+                .get("msg_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let task = Arc::clone(&context.task);
+            let result = undo_turn(state, session_id, msg_id, Arc::clone(&context), Arc::clone(&task)).await;
+            match result {
+                Ok(()) => {
+                    context.send_ack(envelope_id);
+                    task.push_event(json!({"event_type":"turn_end"}));
+                }
+                Err(error) => context.send_error(envelope_id, format!("undo_turn failed: {error:#}")),
+            }
+        }
         _ => context.send_error(envelope_id, format!("unsupported command: {command}")),
     }
 }
@@ -5230,6 +5304,85 @@ async fn regenerate_response(
     // 用 recovery 模式继续：历史已截断到该提问为止，引擎基于保留的提问重新生成回复，
     // 且不会重复追加提问（continue_interrupted_turn 只追加内部恢复提示）。
     run_turn(state, session_id, "", true, context, task).await
+}
+
+/// 编辑覆盖：定位目标 user 提问（缺省 = 最后一条 user 消息），截断它及其后所有
+/// 消息，以新文本替换该提问并重新执行一轮 —— 对应「回填输入框重发后覆盖上次执行」。
+async fn edit_turn(
+    state: &AppState,
+    session_id: &str,
+    msg_id: &str,
+    text: &str,
+    context: Arc<ConnectionContext>,
+    task: Arc<SessionTask>,
+) -> Result<()> {
+    let store = SessionStore::new(&state.home);
+    let id = Uuid::parse_str(session_id).context("invalid session id")?;
+    let mut session = store.load(id).context("failed to load session for edit")?;
+    let target = if msg_id.is_empty() {
+        session
+            .messages
+            .iter()
+            .rposition(|m| m.role == coomi_engine::Role::User && !m.internal)
+    } else {
+        session.find_message(msg_id)
+    };
+    let target = target
+        .ok_or_else(|| anyhow::anyhow!("message {msg_id} or its user prompt not found in session"))?;
+    anyhow::ensure!(
+        session.messages[target].role == coomi_engine::Role::User,
+        "cannot edit a non-user message"
+    );
+    let target_id = session.messages[target].id.clone();
+    let _removed = session
+        .truncate_from(&target_id)
+        .context("failed to truncate edited turn")?;
+    session
+        .messages
+        .push(coomi_engine::ChatMessage::user(text.to_owned()));
+    store.save(&session).context("failed to save edited session")?;
+    task.push_event(json!({"event_type":"connection_retry","attempt":1,"max_attempts":1,"delay":0,"message":"正在重新执行编辑后的任务"}));
+    // 历史已含新提问，recovery 模式从它继续执行且不会重复追加提问。
+    run_turn(state, session_id, "", true, context, task).await
+}
+
+/// 回撤：定位目标轮次的 user 提问（缺省 = 最后一条 user 消息；给 assistant id 时
+/// 回撤到它对应的提问），截断该提问及其后所有消息，不重新执行。
+/// 任务运行中会先取消再截断。
+async fn undo_turn(
+    state: &AppState,
+    session_id: &str,
+    msg_id: &str,
+    _context: Arc<ConnectionContext>,
+    task: Arc<SessionTask>,
+) -> Result<()> {
+    if task.running.load(Ordering::SeqCst) {
+        let _ = stop_session_task(state, session_id, &task).await;
+    }
+    let store = SessionStore::new(&state.home);
+    let id = Uuid::parse_str(session_id).context("invalid session id")?;
+    let mut session = store.load(id).context("failed to load session for undo")?;
+    let target = if msg_id.is_empty() {
+        session
+            .messages
+            .iter()
+            .rposition(|m| m.role == coomi_engine::Role::User && !m.internal)
+    } else {
+        let index = session
+            .find_message(msg_id)
+            .ok_or_else(|| anyhow::anyhow!("message {msg_id} not found in session"))?;
+        session.messages[..index]
+            .iter()
+            .rposition(|m| m.role == coomi_engine::Role::User && !m.internal)
+    };
+    let target = target.ok_or_else(|| anyhow::anyhow!("no turn to undo"))?;
+    let target_id = session.messages[target].id.clone();
+    let _removed = session
+        .truncate_from(&target_id)
+        .context("failed to truncate undone turn")?;
+    store.save(&session).context("failed to save undone session")?;
+    task.push_event(json!({"event_type":"turn_truncated"}));
+    Ok(())
 }
 
 async fn compact_web_session(

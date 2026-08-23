@@ -35,6 +35,10 @@ export const useSessionStore = defineStore('session', () => {
   /** 当前会话的工作目录（会话标记路径，绑定为会话执行目录）。 */
   const cwd = ref('')
   const loop = ref<LoopProgress>({ active: false, currentStep: 0, totalSteps: 0, status: '' })
+  /** 编辑覆盖状态：非空表示输入框正处于「编辑上一条消息」模式。 */
+  const pendingEdit = ref<{ mid: string; content: string } | null>(null)
+  /** 回撤确认弹窗状态：非空表示等待用户确认回撤该轮。 */
+  const undoConfirm = ref<{ mid: string } | null>(null)
 
   let currentAssistant: AssistantMessage | null = null
   let connectedSessionId = ''
@@ -48,6 +52,20 @@ export const useSessionStore = defineStore('session', () => {
   const isBusy = computed(() => runState.value !== 'idle')
   const pendingApproval = computed(() => timeline.value.find((t): t is ToolCard => t.kind === 'tool' && t.status === 'awaiting_approval'))
   const pendingQuestion = computed(() => timeline.value.find((t): t is QuestionCard => t.kind === 'question' && !t.answered))
+  /** 时间线里最新的用户消息（仅它可「编辑重发」）。 */
+  const lastUserMessage = computed(() => {
+    for (let i = timeline.value.length - 1; i >= 0; i--) {
+      if (timeline.value[i].kind === 'user') return timeline.value[i]
+    }
+    return null
+  })
+  /** 时间线里最新的助手消息（仅它可「回撤」）。 */
+  const lastAssistantMessage = computed(() => {
+    for (let i = timeline.value.length - 1; i >= 0; i--) {
+      if (timeline.value[i].kind === 'assistant') return timeline.value[i]
+    }
+    return null
+  })
 
   persistActiveSessionId(sessionId.value)
 
@@ -378,6 +396,24 @@ export const useSessionStore = defineStore('session', () => {
   function sendMessage(text: string) {
     const trimmed = text.trim()
     if (!trimmed) return
+    // 编辑覆盖模式：截断目标轮次（与引擎 edit_turn 行为一致），以新文本重新执行。
+    const edit = pendingEdit.value
+    if (edit) {
+      pendingEdit.value = null
+      let cutAt = -1
+      if (edit.mid) cutAt = timeline.value.findIndex(t => t.kind === 'user' && t.mid === edit.mid)
+      if (cutAt < 0) {
+        for (let i = timeline.value.length - 1; i >= 0; i--) {
+          if (timeline.value[i].kind === 'user') { cutAt = i; break }
+        }
+      }
+      if (cutAt >= 0) timeline.value.splice(cutAt)
+      timeline.value.push({ kind: 'user', id: nextId(), mid: '', content: trimmed })
+      runState.value = 'thinking'
+      transport.value?.send({ command: 'edit_turn', msg_id: edit.mid, text: trimmed })
+      persistSoon()
+      return
+    }
     // 首条用户消息作为会话标题，抽屉里就不会全是「新对话」。
     const isFirst = !timeline.value.some(t => t.kind === 'user')
     if (isFirst) sessions.touch(sessionId.value, { title: sessions.deriveTitle(trimmed) })
@@ -428,6 +464,8 @@ export const useSessionStore = defineStore('session', () => {
     flushPersistence()
     endAssistantStream(); timeline.value = []; usage.value = null
     loop.value = { active: false, currentStep: 0, totalSteps: 0, status: '' }; runState.value = 'idle'
+    pendingEdit.value = null
+    undoConfirm.value = null
     activateSession(createSessionId())
     connect()
   }
@@ -529,6 +567,8 @@ export const useSessionStore = defineStore('session', () => {
     endAssistantStream()
     usage.value = null
     loop.value = { active: false, currentStep: 0, totalSteps: 0, status: '' }
+    pendingEdit.value = null
+    undoConfirm.value = null
     runState.value = 'syncing'
     const targetId = isUuid(id) ? id : sessions.migrateId(id, createSessionId())
     activateSession(targetId)
@@ -581,43 +621,58 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   /** 编辑单条消息正文（改文本），成功后从引擎重新拉取时间线。 */
-  async function editMessage(mid: string, content: string): Promise<boolean> {
-    const trimmed = content.trim()
-    if (!mid || !trimmed) return false
-    try {
-      const res = await authedFetch(`/api/sessions/${sessionId.value}/messages/${encodeURIComponent(mid)}/edit`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: trimmed }),
-      })
-      if (!res.ok) return false
-      await restoreFromEngine(sessionId.value)
-      return true
-    } catch {
-      return false
-    }
+  /** 进入编辑模式：把旧文本回填到输入框，发送时覆盖该轮重新执行。 */
+  function startEditMessage(mid: string, content: string) {
+    if (isBusy.value) return
+    pendingEdit.value = { mid, content }
+    window.dispatchEvent(new CustomEvent('coomi:prefill-draft', {
+      detail: { sessionId: sessionId.value, text: content },
+    }))
   }
 
-  /** 删除单条消息（assistant 会连带其后 tool 结果），成功后刷新时间线。 */
-  async function deleteMessage(mid: string): Promise<boolean> {
-    if (!mid) return false
-    try {
-      const res = await authedFetch(`/api/sessions/${sessionId.value}/messages/${encodeURIComponent(mid)}`, {
-        method: 'DELETE',
-      })
-      if (!res.ok) return false
-      await restoreFromEngine(sessionId.value)
-      return true
-    } catch {
-      return false
-    }
+  /** 取消编辑模式（输入框内容保留，可继续作为普通新消息发送）。 */
+  function cancelEditMessage() {
+    pendingEdit.value = null
   }
 
-  /** 重新生成某条 assistant 回复：定位其提问，截断其后并重新生成。 */
-  function regenerate(mid: string) {
-    if (!mid || isBusy.value) return
-    runState.value = 'thinking'
-    transport.value?.send({ command: 'regenerate_response', msg_id: mid })
+  /** 点击「回撤」：先弹确认，避免误触后无法找回。 */
+  function requestUndo(mid: string) {
+    undoConfirm.value = { mid }
+  }
+
+  /** 确认回撤：执行截断，返回选定轮之前的状态。 */
+  function confirmUndo() {
+    const target = undoConfirm.value
+    undoConfirm.value = null
+    if (target) undoTurn(target.mid)
+  }
+
+  function cancelUndo() {
+    undoConfirm.value = null
+  }
+
+  /** 回撤一轮：截断该轮 user 提问及其后的所有消息（含工具执行过程），不重新执行。 */
+  function undoTurn(mid: string) {
+    if (isBusy.value) return
+    let cutAt = -1
+    if (mid) {
+      const aiIdx = timeline.value.findIndex(t => t.kind === 'assistant' && t.mid === mid)
+      if (aiIdx >= 0) {
+        for (let i = aiIdx; i >= 0; i--) {
+          if (timeline.value[i].kind === 'user') { cutAt = i; break }
+        }
+      }
+    }
+    if (cutAt < 0) {
+      for (let i = timeline.value.length - 1; i >= 0; i--) {
+        if (timeline.value[i].kind === 'user') { cutAt = i; break }
+      }
+    }
+    if (cutAt >= 0) timeline.value.splice(cutAt)
+    runState.value = 'idle'
+    pendingEdit.value = null
+    transport.value?.send({ command: 'undo_turn', msg_id: mid })
+    persistSoon()
   }
 
   function appendAssistant(content: string) {
@@ -702,7 +757,7 @@ export const useSessionStore = defineStore('session', () => {
     if (notice?.kind === 'notice') Object.assign(notice, patch)
   }
 
-  return { sessionId, mode, timeline, runState, usage, retryConfirmation, cwd, loop, isBusy, pendingApproval, pendingQuestion, connect, reconnect, disconnect, flushPersistence, sendMessage, cancel, approve, answerQuestion, setPermissionMode, setReasoningEffort, setMaxToolRounds, setSessionMode, togglePlanMode, selectModel, retryInterruptedTurn, dismissRetry, completeFileTransfer, newSession, openSession, deleteSession, setSessionCwd, editMessage, deleteMessage, regenerate, sendGuide, consentToolFailureFeedback, finishToolFailureFeedback }
+  return { sessionId, mode, timeline, runState, usage, retryConfirmation, cwd, loop, isBusy, pendingEdit, undoConfirm, lastUserMessage, lastAssistantMessage, pendingApproval, pendingQuestion, connect, reconnect, disconnect, flushPersistence, sendMessage, cancel, approve, answerQuestion, setPermissionMode, setReasoningEffort, setMaxToolRounds, setSessionMode, togglePlanMode, selectModel, retryInterruptedTurn, dismissRetry, completeFileTransfer, newSession, openSession, deleteSession, setSessionCwd, startEditMessage, cancelEditMessage, requestUndo, confirmUndo, cancelUndo, undoTurn, sendGuide, consentToolFailureFeedback, finishToolFailureFeedback }
 })
 
 function fmtTokens(n: number): string { return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n) }
