@@ -590,6 +590,18 @@ public class CoomiActivity extends Activity {
             launchExportPicker(path, suggestedName);
         }
 
+        /** 当前安装的 versionCode（检查更新页显示/对比用）。 */
+        @JavascriptInterface
+        public int getAppVersionCode() {
+            return app.coomi.UpdateChecker.currentVersionCode(CoomiActivity.this);
+        }
+
+        /** 从 web 检查更新页发起下载并安装（复用更新源的签名校验流程）。 */
+        @JavascriptInterface
+        public void installApk(String url, String version) {
+            app.coomi.UpdateChecker.downloadAndInstall(CoomiActivity.this, url, version);
+        }
+
         /**
          * 保存图片（data URL）到相册或下载目录。
          * Android 10+（API 29+）：MediaStore 免权限直写，弹二选一；
@@ -793,6 +805,11 @@ public class CoomiActivity extends Activity {
                  OutputStream output = new FileOutputStream(destination)) {
                 if (input == null) throw new IllegalStateException("无法读取所选文件");
                 copyStream(input, output);
+                // 显式授权 0644/0755，避免个别 ROM/文件系统默认权限导致 Termux/proot 环境读不到。
+                try {
+                    android.system.Os.chmod(destination.getAbsolutePath(), 0644);
+                    android.system.Os.chmod(inbox.getAbsolutePath(), 0755);
+                } catch (Exception ignored) { /* 权限提示失败不影响导入 */ }
                 rememberOrigin(destination, uri.toString(), name);
                 paths.put(destination.getAbsolutePath());
             } catch (Exception error) {

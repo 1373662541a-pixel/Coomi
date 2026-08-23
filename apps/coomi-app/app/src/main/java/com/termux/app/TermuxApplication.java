@@ -28,6 +28,9 @@ public class TermuxApplication extends android.app.Application {
         // Set crash handler for the app
         TermuxCrashUtils.setDefaultCrashHandler(this);
 
+        // Coomi 崩溃采集（Java 崩溃链式记录 + logcat 快照，覆盖原生闪退场景）
+        app.coomi.CrashLog.install(this);
+
         // Set log config for the app
         setLogConfig(context);
 

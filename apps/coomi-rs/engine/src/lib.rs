@@ -68,6 +68,7 @@ pub use types::UserInputQuestion;
 pub use types::UserInputRequest;
 pub use types::UserInputResponse;
 pub use types::WorkflowOrigin;
+pub use types::WorkflowSchedule;
 pub use types::WorkflowState;
 pub use types::WorkflowStatus;
 pub use types::WorkflowStep;

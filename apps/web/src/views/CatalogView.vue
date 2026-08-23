@@ -25,7 +25,7 @@ async function parseRes(res: Response): Promise<any> {
   return data
 }
 
-type Tab = 'mcp' | 'skills' | 'workflow'
+type Tab = 'mcp' | 'skills'
 const tab = ref<Tab>('mcp')
 /** 页签内的视图：已安装（本机实际配置，含自建/导入）｜仓库（内置目录）｜市场（社区注册表）。 */
 type Scope = 'installed' | 'catalog' | 'market'
@@ -51,22 +51,18 @@ const installedSkills = ref<SkillItem[]>([])
 // ── 社区市场（/api/registry）──
 const marketSkills = ref<MarketItem[]>([])
 const marketMcps = ref<MarketItem[]>([])
-const marketWorkflows = ref<MarketItem[]>([])
 const marketStats = ref<{ github?: any; app?: any }>({})
 const marketUpdatedAt = ref('')
 const marketLoading = ref(false)
 const marketQuery = ref('')
 const filteredMarketSkills = computed(() => filterMarketItems(marketSkills.value, marketQuery.value))
 const filteredMarketMcps = computed(() => filterMarketItems(marketMcps.value, marketQuery.value))
-const filteredMarketWorkflows = computed(() => filterMarketItems(marketWorkflows.value, marketQuery.value))
 const activeMarketResults = computed(() => {
   if (tab.value === 'skills') return filteredMarketSkills.value
-  if (tab.value === 'workflow') return filteredMarketWorkflows.value
   return filteredMarketMcps.value
 })
 const marketKindLabel = computed(() => {
   if (tab.value === 'skills') return 'Skills'
-  if (tab.value === 'workflow') return 'Workflow'
   return 'MCP'
 })
 const marketSearchPlaceholder = computed(() => `搜索 ${marketKindLabel.value}`)
@@ -235,14 +231,12 @@ async function loadMarket() {
     })
     marketSkills.value = (remote.skills ?? []).map(decorate)
     marketMcps.value = (remote.mcps ?? []).map(decorate)
-    marketWorkflows.value = (remote.workflows ?? []).map(decorate)
     marketStats.value = data.stats ?? {}
     marketUpdatedAt.value = remote.updated_at ?? ''
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
     marketSkills.value = []
     marketMcps.value = []
-    marketWorkflows.value = []
   } finally {
     marketLoading.value = false
   }
@@ -392,7 +386,7 @@ function goDashboard() {
         </button>
       </div>
 
-      <!-- 二级：MCP | Skills（市场视图下另有 Workflow） -->
+      <!-- 二级：MCP | Skills -->
       <div class="tabs">
         <button class="tab" :class="{ on: tab === 'mcp' }" @click="tab = 'mcp'">
           <CoomiIcon name="plug" :size="15" />MCP
@@ -401,10 +395,6 @@ function goDashboard() {
         <button class="tab" :class="{ on: tab === 'skills' }" @click="tab = 'skills'">
           <CoomiIcon name="wrench" :size="15" />Skills
           <span class="cnt">{{ skillsCount }}</span>
-        </button>
-        <button v-if="scope === 'market'" class="tab" :class="{ on: tab === 'workflow' }" @click="tab = 'workflow'">
-          <CoomiIcon name="target" :size="15" />Workflow
-          <span class="cnt">{{ marketWorkflows.length }}</span>
         </button>
       </div>
 
@@ -512,7 +502,7 @@ function goDashboard() {
         </div>
       </template>
 
-      <!-- 市场（社区注册表）：SKILL 可一键安装；MCP/Workflow 暂为收录展示 -->
+      <!-- 市场（社区注册表）：SKILL 可一键安装；MCP 暂为收录展示 -->
       <template v-else>
         <p v-if="marketLoading" class="hint">加载中…</p>
         <template v-else>
@@ -521,9 +511,6 @@ function goDashboard() {
           </p>
           <p v-else-if="tab === 'mcp' && marketMcps.length === 0" class="hint">
             广场里还没有 MCP。
-          </p>
-          <p v-else-if="tab === 'workflow' && marketWorkflows.length === 0" class="hint">
-            广场里还没有 Workflow。提交后在此展示，安装支持将在后续版本提供。
           </p>
           <p v-else-if="marketQuery.trim() && activeMarketResults.length === 0" class="hint">
             没有找到“{{ marketQuery.trim() }}”相关的 {{ marketKindLabel }}。
@@ -570,7 +557,7 @@ function goDashboard() {
             </div>
           </div>
 
-          <!-- MCP / Workflow：收录展示，先看仓库（安装支持 v2） -->
+          <!-- MCP：收录展示，先看仓库（安装支持 v2） -->
           <div v-if="tab === 'mcp' && filteredMarketMcps.length > 0" class="cards">
             <div v-for="item in filteredMarketMcps" :key="item.id" class="card">
               <button class="card-head" @click.stop="toggleExpanded(item.id)">
@@ -591,25 +578,6 @@ function goDashboard() {
             </div>
           </div>
 
-          <div v-if="tab === 'workflow' && filteredMarketWorkflows.length > 0" class="cards">
-            <div v-for="item in filteredMarketWorkflows" :key="item.id" class="card">
-              <button class="card-head" @click.stop="toggleExpanded(item.id)">
-                <span class="tile"><CoomiIcon name="target" :size="18" /></span>
-                <span class="cname">{{ item.name }}</span>
-                <span v-if="item.verified" class="badge vrf"><CoomiIcon name="shield" :size="10" />已验证</span>
-                <CoomiIcon name="chevronRight" :size="14" class="chev" :class="{ open: expanded === item.id }" />
-              </button>
-              <div v-if="expanded === item.id" class="detail">
-                <p class="cdesc">{{ item.description || '（无描述）' }}</p>
-                <a class="cmeta repo" :href="'https://github.com/' + item.repository" target="_blank">
-                  <CoomiIcon name="external" :size="12" />{{ item.repository }}
-                </a>
-                <div class="dops">
-                  <a class="act link" :href="'https://github.com/' + item.repository" target="_blank">查看仓库</a>
-                </div>
-              </div>
-            </div>
-          </div>
         </template>
       </template>
 

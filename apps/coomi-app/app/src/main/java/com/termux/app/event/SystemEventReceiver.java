@@ -41,6 +41,7 @@ public class SystemEventReceiver extends BroadcastReceiver {
         switch (action) {
             case Intent.ACTION_BOOT_COMPLETED:
                 onActionBootCompleted(context, intent);
+                maybeLaunchForAutostart(context);
                 break;
             case Intent.ACTION_PACKAGE_ADDED:
             case Intent.ACTION_PACKAGE_REMOVED:
@@ -55,6 +56,24 @@ public class SystemEventReceiver extends BroadcastReceiver {
     public synchronized void onActionBootCompleted(@NonNull Context context, @NonNull Intent intent) {
         TermuxShellManager.onActionBootCompleted(context, intent);
     }
+    /**
+     * 开机自启：用户开启「开机自启」开关后，开机时把 Coomi 带到前台。
+     * Launcher 走正常引导（已同意过直接进控制台并拉起引擎），引擎启动后
+     * WorkflowScheduler 自动加载启用定时的工作流。
+     */
+    private void maybeLaunchForAutostart(@NonNull Context context) {
+        try {
+            boolean enabled = context.getSharedPreferences("coomi_launcher", Context.MODE_PRIVATE)
+                .getBoolean("autostart_enabled", false);
+            if (!enabled) return;
+            android.content.Intent intent = new android.content.Intent(context, app.coomi.CoomiLauncherActivity.class)
+                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK | android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            context.startActivity(intent);
+        } catch (Exception e) {
+            Logger.logError(LOG_TAG, "autostart launch failed: " + e.getMessage());
+        }
+    }
+
 
     public synchronized void onActionPackageUpdated(@NonNull Context context, @NonNull Intent intent) {
         Uri data = intent.getData();

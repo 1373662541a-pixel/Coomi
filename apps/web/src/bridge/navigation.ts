@@ -33,8 +33,10 @@ export function installSystemBackHandler(router: Router): void {
       || route === '/custom-iteration'
       || route === '/files'
       || route === '/catalog'
+      || route === '/workflows'
       || route === '/maintenance'
       || route === '/usage'
+      || route === '/updates'
       || route === '/providers'
       || route.startsWith('/providers/')
     ) goBack(router, 'dashboard')

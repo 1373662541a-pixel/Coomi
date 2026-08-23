@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 权限胶囊按钮：未授权=蓝色实心，已授权=绿色浅底（禁用态） -->
+<!-- 权限胶囊按钮：未配置=主题强调色实底白字（可点），已配置=浅绿底深绿字（禁用） -->
 <selector xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:state_enabled="false">
         <shape android:shape="rectangle">

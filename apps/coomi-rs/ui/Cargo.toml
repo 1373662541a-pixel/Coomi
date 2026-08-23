@@ -23,6 +23,7 @@ coomi-security = { path = "../security" }
 coomi-services = { path = "../services" }
 coomi-telemetry = { path = "../telemetry" }
 coomi-tools = { path = "../tools" }
+chrono.workspace = true
 crossterm.workspace = true
 dirs.workspace = true
 fs2.workspace = true
@@ -37,6 +38,7 @@ tokio.workspace = true
 tower-http.workspace = true
 unicode-width.workspace = true
 uuid.workspace = true
+croner = "2"
 
 [dev-dependencies]
 chrono.workspace = true

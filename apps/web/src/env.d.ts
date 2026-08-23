@@ -24,6 +24,10 @@ interface Window {
     getDigitalLifeEnabled?(): boolean
     setDigitalLifeEnabled?(enabled: boolean): void
     getAppearanceConfig?(): string
+    /** 当前安装的 versionCode（检查更新页对比用）。 */
+    getAppVersionCode?(): number
+    /** 下载并安装更新 APK（url 为 APK 直链，version 用于文件名/提示）。 */
+    installApk?(url: string, version: string): void
   }
 }
 

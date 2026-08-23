@@ -140,6 +140,8 @@ struct AppState {
     vision_degraded: Arc<StdMutex<HashSet<String>>>,
     /// 社区注册表缓存：远端数据（registry/stats）10 分钟内只拉一次，失败降级内置目录。
     registry_cache: Arc<StdMutex<Option<RegistryCache>>>,
+    /// 工作流服务：cron 定时调度器（P1），API 层经它触发运行。
+    workflow_scheduler: Arc<crate::workflow::WorkflowScheduler>,
 }
 
 /// 社区注册表缓存条目。
@@ -730,6 +732,7 @@ pub async fn serve(
     let task_manager = Arc::new(TaskManager::open(&home)?);
     let restored_tasks = load_task_checkpoints(&home, &task_manager);
     let configured_task_limit = configured_connection_settings(&home).max_concurrent_tasks;
+    let workflow_scheduler = crate::workflow::WorkflowScheduler::new(&home.clone());
     let state = AppState {
         home,
         cwd,
@@ -741,7 +744,9 @@ pub async fn serve(
         task_manager,
         vision_degraded: Arc::new(StdMutex::new(HashSet::new())),
         registry_cache: Arc::new(StdMutex::new(registry_cache)),
+        workflow_scheduler,
     };
+    state.workflow_scheduler.start();
     refresh_registry_cache_background(state.clone());
     // 引擎启动时补发上次会话遗留的未上报事件（如进程被系统杀掉前没来得及 flush）。
     Telemetry::new(&state.home).flush_background();
@@ -816,6 +821,14 @@ pub async fn serve(
         )
         .route("/api/usage", get(usage_ledger))
         .route("/api/catalog", get(catalog_index))
+        .route("/api/workflows", get(list_workflows).post(create_workflow))
+        .route("/api/workflows/templates", get(list_workflow_templates))
+        .route(
+            "/api/workflows/{id}",
+            get(get_workflow).put(update_workflow).delete(delete_workflow),
+        )
+        .route("/api/workflows/{id}/run", post(run_workflow))
+        .route("/api/workflows/{id}/runs", get(list_workflow_runs))
         .route(
             "/api/custom-iteration/bootstrap",
             post(custom_iteration_bootstrap),
@@ -2629,6 +2642,195 @@ async fn registry_index(State(state): State<AppState>) -> Result<Json<Value>, Ap
         "installed": installed,
     });
     Ok(Json(payload))
+}
+
+// ---------------------------------------------------------------------------
+// Workflow API（P1：CRUD / 手动运行 / 定时开关 / 运行历史 / 内置模板）
+// ---------------------------------------------------------------------------
+
+fn workflow_store(state: &AppState) -> coomi_engine::WorkflowStore {
+    coomi_engine::WorkflowStore::new(&state.home)
+}
+
+fn now_rfc3339() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+async fn list_workflows(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let store = workflow_store(&state);
+    let runs = crate::workflow::RunsStore::new(&state.home);
+    let mut items = Vec::new();
+    for id in store
+        .list_ids()
+        .map_err(|e| ApiError::internal(format!("failed to list workflows: {e:#}")))?
+    {
+        let Ok(workflow) = store.read(&id) else {
+            continue;
+        };
+        let latest_run = runs.list(&id).into_iter().next();
+        items.push(json!({
+            "id": workflow.id,
+            "name": workflow.name,
+            "description": workflow.description,
+            "origin": workflow.origin.as_str(),
+            "status": format!("{:?}", workflow.status).to_lowercase(),
+            "schedule": { "enabled": workflow.schedule.enabled, "cron": workflow.schedule.cron },
+            "steps": workflow.steps.len(),
+            "latest_run": latest_run.map(|r| json!({
+                "run_id": r.id,
+                "status": r.status,
+                "trigger": r.trigger,
+                "started_at": r.started_at,
+                "duration_ms": r.duration_ms,
+            })),
+        }));
+    }
+    items.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    Ok(Json(json!({ "workflows": items })))
+}
+
+async fn get_workflow(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let workflow = workflow_store(&state)
+        .read(&id)
+        .map_err(|_| ApiError::not_found(format!("workflow `{id}` not found")))?;
+    Ok(Json(json!(workflow)))
+}
+
+async fn create_workflow(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let store = workflow_store(&state);
+    // 模板快捷创建：POST /api/workflows {"template": "env-inspect"}
+    if let Some(key) = body.get("template").and_then(Value::as_str) {
+        let template = crate::workflow::builtin_templates()
+            .into_iter()
+            .find(|t| t["key"] == key)
+            .ok_or_else(|| ApiError::bad_request(format!("unknown template `{key}`")))?;
+        let steps = template["steps"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|s| {
+                        serde_json::from_value::<coomi_engine::WorkflowStep>(s.clone()).ok()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if steps.is_empty() {
+            return Err(ApiError::bad_request("template must contain steps"));
+        }
+        let mut workflow = coomi_engine::WorkflowState::new(
+            uuid::Uuid::new_v4().to_string(),
+            template["name"].as_str().unwrap_or("workflow").to_owned(),
+            steps,
+        );
+        workflow.description = template["description"].as_str().unwrap_or_default().to_owned();
+        workflow.origin = coomi_engine::WorkflowOrigin::Builtin;
+        workflow.schedule = coomi_engine::WorkflowSchedule {
+            enabled: true,
+            cron: template["default_cron"].as_str().map(|c| c.to_owned()),
+        };
+        workflow.created_at = Some(now_rfc3339());
+        workflow.updated_at = Some(now_rfc3339());
+        store
+            .save(&workflow)
+            .map_err(|e| ApiError::bad_request(format!("workflow rejected: {e:#}")))?;
+        return Ok(Json(json!(workflow)));
+    }
+    // 全量定义创建
+    let mut workflow: coomi_engine::WorkflowState =
+        serde_json::from_value(body).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    if workflow.id.trim().is_empty() {
+        workflow.id = uuid::Uuid::new_v4().to_string();
+    }
+    workflow
+        .validate()
+        .map_err(|e| ApiError::bad_request(format!("invalid workflow: {e}")))?;
+    workflow.status = coomi_engine::WorkflowStatus::Pending;
+    workflow.created_at = Some(now_rfc3339());
+    workflow.updated_at = Some(now_rfc3339());
+    store
+        .save(&workflow)
+        .map_err(|e| ApiError::bad_request(format!("workflow rejected: {e:#}")))?;
+    Ok(Json(json!(workflow)))
+}
+
+async fn update_workflow(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let store = workflow_store(&state);
+    let mut workflow = store
+        .read(&id)
+        .map_err(|_| ApiError::not_found(format!("workflow `{id}` not found")))?;
+    // 字段式补丁（id 不可变）：body 含 name/description/schedule/steps 时逐段替换。
+    if let Some(name) = body.get("name").and_then(Value::as_str) {
+        workflow.name = name.to_owned();
+    }
+    if let Some(description) = body.get("description").and_then(Value::as_str) {
+        workflow.description = description.to_owned();
+    }
+    if let Some(schedule) = body.get("schedule") {
+        if let Some(enabled) = schedule.get("enabled").and_then(Value::as_bool) {
+            workflow.schedule.enabled = enabled;
+        }
+        if let Some(cron) = schedule.get("cron") {
+            workflow.schedule.cron = cron.as_str().map(|c| c.to_owned());
+        }
+    }
+    if let Some(steps) = body.get("steps").and_then(Value::as_array) {
+        workflow.steps = steps
+            .iter()
+            .filter_map(|s| serde_json::from_value::<coomi_engine::WorkflowStep>(s.clone()).ok())
+            .collect::<Vec<_>>();
+        workflow
+            .validate()
+            .map_err(|e| ApiError::bad_request(format!("invalid workflow: {e}")))?;
+    }
+    workflow.updated_at = Some(now_rfc3339());
+    store
+        .save(&workflow)
+        .map_err(|e| ApiError::bad_request(format!("workflow rejected: {e:#}")))?;
+    Ok(Json(json!(workflow)))
+}
+
+async fn delete_workflow(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    workflow_store(&state)
+        .remove(&id)
+        .map_err(|e| ApiError::internal(format!("failed to remove workflow: {e:#}")))?;
+    Ok(Json(json!({ "deleted": true, "id": id })))
+}
+
+async fn run_workflow(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let run_id = state
+        .workflow_scheduler
+        .run_manual(&id)
+        .await
+        .map_err(|e| ApiError::bad_request(format!("workflow run failed: {e:#}")))?;
+    Ok(Json(json!({ "run_id": run_id })))
+}
+
+async fn list_workflow_runs(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let runs = crate::workflow::RunsStore::new(&state.home);
+    Ok(Json(json!({ "runs": runs.list(&id) })))
+}
+
+async fn list_workflow_templates() -> Json<Value> {
+    Json(json!({ "templates": crate::workflow::builtin_templates() }))
 }
 
 fn registry_disk_cache_path(home: &Path) -> PathBuf {
@@ -6644,7 +6846,8 @@ Access policy: {policy}",
         policy = policy.label(),
     ));
     prompt.push_str(
-        "\nRuntime routing: shell/local_shell accept environment=auto|host|termux|proot. Use proot for Linux userland tools, termux for Android-native tools, and host for file APIs/exports. File tools accept /workspace, /home/coomi, /opt/coomi-dev, and /tmp and translate them to host paths before security checks.",
+        "\n\nRuntime routing: shell/local_shell accept environment=auto|host|termux|proot. Use proot for Linux userland tools, termux for Android-native tools, and host for file APIs/exports. File tools accept /workspace, /home/coomi, /opt/coomi-dev, and /tmp and translate them to host paths before security checks.\n\
+        Tool calls must go through the native function-calling protocol; never emit XML pseudo tool calls such as <dots_function_call> or <invoke name=...> inside message text. When a tool result provides paths_guest, use those /workspace/... paths inside shell commands (they resolve in both Termux and ProotLinux), and the corresponding host absolute paths with built-in file tools.",
     );
     prompt.push_str(
         "\n\nCoomi source checkout architecture (when the current repository is Coomi):\n\
@@ -7536,6 +7739,7 @@ mod tests {
             task_manager: Arc::clone(&task_manager),
             vision_degraded: Arc::new(StdMutex::new(HashSet::new())),
             registry_cache: Arc::new(StdMutex::new(None)),
+        workflow_scheduler: crate::workflow::WorkflowScheduler::new(&PathBuf::from(("test"))),
         };
 
         let store = SessionStore::new(&home);

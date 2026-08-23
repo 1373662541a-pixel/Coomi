@@ -774,6 +774,28 @@ impl WorkflowOrigin {
     }
 }
 
+/// 工作流的定时调度配置（cron 表达式，引擎 scheduler 每分钟检查匹配）。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkflowSchedule {
+    /// 是否启用定时触发；关闭后仅支持手动运行。
+    #[serde(default)]
+    pub enabled: bool,
+    /// cron 表达式（如 `0 8 * * *`）；None 或空串表示未配置定时。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cron: Option<String>,
+}
+
+impl WorkflowSchedule {
+    pub fn is_active(&self) -> bool {
+        self.enabled
+            && self
+                .cron
+                .as_deref()
+                .map(|c| !c.trim().is_empty())
+                .unwrap_or(false)
+    }
+}
+
 /// 一个可编排工作流的完整定义（定义文件落点为 .coomi/workflows/<id>/workflow.json）。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkflowState {
@@ -789,6 +811,9 @@ pub struct WorkflowState {
     /// Model 类型步骤默认是否隔离上下文。
     #[serde(default)]
     pub model_isolation: bool,
+    /// 定时调度配置（P1：scheduler 定时触发；缺省关闭）。
+    #[serde(default)]
+    pub schedule: WorkflowSchedule,
     /// workflow 定义运行时的临时变量（步骤之间传递数据的通道）。
     #[serde(default)]
     pub variables: BTreeMap<String, serde_json::Value>,
@@ -809,6 +834,7 @@ impl WorkflowState {
             origin: WorkflowOrigin::User,
             model_isolation: false,
             variables: BTreeMap::new(),
+            schedule: WorkflowSchedule::default(),
             created_at: None,
             updated_at: None,
         }

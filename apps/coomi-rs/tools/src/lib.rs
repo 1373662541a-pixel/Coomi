@@ -39,6 +39,7 @@ use regex::Regex;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -880,9 +881,26 @@ impl CoreTools {
             multiple: operation == "import",
         };
         match approval.request_file_transfer(&request).await {
-            Some(paths) if !paths.is_empty() => ToolResult::success(
-                serde_json::json!({"operation": operation, "paths": paths}).to_string(),
-            ),
+            Some(paths) if !paths.is_empty() => {
+                // 同时给出 guest 别名（/workspace 等），shell 环境（Termux/proot）都能访问。
+                let guests = paths
+                    .iter()
+                    .map(|path| {
+                        self.path_map
+                            .host_to_guest(Path::new(path))
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                    .collect::<Vec<_>>();
+                ToolResult::success(
+                    serde_json::json!({
+                        "operation": operation,
+                        "paths": paths,
+                        "paths_guest": guests,
+                    })
+                    .to_string(),
+                )
+            }
             _ if operation == "export" => ToolResult::error(
                 "file export failed, was cancelled, or did not respond within 30 seconds",
             ),
@@ -1631,7 +1649,24 @@ impl CoreTools {
         };
         let matches = content.matches(old_string).count();
         if matches == 0 {
-            return ToolResult::error("old_string was not found");
+            // 二级：换行 / 行尾空白规范化匹配（Windows CRLF、编辑器自动修剪行尾空格等场景）。
+            if let Some((from, to)) = fuzzy_normalized_range(&content, &old_string) {
+                let mut updated = String::with_capacity(content.len() + new_string.len());
+                updated.push_str(&content[..from]);
+                updated.push_str(new_string);
+                updated.push_str(&content[to..]);
+                return match tokio::fs::write(&path, updated).await {
+                    Ok(()) => ToolResult::success(format!("edited {}", path.display())),
+                    Err(error) => {
+                        ToolResult::error(format!("failed to edit {}: {error}", path.display()))
+                    }
+                };
+            }
+            return ToolResult::error(
+                "old_string was not found. 文件可能已变化：请先 use read_file 读取当前内容，\
+                 复制与文件完全一致的片段（包含换行与缩进）后再调用 edit_file；\
+                 若只需行级修改请改用 apply_patch",
+            );
         }
         let replace_all = arguments
             .get("replace_all")
@@ -1836,7 +1871,7 @@ impl ToolRuntime for CoreTools {
             },
             ToolSpec {
                 name: "edit_file".into(),
-                description: "Replace an exact text fragment in a workspace file.".into(),
+                description: "Replace a text fragment in a workspace file. Call read_file first and copy old_string byte-for-byte from the current content (exact newlines and indentation); include enough surrounding context to be unique. Prefer apply_patch for whole-line changes.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -2435,6 +2470,48 @@ fn memory_specs() -> Vec<ToolSpec> {
 
 fn string_arg<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
+}
+
+/// edit_file 的规范化匹配：把 `\r` 与行尾空白折叠后再找 needle，
+/// 命中后返回原文件中对应的字节区间。找不到返回 None。
+fn fuzzy_normalized_range(haystack: &str, needle: &str) -> Option<(usize, usize)> {
+    fn normalize(input: &str) -> (String, Vec<usize>) {
+        let bytes = input.as_bytes();
+        let mut norm = Vec::with_capacity(bytes.len());
+        let mut map = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if b == b'\r' {
+                i += 1;
+                continue;
+            }
+            if b == b' ' || b == b'\t' {
+                let mut j = i;
+                while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'\n' {
+                    i = j;
+                    continue;
+                }
+            }
+            norm.push(b);
+            map.push(i);
+            i += 1;
+        }
+        (String::from_utf8_lossy(&norm).into_owned(), map)
+    }
+    let (norm_content, content_map) = normalize(haystack);
+    let (norm_needle, _) = normalize(needle);
+    if norm_needle.is_empty() {
+        return None;
+    }
+    let found = norm_content.find(&norm_needle)?;
+    let from = *content_map.get(found)?;
+    let last = found + norm_needle.len() - 1;
+    let to = content_map.get(last).map(|value| *value + 1)?;
+    Some((from, to))
 }
 
 fn string_namespace(value: &str) -> Option<PathNamespace> {

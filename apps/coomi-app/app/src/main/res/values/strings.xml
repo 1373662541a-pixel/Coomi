@@ -633,8 +633,11 @@
     <string name="coomi_launcher_notification_title">通知权限</string>
     <string name="coomi_launcher_notification_desc">用于引擎后台保活通知</string>
     <string name="coomi_launcher_battery_title">电池优化</string>
+    <string name="coomi_launcher_autostart_title">自启动管理</string>
+    <string name="coomi_launcher_autostart_desc">开机自动拉起引擎与定时任务</string>
     <string name="coomi_launcher_battery_desc">允许后台运行以防引擎被杀</string>
     <string name="coomi_allow">允许</string>
+    <string name="coomi_go_grant">去授权</string>
     <string name="coomi_enabled">已开启</string>
     <string name="coomi_granted">已授予</string>
     <string name="coomi_continue">开始使用</string>

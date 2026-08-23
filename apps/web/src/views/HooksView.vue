@@ -66,7 +66,7 @@ async function save() {
 
 <template>
   <div class="page">
-    <PageHead title="自定义钩子" @back="goBack(router, 'dashboard')" />
+    <PageHead title="自定义钩子（实验）" @back="goBack(router, 'dashboard')" />
     <main class="body">
       <section v-for="event in EVENTS" :key="event.value" class="section">
         <div class="head"><b>{{ event.label }}</b><button @click="add(event.value)"><CoomiIcon name="plus" :size="16" /></button></div>

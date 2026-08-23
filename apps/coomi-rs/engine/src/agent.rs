@@ -11,6 +11,7 @@ use crate::ProviderRequestError;
 use crate::SUMMARIZATION_PROMPT;
 use crate::Session;
 use crate::ToolConcurrency;
+use crate::ToolCall;
 use crate::ToolResult;
 use crate::ToolRuntime;
 use crate::TurnControl;
@@ -488,21 +489,32 @@ impl Agent {
                 }
             };
 
+            // 兜底：部分模型会把工具调用写成 XML 文本（<dots_function_call>/<invoke name=...> 等）。
+            // 解析为原生调用执行，并从内容中剥离该片段；提示词侧同时要求遵守原生协议。
+            let mut response_content = response.content;
+            let mut response_tool_calls = response.tool_calls;
+            if response_tool_calls.is_empty() && !response_content.is_empty() {
+                if let Some(alias_calls) = parse_alias_xml_calls(&response_content) {
+                    response_tool_calls = alias_calls;
+                    response_content = strip_alias_xml(&response_content);
+                }
+            }
+
             session.usage.add(&response.usage);
             observer.on_event(&AgentEvent::ModelUsage {
                 total: session.usage.clone(),
                 request: response.usage.clone(),
             });
-            if !response.streamed && !response.content.is_empty() {
-                observer.on_event(&AgentEvent::Text(response.content.clone()));
+            if !response.streamed && !response_content.is_empty() {
+                observer.on_event(&AgentEvent::Text(response_content.clone()));
             }
             let recorded_tool_calls = if response.invalid_tool_calls.is_empty() {
-                response.tool_calls.clone()
+                response_tool_calls.clone()
             } else {
                 Vec::new()
             };
             session.messages.push(ChatMessage::assistant(
-                response.content.clone(),
+                response_content.clone(),
                 recorded_tool_calls,
             ));
             session.context.observe_usage(
@@ -555,15 +567,15 @@ impl Agent {
                 continue;
             }
 
-            if response.tool_calls.is_empty() {
+            if response_tool_calls.is_empty() {
                 if self.accept_queued_input(session, observer) {
                     continue;
                 }
                 session.touch();
-                return Ok(response.content);
+                return Ok(response_content);
             }
 
-            let calls = response.tool_calls;
+            let calls = response_tool_calls;
             for call in &calls {
                 observer.on_event(&AgentEvent::ToolStarted(call.clone()));
             }
@@ -1662,5 +1674,172 @@ mod tests {
         assert_eq!(state.status, crate::LoopStatus::BudgetLimited);
         assert_eq!(state.tokens_used, 30);
         assert_eq!(state.turns_completed, 1);
+    }
+}
+
+// ── 别名 XML 工具调用兜底（<dots_function_call>/<tool_call>/<invoke name=...> 等）──
+
+/// 解析内容中的别名 XML 工具调用块；一个也没解析出来时返回 None。
+fn parse_alias_xml_calls(content: &str) -> Option<Vec<ToolCall>> {
+    let mut calls = Vec::new();
+    let mut pos = 0_usize;
+    while let Some(rel) = content[pos..].find("<invoke") {
+        let start = pos + rel;
+        let Some(tag_end_rel) = content[start..].find('>') else {
+            break;
+        };
+        let tag_end = start + tag_end_rel;
+        let attrs = &content[start + "<invoke".len()..tag_end];
+        let Some(name) = xml_attr(attrs, "name") else {
+            pos = tag_end + 1;
+            continue;
+        };
+        let body_start = tag_end + 1;
+        let Some(body_rel) = content[body_start..].find("</invoke>") else {
+            break;
+        };
+        let body = &content[body_start..body_start + body_rel];
+        let mut args = serde_json::Map::new();
+        let mut p = 0_usize;
+        while let Some(pr) = body[p..].find("<parameter") {
+            let ps = p + pr;
+            let Some(ptag_rel) = body[ps..].find('>') else {
+                break;
+            };
+            let ptag_end = ps + ptag_rel;
+            let pattrs = &body[ps + "<parameter".len()..ptag_end];
+            let Some(key) = xml_attr(pattrs, "name") else {
+                p = ptag_end + 1;
+                continue;
+            };
+            let pbody_start = ptag_end + 1;
+            let Some(vrel) = body[pbody_start..].find("</parameter>") else {
+                break;
+            };
+            let raw = &body[pbody_start..pbody_start + vrel];
+            let value = if raw.trim().is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::from_str(raw.trim())
+                    .unwrap_or_else(|_| serde_json::Value::String(raw.trim().to_owned()))
+            };
+            args.insert(key.to_owned(), value);
+            p = pbody_start + vrel + "</parameter>".len();
+        }
+        calls.push(ToolCall {
+            id: format!("call_xml_{}_{}", name, calls.len()),
+            name: name.to_owned(),
+            arguments: serde_json::Value::Object(args),
+        });
+        pos = body_start + body_rel + "</invoke>".len();
+    }
+    if calls.is_empty() {
+        None
+    } else {
+        Some(calls)
+    }
+}
+
+/// 在属性串中读取 `attr="value"` / `attr='value'` / `attr=value`。
+fn xml_attr<'a>(attrs: &'a str, attr: &str) -> Option<&'a str> {
+    let mut rest = attrs;
+    while let Some(idx) = rest.find(attr) {
+        let previous = rest[..idx].chars().last();
+        if previous.map(char::is_alphanumeric).unwrap_or(true) {
+            rest = &rest[idx + attr.len()..];
+            continue;
+        }
+        let value = rest[idx + attr.len()..].trim_start().strip_prefix('=')?;
+        let value = value.trim_start();
+        if let Some(v) = value.strip_prefix('"') {
+            let end = v.find('"')?;
+            return Some(&v[..end]);
+        }
+        if let Some(v) = value.strip_prefix('\'') {
+            let end = v.find('\'')?;
+            return Some(&v[..end]);
+        }
+        let cut = value
+            .find(|c: char| c.is_whitespace() || c == '>')
+            .unwrap_or(value.len());
+        return Some(&value[..cut]);
+    }
+    None
+}
+
+/// 从内容中剥离解析过的 XML 调用片段（含外围 <dots_function_call> 等包裹块）。
+fn strip_alias_xml(content: &str) -> String {
+    let mut result = content.to_owned();
+    for tag in ["dots_function_call", "tool_call", "function_call"] {
+        let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
+        loop {
+            let Some(mut s) = result.find(&open) else {
+                break;
+            };
+            let Some(e) = result[s..].find(&close) else {
+                break;
+            };
+            // 顺手清掉紧邻的 markdown 代码围栏
+            if s >= 8 && &result[s - 4..s] == "```" {
+                s -= 4;
+                if s >= 1 && &result[s - 1..s] == "\n" {
+                    s -= 1;
+                }
+            }
+            let end = s + e + close.len() - s;
+            result.replace_range(s..s + end, "");
+        }
+    }
+    while let Some(s) = result.find("<invoke") {
+        let Some(tag_end_rel) = result[s..].find('>') else {
+            break;
+        };
+        let tag_end = s + tag_end_rel;
+        let Some(body_rel) = result[tag_end + 1..].find("</invoke>") else {
+            break;
+        };
+        let end = tag_end + 1 + body_rel + "</invoke>".len();
+        result.replace_range(s..end, "");
+    }
+    while result.contains("\n\n\n") {
+        result = result.replace("\n\n\n", "\n\n");
+    }
+    result.trim().to_owned()
+}
+
+#[cfg(test)]
+mod alias_xml_tests {
+    use super::*;
+
+    #[test]
+    fn parses_dots_style_calls() {
+        let content = r#"推送成功。我需要添加它。
+<dots_function_call>
+<invoke name="read_file">
+<parameter name="limit">12</parameter>
+<parameter name="path">/home/coomi/a.yaml</parameter>
+</invoke>
+</dots_function_call>"#;
+        let calls = parse_alias_xml_calls(content).expect("should parse");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(calls[0].arguments["limit"], 12);
+        assert_eq!(calls[0].arguments["path"], "/home/coomi/a.yaml");
+        let stripped = strip_alias_xml(content);
+        assert!(!stripped.contains("<dots_function_call"));
+        assert!(!stripped.contains("<invoke"));
+    }
+
+    #[test]
+    fn parses_bare_invoke_and_string_values() {
+        let content = r#"<invoke name="write_file"><parameter name="path">/tmp/x.txt</parameter><parameter name="content">hello</parameter></invoke>"#;
+        let calls = parse_alias_xml_calls(content).expect("should parse");
+        assert_eq!(calls[0].name, "write_file");
+        assert_eq!(calls[0].arguments["content"], "hello");
+    }
+
+    #[test]
+    fn no_invoke_returns_none() {
+        assert!(parse_alias_xml_calls("普通的回答，没有调用").is_none());
     }
 }

@@ -48,6 +48,8 @@ public class CoomiLauncherActivity extends Activity {
     private static final int REQUEST_CODE_NOTIFICATION = 1001;
     private static final int REQUEST_CODE_BATTERY = 1002;
     private static final String PREFS_NAME = "coomi_launcher";
+    private static final String PREF_AUTOSTART = "autostart_enabled";
+    private static final String PREF_AUTOSTART_PENDING = "autostart_pending";
     private static final String PREF_CONTINUE = "onboarding_continue";
     private static final String PREF_SETUP_COMPLETED = "setup_completed";
 
@@ -68,6 +70,7 @@ public class CoomiLauncherActivity extends Activity {
     private Button mBatteryButton;
     private Button mRootButton;
     private Button mShizukuButton;
+    private Button mAutostartButton;
     private Button mContinueButton;
     private CheckBox mTermsCheck;
 
@@ -96,6 +99,14 @@ public class CoomiLauncherActivity extends Activity {
         mBatteryButton = findViewById(R.id.btn_battery_permission);
         mRootButton = findViewById(R.id.btn_root_permission);
         mShizukuButton = findViewById(R.id.btn_shizuku_permission);
+        mAutostartButton = findViewById(R.id.btn_autostart_permission);
+        mAutostartButton.setOnClickListener(v -> {
+            // 与通知/电池优化逻辑一致：点击只打开系统设置页，不直接置为已开启；
+            // 从设置页返回（onResume）后由 updatePermissionStatus 认定为授权完成。
+            getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .edit().putBoolean(PREF_AUTOSTART_PENDING, true).apply();
+            openAutostartSettings();
+        });
         mContinueButton = findViewById(R.id.btn_continue);
         mTermsCheck = findViewById(R.id.check_terms);
         configureTermsConsent();
@@ -199,6 +210,34 @@ public class CoomiLauncherActivity extends Activity {
         }
     }
 
+    /** 打开系统「自启动管理」页（依次尝试主流 ROM 入口，兜底应用详情页）。 */
+    private void openAutostartSettings() {
+        String[] targets = {
+            "com.miui.securitycenter/com.miui.permcenter.autostart.AutoStartManagementActivity",
+            "com.huawei.systemmanager/.startupmgr.ui.StartupNormalAppListActivity",
+            "com.coloros.safecenter/.startupapp.StartupAppListActivity",
+            "com.oneplus.security/.chainlaunch.view.ChainLaunchAppListActivity",
+            "com.samsung.android.lool/.auto_run_apps.AutoRunAppsActivity",
+        };
+        for (String target : targets) {
+            try {
+                Intent intent = Intent.parseUri(
+                    "intent:#Intent;action=android.intent.action.MAIN;component=" +
+                    target + ";end",
+                    Intent.URI_INTENT_SCHEME);
+                startActivity(intent);
+                return;
+            } catch (Exception ignored) { /* 该 ROM 无此入口，尝试下一个 */ }
+        }
+        try {
+            startActivity(new Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                android.net.Uri.parse("package:" + getPackageName())));
+        } catch (Exception e) {
+            android.widget.Toast.makeText(this, "无法打开系统设置，请在系统设置中手动允许开机自启", android.widget.Toast.LENGTH_SHORT).show();
+        }
+    }
+
     private void requestBatteryExemption() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             try {
@@ -288,7 +327,8 @@ public class CoomiLauncherActivity extends Activity {
                 mShizukuButton.setEnabled(true);
                 break;
             case NOT_RUNNING:
-                mShizukuButton.setText(R.string.coomi_shizuku_not_running);
+                // Shizuku 未运行 = 尚未配置，统一显示「去授权」引导用户配置。
+                mShizukuButton.setText(R.string.coomi_go_grant);
                 mShizukuButton.setEnabled(true);
                 break;
             case UNAVAILABLE:
@@ -304,12 +344,26 @@ public class CoomiLauncherActivity extends Activity {
         boolean notifOk = areNotificationsEnabled();
         boolean battOk = isBatteryExempt();
 
-        // 药丸自己表达状态：未授权=蓝底白字「允许」，已授权=浅绿底绿字且不可点。
+        // 药丸两态：未配置=主题强调色实底白字（可点），已配置=浅绿底绿字且不可点（与通知/电池优化一致）。
         mNotificationButton.setEnabled(!notifOk);
         mNotificationButton.setText(notifOk ? R.string.coomi_enabled : R.string.coomi_allow);
 
         mBatteryButton.setEnabled(!battOk);
         mBatteryButton.setText(battOk ? R.string.coomi_granted : R.string.coomi_allow);
+
+        boolean autostartOn = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .getBoolean(PREF_AUTOSTART, false);
+        if (!autostartOn && getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .getBoolean(PREF_AUTOSTART_PENDING, false)) {
+            // 用户已前往系统自启动设置页并返回，视为已配置开启。
+            autostartOn = true;
+            getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .edit().putBoolean(PREF_AUTOSTART, true).putBoolean(PREF_AUTOSTART_PENDING, false).apply();
+        }
+        if (mAutostartButton != null) {
+            mAutostartButton.setEnabled(!autostartOn);
+            mAutostartButton.setText(autostartOn ? R.string.coomi_enabled : R.string.coomi_go_grant);
+        }
 
         if (mShizukuAccessController != null) {
             updateShizukuButton(mShizukuAccessController.getStatus());

@@ -16,10 +16,12 @@ export const router = createRouter({
     { path: '/custom-iteration', name: 'custom-iteration', component: () => import('@/views/CustomIterationView.vue') },
     { path: '/life', name: 'life', component: () => import('@/views/LifeView.vue') },
     { path: '/catalog', name: 'catalog', component: () => import('@/views/CatalogView.vue') },
+    { path: '/workflows', name: 'workflows', component: () => import('@/views/WorkflowView.vue') },
     { path: '/hooks', name: 'hooks', component: () => import('@/views/HooksView.vue') },
     { path: '/memory', name: 'memory', component: () => import('@/views/MemoryView.vue') },
     { path: '/files', name: 'files', component: () => import('@/views/FileManagerView.vue') },
     { path: '/maintenance', name: 'maintenance', component: () => import('@/views/MaintenanceView.vue') },
     { path: '/usage', name: 'usage', component: () => import('@/views/UsageView.vue') },
+    { path: '/updates', name: 'updates', component: () => import('@/views/UpdatesView.vue') },
   ],
 })

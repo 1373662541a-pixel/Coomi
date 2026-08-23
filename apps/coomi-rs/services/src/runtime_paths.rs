@@ -169,7 +169,7 @@ impl RuntimePathMap {
             .ok_or_else(|| anyhow!("Termux home is not configured"))
     }
 
-    fn host_to_guest(&self, value: &Path) -> PathBuf {
+    pub fn host_to_guest(&self, value: &Path) -> PathBuf {
         if let Ok(relative) = value.strip_prefix(&self.host_workspace) {
             return join_guest("/workspace", relative);
         }

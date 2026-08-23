@@ -122,7 +122,7 @@ public final class UpdateChecker {
         }).start();
     }
 
-    private static void downloadAndInstall(Context context, String apkUrl, String version) {
+    public static void downloadAndInstall(Context context, String apkUrl, String version) {
         // 远端 version 拼入文件名前做净化，防路径穿越。
         String safeVersion = version.replaceAll("[^A-Za-z0-9._-]", "_");
         String fileName = "coomi-update-" + safeVersion + ".apk";

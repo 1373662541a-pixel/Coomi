@@ -97,9 +97,6 @@ function openDashboard() {
             <CoomiIcon name="close" :size="12" />
           </button>
         </div>
-        <button class="close-btn" aria-label="设置" @click="go('/settings')">
-          <CoomiIcon name="settings" :size="19" />
-        </button>
       </header>
 
       <button class="newrow" @click="startNew">
@@ -156,7 +153,9 @@ function openDashboard() {
         <button class="frow console" @click="openDashboard">
           <CoomiIcon name="terminal" :size="20" />
           <span class="fname">返回控制台</span>
-          <CoomiIcon name="chevronRight" :size="17" class="fgear" />
+        </button>
+        <button class="fsq" aria-label="设置" @click="go('/settings')">
+          <CoomiIcon name="settings" :size="20" />
         </button>
       </footer>
     </aside>
@@ -217,11 +216,6 @@ function openDashboard() {
   display: grid; place-items: center; width: 18px; height: 18px;
   border: 0; border-radius: 50%; background: var(--border-strong); color: #fff;
 }
-.close-btn {
-  display: grid; place-items: center; width: 36px; height: 36px;
-  border: 0; border-radius: 50%; background: none; color: var(--text-2);
-}
-
 .newrow {
   display: flex; align-items: center; gap: 10px;
   margin: 2px 10px 4px; padding: 8px 10px;
@@ -284,15 +278,21 @@ function openDashboard() {
   border: 0; border-radius: 50%; background: none; color: var(--text-3);
 }
 
-.dfoot { border-top: 1px solid var(--border); padding: 8px 10px calc(8px + var(--safe-bottom)); }
+.dfoot { display: flex; align-items: stretch; gap: 8px; border-top: 1px solid var(--border); padding: 8px 10px calc(8px + var(--safe-bottom)); }
 .frow.console { color: var(--blue); }
 .frow {
-  display: flex; align-items: center; gap: 10px; width: 100%;
+  display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0;
   padding: 8px; border: 0; border-radius: var(--r-md); background: none;
 }
 .frow:active { background: var(--fill); }
 .fname { flex: 1; text-align: left; font-size: 15px; font-weight: 600; color: var(--text); }
-.fgear { color: var(--text-3); }
+.fsq {
+  display: grid; place-items: center; flex-shrink: 0;
+  width: 52px; min-height: 46px;
+  border: 0; border-left: 1px solid var(--border);
+  border-radius: 0; background: none; color: var(--text-2);
+}
+.fsq:active { background: var(--fill); }
 
 .sheet-wrap {
   position: absolute; inset: 0; z-index: 2;

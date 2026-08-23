@@ -37,6 +37,7 @@ use uuid::Uuid;
 
 mod terminal_ui;
 mod web;
+mod workflow;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -154,6 +155,24 @@ struct RuntimePaths {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let paths = resolve_paths(&cli)?;
+    // 崩溃采集：panic 落盘（<home>/crash_rust.log），服务崩溃后可回溯现场。
+    {
+        let home = paths.home.clone();
+        std::panic::set_hook(Box::new(move |info| {
+            let message = format!(
+                "[{}] panic: {info}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+            );
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(home.join("crash_rust.log"))
+            {
+                let _ = writeln!(file, "{message}\n");
+            }
+            eprintln!("{message}");
+        }));
+    }
     match &cli.command {
         Some(Command::Serve {
             port,

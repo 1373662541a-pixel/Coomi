@@ -53,6 +53,7 @@ import org.json.JSONObject;
  * Shows engine status, restart/stop controls, and quick links.
  */
 public class CoomiDashboardActivity extends Activity {
+    private static final String PREFS_NAME = "coomi_launcher";
 
     private static final String LOG_TAG = "CoomiDashboardActivity";
     private static final int STATUS_REFRESH_MS = 5000;
@@ -69,6 +70,7 @@ public class CoomiDashboardActivity extends Activity {
     private View mOpenWebUiButton;
     private View mWebUiButtonContainer;
     private View mCatalogButton;
+    private View mWorkflowsButton;
     private View mHooksButton;
     private View mMemoryButton;
     private View mLifeButton;
@@ -136,6 +138,7 @@ public class CoomiDashboardActivity extends Activity {
         mOpenWebUiButton = findViewById(R.id.btn_open_webui);
         mWebUiButtonContainer = findViewById(R.id.webui_button_container);
         mCatalogButton = findViewById(R.id.btn_web_catalog);
+        mWorkflowsButton = findViewById(R.id.btn_web_workflows);
         mHooksButton = findViewById(R.id.btn_web_hooks);
         mMemoryButton = findViewById(R.id.btn_web_memory);
         mLifeButton = findViewById(R.id.btn_web_life);
@@ -162,6 +165,7 @@ public class CoomiDashboardActivity extends Activity {
         mOpenTerminalButton.setOnClickListener(v -> openTerminal());
         mOpenWebUiButton.setOnClickListener(v -> openWebUi());
         mCatalogButton.setOnClickListener(v -> openCatalog());
+        mWorkflowsButton.setOnClickListener(v -> openWorkflows());
         mHooksButton.setOnClickListener(v -> openCoomiRoute("#/hooks"));
         mMemoryButton.setOnClickListener(v -> openCoomiRoute("#/memory"));
         mLifeButton.setOnClickListener(v -> openCoomiRoute("#/life"));
@@ -446,6 +450,11 @@ public class CoomiDashboardActivity extends Activity {
         openCoomiRoute("#/catalog");
     }
 
+    /** 打开应用内自动化工作流页（WebView 直达 #/workflows）。 */
+    private void openWorkflows() {
+        openCoomiRoute("#/workflows");
+    }
+
     /** 打开应用内文件管理页（WebView 直达 #/files）。 */
     private void openFiles() {
         openCoomiRoute("#/files");
@@ -675,10 +684,9 @@ public class CoomiDashboardActivity extends Activity {
         return format.format(new Date());
     }
 
-    /** 软件内检查更新：读取更新源 latest.json，有新版本则下载并安装。 */
+    /** 检查更新：进入二级页面（正式/测试通道），页面内发起下载与安装。 */
     private void checkUpdate() {
-        Toast.makeText(this, R.string.coomi_dash_checking, Toast.LENGTH_SHORT).show();
-        UpdateChecker.checkAndPrompt(this, () -> refreshStatus());
+        openCoomiRoute("#/updates");
     }
 
     /** 进入控制台时静默检查一次：有新版本则在「检查更新」旁亮红点提示。 */

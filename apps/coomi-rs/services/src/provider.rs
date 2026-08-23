@@ -597,6 +597,8 @@ impl HttpModelProvider {
         }
     }
 
+    /// 400 兜底：逐级剥离非标准参数后重试（reasoning → top_k → 并行工具 → 全部工具），
+    /// 直到成功或全部失败。全部失败时返回首个响应的原始错误详情。
     async fn send_with_reasoning_fallback(&self, endpoint: &str, body: &Value) -> Result<Response> {
         let response = self
             .authenticated(self.client.post(endpoint))
@@ -608,44 +610,84 @@ impl HttpModelProvider {
             return Ok(response);
         }
 
-        let status = response.status();
-        let retry_after_ms = retry_after_ms(response.headers());
-        let request_id = response_request_id(response.headers());
-        let response_body = response
+        let first_status = response.status();
+        let first_retry_after_ms = retry_after_ms(response.headers());
+        let first_request_id = response_request_id(response.headers());
+        let first_body = response
             .text()
             .await
             .map_err(|error| transport_error("response_body", error))?;
-        let reasoning_rejected =
-            has_reasoning_field(body) && rejects_reasoning_field(&response_body);
-        let capability_rejected = rejects_model_capability(&response_body);
-        let capability_fallback_available = capability_rejected
-            && (has_optional_capability_fields(body) || has_reasoning_field(body));
-        if !reasoning_rejected && !capability_fallback_available {
-            return Err(ProviderRequestError {
-                phase: "response_body",
-                kind: ProviderErrorKind::Http,
-                status: Some(status.as_u16()),
-                retry_after_ms,
-                request_id,
-                retryable: false,
-                detail: safe_http_error_detail(status.as_u16(), &response_body),
+
+        // 阶梯：记录每次递减的 body，去重后依次尝试。
+        let mut steps: Vec<Value> = Vec::new();
+        let mut push_step = |value: Value, steps: &mut Vec<Value>| {
+            if value != *body {
+                steps.push(value);
             }
-            .into());
+        };
+        push_step(
+            {
+                let mut value = body.clone();
+                remove_reasoning_fields(&mut value);
+                value
+            },
+            &mut steps,
+        );
+        push_step(
+            {
+                let mut value = body.clone();
+                remove_reasoning_fields(&mut value);
+                remove_json_field(&mut value, "top_k");
+                value
+            },
+            &mut steps,
+        );
+        push_step(
+            {
+                let mut value = body.clone();
+                remove_reasoning_fields(&mut value);
+                remove_json_field(&mut value, "top_k");
+                remove_json_field(&mut value, "parallel_tool_calls");
+                value
+            },
+            &mut steps,
+        );
+        push_step(
+            {
+                let mut value = body.clone();
+                remove_reasoning_fields(&mut value);
+                remove_json_field(&mut value, "top_k");
+                remove_json_field(&mut value, "parallel_tool_calls");
+                remove_optional_capability_fields(&mut value);
+                value
+            },
+            &mut steps,
+        );
+
+        for fallback in &steps {
+            let retry = self
+                .authenticated(self.client.post(endpoint))
+                .json(fallback)
+                .send()
+                .await
+                .map_err(|error| transport_error("request_send", error))?;
+            if retry.status().as_u16() != 400 {
+                return Ok(retry);
+            }
+            // 读走 body 以便复用连接，仅保留首个错误详情。
+            let _ = retry.text().await;
         }
 
-        let mut fallback = body.clone();
-        if reasoning_rejected {
-            remove_reasoning_fields(&mut fallback);
+        Err(ProviderRequestError {
+            phase: "response_body",
+            kind: ProviderErrorKind::Http,
+            status: Some(first_status.as_u16()),
+            retry_after_ms: first_retry_after_ms,
+            request_id: first_request_id,
+            retryable: false,
+            detail: safe_http_error_detail(first_status.as_u16(), &first_body),
         }
-        if capability_fallback_available {
-            remove_optional_capability_fields(&mut fallback);
-            remove_reasoning_fields(&mut fallback);
-        }
-        self.authenticated(self.client.post(endpoint))
-            .json(&fallback)
-            .send()
-            .await
-            .map_err(|error| transport_error("request_send", error))
+        .into())
     }
 }
 
@@ -779,6 +821,12 @@ fn remove_reasoning_fields(body: &mut Value) {
         {
             generation_config.remove("thinkingConfig");
         }
+    }
+}
+
+fn remove_json_field(body: &mut Value, key: &str) {
+    if let Some(object) = body.as_object_mut() {
+        object.remove(key);
     }
 }
 
