@@ -15,6 +15,8 @@ use coomi_engine::ToolCall;
 use coomi_engine::ToolResult;
 use coomi_engine::ToolRuntime;
 use coomi_engine::ToolSpec;
+use coomi_engine::WorkflowState;
+use coomi_engine::WorkflowStore;
 use coomi_security::Decision;
 use coomi_security::HookEvent;
 use coomi_security::HookRunner;
@@ -195,6 +197,11 @@ impl CoreTools {
             "close_agent" => self.close_agent(&call.arguments).await,
             "list_skills" => self.list_skills(),
             "read_skill" => self.read_skill(&call.arguments).await,
+            "list_workflows" => self.list_workflows(),
+            "create_workflow" => self.create_workflow(&call.arguments),
+            "get_workflow" => self.get_workflow(&call.arguments),
+            "save_workflow" => self.save_workflow(&call.arguments),
+            "delete_workflow" => self.delete_workflow(&call.arguments),
             "runtime_doctor" => self.runtime_doctor(),
             "memory_list" => self.memory_list(),
             "memory_read" => self.memory_read(&call.arguments),
@@ -1003,6 +1010,11 @@ impl CoreTools {
             "list_mcp_servers" | "mcp_list" | "get_mcp" | "list_servers" => "list_mcp",
             "list_skills" | "skills" => "list_skills",
             "skill" => "read_skill",
+            "workflows" | "list_workflows" | "list_wf" => "list_workflows",
+            "create_wf" | "define_workflow" => "create_workflow",
+            "get_wf" | "workflow" => "get_workflow",
+            "save_wf" => "save_workflow",
+            "delete_wf" | "remove_workflow" | "rm_wf" => "delete_workflow",
             "memory" | "mem_list" => "memory_list",
             // Agent 相关别名（spawn_agent 的常见叫法）
             "delegate" | "delegate_agent" | "spawn_subagent" | "agent" | "subagent"
@@ -1025,6 +1037,91 @@ impl CoreTools {
                 }
             }
             None => ToolResult::success("no MCP servers configured"),
+        }
+    }
+
+    fn workflow_store(&self) -> Result<WorkflowStore, String> {
+        let Some(home) = &self.config_home else {
+            return Err("workflow store not available: config home not configured".into());
+        };
+        Ok(WorkflowStore::new(home.as_path()))
+    }
+
+    /// 列出所有已注册的可编排 workflow id。
+    fn list_workflows(&self) -> ToolResult {
+        let store = match self.workflow_store() {
+            Ok(store) => store,
+            Err(error) => return ToolResult::error(error),
+        };
+        match store.list_ids() {
+            Ok(ids) if ids.is_empty() => ToolResult::success("no workflows registered"),
+            Ok(ids) => ToolResult::success(ids.join("\n")),
+            Err(error) => ToolResult::error(format!("failed to list workflows: {error}")),
+        }
+    }
+
+    /// 读取（返回到描述）一个 workflow 定义。
+    fn get_workflow(&self, arguments: &Value) -> ToolResult {
+        let Some(id) = string_arg(arguments, "id") else {
+            return ToolResult::error("missing string argument: id");
+        };
+        let store = match self.workflow_store() {
+            Ok(store) => store,
+            Err(error) => return ToolResult::error(error),
+        };
+        match store.read(id) {
+            Ok(workflow) => {
+                let pretty = serde_json::to_string_pretty(&workflow).unwrap_or_else(|_| "{}".into());
+                ToolResult::success(pretty)
+            }
+            Err(error) => ToolResult::error(format!("failed to read workflow: {error}")),
+        }
+    }
+
+    /// 创建（定义）并保存一个 workflow。接收完整 workflow JSON 对象。
+    fn create_workflow(&self, arguments: &Value) -> ToolResult {
+        let workflow = match serde_json::from_value::<WorkflowState>(arguments.clone()) {
+            Ok(workflow) => workflow,
+            Err(error) => return ToolResult::error(format!("invalid workflow: {error}")),
+        };
+        let store = match self.workflow_store() {
+            Ok(store) => store,
+            Err(error) => return ToolResult::error(error),
+        };
+        match store.save(&workflow) {
+            Ok(()) => ToolResult::success(format!("workflow `{}` created", workflow.id)),
+            Err(error) => ToolResult::error(format!("failed to create workflow: {error}")),
+        }
+    }
+
+    /// 覆盖更新一个 workflow 定义（与 create 共用 save）。
+    fn save_workflow(&self, arguments: &Value) -> ToolResult {
+        let workflow = match serde_json::from_value::<WorkflowState>(arguments.clone()) {
+            Ok(workflow) => workflow,
+            Err(error) => return ToolResult::error(format!("invalid workflow: {error}")),
+        };
+        let store = match self.workflow_store() {
+            Ok(store) => store,
+            Err(error) => return ToolResult::error(error),
+        };
+        match store.save(&workflow) {
+            Ok(()) => ToolResult::success(format!("workflow `{}` saved", workflow.id)),
+            Err(error) => ToolResult::error(format!("failed to save workflow: {error}")),
+        }
+    }
+
+    /// 删除一个 workflow（定义文件 + 注册条目）。
+    fn delete_workflow(&self, arguments: &Value) -> ToolResult {
+        let Some(id) = string_arg(arguments, "id") else {
+            return ToolResult::error("missing string argument: id");
+        };
+        let store = match self.workflow_store() {
+            Ok(store) => store,
+            Err(error) => return ToolResult::error(error),
+        };
+        match store.remove(id) {
+            Ok(()) => ToolResult::success(format!("workflow `{id}` deleted")),
+            Err(error) => ToolResult::error(format!("failed to delete workflow: {error}")),
         }
     }
 
@@ -2078,6 +2175,69 @@ impl ToolRuntime for CoreTools {
                             "name": {"type": "string", "description": "Configured MCP server name"}
                         },
                         "required": ["name"],
+                        "additionalProperties": false
+                    }),
+                },
+                ToolSpec {
+                    name: "list_workflows".into(),
+                    description: "List all registered executable workflows by id.".into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": false
+                    }),
+                },
+                ToolSpec {
+                    name: "create_workflow".into(),
+                    description: "Define and save a new workflow. Provide a full workflow JSON object with id, name, steps (each with id, action, depends_on).".into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "name": {"type": "string"},
+                            "description": {"type": "string"},
+                            "steps": {"type": "array"},
+                            "model_isolation": {"type": "boolean"}
+                        },
+                        "required": ["id", "name", "steps"],
+                        "additionalProperties": true
+                    }),
+                },
+                ToolSpec {
+                    name: "get_workflow".into(),
+                    description: "Read and pretty-print one workflow definition by id.".into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string", "description": "Workflow id"}
+                        },
+                        "required": ["id"],
+                        "additionalProperties": false
+                    }),
+                },
+                ToolSpec {
+                    name: "save_workflow".into(),
+                    description: "Overwrite/update an existing workflow definition. Provide the full workflow JSON object.".into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "name": {"type": "string"},
+                            "steps": {"type": "array"}
+                        },
+                        "required": ["id", "name", "steps"],
+                        "additionalProperties": true
+                    }),
+                },
+                ToolSpec {
+                    name: "delete_workflow".into(),
+                    description: "Delete a workflow definition and its registration by id.".into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string", "description": "Workflow id"}
+                        },
+                        "required": ["id"],
                         "additionalProperties": false
                     }),
                 },
