@@ -19,6 +19,10 @@ import java.util.Locale;
  * 崩溃采集：Java 未捕获异常 → crash.log（含线程栈与设备信息）；
  * 启动时与崩溃时各快照一次 logcat 尾部 → logcat_boot.log / logcat_crash.log，
  * 用于定位不触发 Java 回调的原生崩溃（如老机/鸿蒙上的打开即闪退）。
+ *
+ * 日志同时写入内部 files/logs 与外部 /sdcard/Android/data/&lt;包名&gt;/files/logs 镜像——
+ * 启动即崩溃（UI 都进不去）时，外部副本仍可被 adb 直接提取：
+ *   adb pull /sdcard/Android/data/com.coomi.android/files/logs/
  */
 public final class CrashLog {
 
@@ -69,6 +73,7 @@ public final class CrashLog {
             FileWriter writer = new FileWriter(log, true);
             writer.write(builder.toString());
             writer.close();
+            mirrorAppend(context, "crash.log", builder.toString());
             Log.e(TAG, "crash written to " + log.getAbsolutePath());
         } catch (Throwable ignored) {
         }
@@ -79,9 +84,7 @@ public final class CrashLog {
             Process process = Runtime.getRuntime().exec(
                     new String[]{"logcat", "-d", "-t", "400", "-v", "threadtime"});
             try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream()), 8192);
-                 FileOutputStream output = new FileOutputStream(
-                         new File(logsDir(context), name))) {
+                    new InputStreamReader(process.getInputStream()), 8192)) {
                 String line;
                 int total = 0;
                 StringBuilder buffer = new StringBuilder(8192);
@@ -91,20 +94,60 @@ public final class CrashLog {
                     if (total >= MAX_LOGCAT_BYTES) break;
                 }
                 byte[] bytes = buffer.toString().getBytes("UTF-8");
-                output.write(bytes);
-                output.flush();
+                writeBytes(new File(logsDir(context), name), bytes, false);
+                mirrorWrite(context, name, bytes);
             }
         } catch (Throwable ignored) {
             // 部分 ROM 禁止应用读取 logcat，忽略即可
         }
     }
 
+    /** 内部目录：应用私有 files/logs。 */
     private static File logsDir(Context context) {
         File dir = new File(context.getApplicationContext().getFilesDir(), "logs");
         if (!dir.isDirectory() && !dir.mkdirs()) {
             return context.getApplicationContext().getFilesDir();
         }
         return dir;
+    }
+
+    /** 外部镜像目录：/sdcard/Android/data/<包名>/files/logs，adb / 文件管理器可读。 */
+    private static File externalLogsDir(Context context) {
+        try {
+            File dir = context.getApplicationContext().getExternalFilesDir("logs");
+            if (dir == null) return null;
+            if (!dir.isDirectory() && !dir.mkdirs()) return null;
+            return dir;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static void mirrorAppend(Context context, String name, String content) {
+        try {
+            File dir = externalLogsDir(context);
+            if (dir == null) return;
+            writeBytes(new File(dir, name), content.getBytes("UTF-8"), true);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void mirrorWrite(Context context, String name, byte[] bytes) {
+        try {
+            File dir = externalLogsDir(context);
+            if (dir == null) return;
+            writeBytes(new File(dir, name), bytes, false);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void writeBytes(File target, byte[] bytes, boolean append) throws java.io.IOException {
+        File parent = target.getParentFile();
+        if (parent != null && !parent.isDirectory()) parent.mkdirs();
+        try (FileOutputStream output = new FileOutputStream(target, append)) {
+            output.write(bytes);
+            output.flush();
+        }
     }
 
     private static String stamp() {

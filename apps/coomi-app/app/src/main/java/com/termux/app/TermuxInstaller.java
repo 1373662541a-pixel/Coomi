@@ -452,6 +452,20 @@ public final class TermuxInstaller {
         }
     }
 
+    /** InputStream.readAllBytes / Files.readAllBytes 都是 Java 9+（API 33 / 26+）的方法，
+     * Android 7-12 上不可用（曾导致首次安装冷启动 NoSuchMethodError）。这里手写兼容实现。 */
+    private static byte[] readAll(File file) throws java.io.IOException {
+        try (java.io.FileInputStream input = new java.io.FileInputStream(file)) {
+            java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream(4096);
+            byte[] chunk = new byte[4096];
+            int count;
+            while ((count = input.read(chunk)) != -1) {
+                buffer.write(chunk, 0, count);
+            }
+            return buffer.toByteArray();
+        }
+    }
+
     /** 把官方 bootstrap 脚本里硬编码的 com.termux 包路径替换为本包路径。 */
     private static void patchBootstrapPackagePaths() {
         String legacyDataPath = "/data/data/com.termux/files";
@@ -465,7 +479,7 @@ public final class TermuxInstaller {
         for (File script : scripts) {
             try {
                 if (!script.isFile()) continue;
-                byte[] raw = java.nio.file.Files.readAllBytes(script.toPath());
+                byte[] raw = readAll(script);
                 // 只处理文本脚本（无 NUL 字节）；ELF 二进制长度不符，替换会破坏文件。
                 boolean hasNul = false;
                 for (byte b : raw) {
@@ -475,8 +489,13 @@ public final class TermuxInstaller {
                 String content = new String(raw, java.nio.charset.StandardCharsets.UTF_8);
                 String patched = content.replace(legacyDataPath, targetDataPath);
                 if (!patched.equals(content)) {
-                    java.nio.file.Files.write(
-                        script.toPath(), patched.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    java.io.FileOutputStream output = new java.io.FileOutputStream(script);
+                    try {
+                        output.write(patched.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                        output.flush();
+                    } finally {
+                        output.close();
+                    }
                     Logger.logInfo(LOG_TAG, "Patched package path in " + script.getAbsolutePath());
                 }
             } catch (Exception e) {

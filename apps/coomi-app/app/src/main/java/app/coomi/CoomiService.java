@@ -21,8 +21,6 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.nio.file.Files;
-import java.nio.file.StandardCopyOption;
 import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -354,13 +352,50 @@ public class CoomiService extends Service {
         mExecutor.execute(() -> callback.accept(startEngineSync()));
     }
 
+    /** InputStream.readAllBytes 是 Java 9 / API 33+ 才有的方法，Android 7-12 调用必然
+     * NoSuchMethodError（已引发首装冷启动崩溃）。手写循环读取代之，全版本可用。 */
+    private static byte[] readFully(InputStream input) throws java.io.IOException {
+        java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream(4096);
+        byte[] chunk = new byte[4096];
+        int count;
+        while ((count = input.read(chunk)) != -1) {
+            buffer.write(chunk, 0, count);
+        }
+        return buffer.toByteArray();
+    }
+
+    /** java.nio.file.Files.readAllBytes 是 API 26+；minSdk 24 请走这里。 */
+    private static byte[] readFileBytes(File file) throws java.io.IOException {
+        try (java.io.FileInputStream input = new java.io.FileInputStream(file)) {
+            return readFully(input);
+        }
+    }
+
+    /** java.nio.file.Files.write/move 是 API 26+；用 tmp + rename 保持原子写语义。 */
+    private static void writeFileAtomically(File target, byte[] bytes) throws java.io.IOException {
+        File parent = target.getParentFile();
+        if (parent == null || (!parent.isDirectory() && !parent.mkdirs())) {
+            throw new java.io.IOException("cannot create parent for " + target.getAbsolutePath());
+        }
+        File temporary = new File(parent, target.getName() + ".tmp");
+        try (FileOutputStream output = new FileOutputStream(temporary)) {
+            output.write(bytes);
+            output.flush();
+            output.getFD().sync();
+        }
+        if (temporary.exists() && !temporary.renameTo(target)) {
+            temporary.delete();
+            throw new java.io.IOException("failed to move " + temporary + " -> " + target);
+        }
+    }
+
     /** 引擎自身写入的指纹（~/.coomi/engine.version，MD5+版本）是否与 APK 内二进制一致。 */
     private boolean engineMatchesApk() {
         try {
             File versionFile = new File(CoomiConstants.COOMI_CONFIG_DIR, "engine.version");
             if (!versionFile.isFile()) return false; // 旧引擎无指纹文件：视为不匹配，重启以加载新代码
             String recorded = new String(
-                java.nio.file.Files.readAllBytes(versionFile.toPath()),
+                readFileBytes(versionFile),
                 java.nio.charset.StandardCharsets.UTF_8
             ).trim();
             String current = binaryFingerprint(nativeBinary());
@@ -493,7 +528,7 @@ public class CoomiService extends Service {
         String expected = CoomiBootstrap.appStamp(this);
         String actual = "";
         if (stampFile.isFile()) {
-            actual = new String(java.nio.file.Files.readAllBytes(stampFile.toPath()), java.nio.charset.StandardCharsets.UTF_8).trim();
+            actual = new String(readFileBytes(stampFile), java.nio.charset.StandardCharsets.UTF_8).trim();
         }
         if (!expected.equals(actual) || !new File(web, "index.html").isFile()) {
             CoomiBootstrap.deleteRecursive(web);
@@ -512,7 +547,7 @@ public class CoomiService extends Service {
     private synchronized void ensureRuntimeManifestCurrent() throws Exception {
         byte[] expected;
         try (InputStream input = getAssets().open(CoomiConstants.RUNTIME_V2_MANIFEST_ASSET)) {
-            expected = input.readAllBytes();
+            expected = readFully(input);
         }
         if (expected.length == 0) {
             throw new IllegalStateException("APK Runtime V2 manifest is empty");
@@ -523,13 +558,11 @@ public class CoomiService extends Service {
         if (parent == null || (!parent.isDirectory() && !parent.mkdirs())) {
             throw new IllegalStateException("cannot create Runtime V2 config directory");
         }
-        if (target.isFile() && Arrays.equals(expected, Files.readAllBytes(target.toPath()))) {
+        if (target.isFile() && Arrays.equals(expected, readFileBytes(target))) {
             return;
         }
 
-        File temporary = new File(parent, target.getName() + ".tmp");
-        Files.write(temporary.toPath(), expected);
-        Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        writeFileAtomically(target, expected);
         Logger.logInfo(LOG_TAG, "Runtime V2 manifest deployed to " + target.getAbsolutePath());
     }
 
@@ -551,9 +584,7 @@ public class CoomiService extends Service {
 
         copyAssetAtomically(CoomiConstants.RUNTIME_V2_HOST_ASSET, host);
         copyAssetAtomically(CoomiConstants.RUNTIME_V2_ROOTFS_ASSET, rootfs);
-        File temporary = new File(directory, stamp.getName() + ".tmp");
-        Files.write(temporary.toPath(), expectedStamp.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        Files.move(temporary.toPath(), stamp.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        writeFileAtomically(stamp, expectedStamp.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         Logger.logInfo(LOG_TAG, "Bundled Runtime V2 artifacts are ready for offline installation");
     }
 
@@ -576,7 +607,10 @@ public class CoomiService extends Service {
             output.getFD().sync();
             if (total == 0) throw new IllegalStateException("APK asset is empty: " + assetName);
         }
-        Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        if (temporary.exists() && !temporary.renameTo(target)) {
+            temporary.delete();
+            throw new java.io.IOException("failed to move " + temporary + " -> " + target);
+        }
     }
 
     /** Start the persistent Rust installation state machine once the local API is healthy. */
