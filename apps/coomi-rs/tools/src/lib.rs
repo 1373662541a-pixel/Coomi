@@ -203,7 +203,7 @@ impl CoreTools {
             "get_workflow" => self.get_workflow(&call.arguments),
             "save_workflow" => self.save_workflow(&call.arguments),
             "delete_workflow" => self.delete_workflow(&call.arguments),
-            "runtime_doctor" => self.runtime_doctor(),
+            "runtime_doctor" => self.runtime_doctor().await,
             "memory_list" => self.memory_list(),
             "memory_read" => self.memory_read(&call.arguments),
             "memory_search" => self.memory_search(&call.arguments),
@@ -1143,7 +1143,7 @@ impl CoreTools {
         }
     }
 
-    fn runtime_doctor(&self) -> ToolResult {
+    async fn runtime_doctor(&self) -> ToolResult {
         let runtime_home = self
             .path_map
             .host_runtime_home()
@@ -1154,6 +1154,32 @@ impl CoreTools {
             .as_ref()
             .map(|home| home.join("runtime-v2").join("state.json").is_file())
             .unwrap_or(false);
+        // 真实执行探测：在启用的 guest 内跑 shell 收集工具链与挂载健康事实。
+        let facts: Option<coomi_services::GuestFacts> = match self.config_home.as_ref() {
+            Some(home) => {
+                let backend = RuntimeManager::open(home)
+                    .and_then(|manager| manager.state())
+                    .ok()
+                    .and_then(|state| {
+                        let version = state.active_version.clone()?;
+                        (state.status == coomi_services::RuntimeInstallStatus::Ready
+                            && state.backend == RuntimeBackendKind::ProotLinux)
+                            .then(|| coomi_services::ProotLinuxBackend {
+                                runtime_root: home.join("runtime-v2"),
+                                version,
+                            })
+                    });
+                match backend {
+                    Some(backend) => {
+                        coomi_services::probe_guest_facts(&backend, Path::new(&self.cwd))
+                            .await
+                            .ok()
+                    }
+                    None => None,
+                }
+            }
+            None => None,
+        };
         let termux = self
             .config_home
             .as_ref()
@@ -1188,7 +1214,8 @@ impl CoreTools {
                     "guest_build_kit": "/opt/coomi-dev",
                     "guest_tmp": "/tmp"
                 },
-                "ssh": {"guest_home_ssh_directory": ssh, "recommended_known_hosts": "/home/coomi/.ssh/known_hosts"}
+                "ssh": {"guest_home_ssh_directory": ssh, "recommended_known_hosts": "/home/coomi/.ssh/known_hosts"},
+                "facts": facts
             })
             .to_string(),
         )

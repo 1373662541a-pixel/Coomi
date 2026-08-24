@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "runtime_version": "debian-bookworm-20260803-proot-5.1.107.91",
+  "runtime_version": "debian-bookworm-20260824-proot-5.1.107.91",
   "architecture": "arm64-v8a",
   "proot_commit": "61681c6481197e3c0cec6726075053adb740f235",
   "proot_license": "GPL-2.0-or-later",
@@ -10,9 +10,9 @@
     "size": 119181
   },
   "rootfs": {
-    "url": "https://github.com/TensorHub-ORG/Coomi/releases/download/runtime-v2-debian-bookworm-20260803/debian-bookworm-arm64.tar.gz",
-    "sha256": "2d540bb09201b8d1bc4f6028546165454f247e8618920b6e464f7f487a582f0c",
-    "size": 158428113
+    "url": "https://github.com/TensorHub-ORG/Coomi/releases/download/runtime-v2-debian-bookworm-20260824/debian-bookworm-arm64.tar.gz",
+    "sha256": "43ebcee7855f4c15e90514ddb111bd0830acbf9602a7d0e19594aa299bbe8105",
+    "size": 158184265
   },
   "environment": {
     "HOME": "/home/coomi",

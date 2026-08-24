@@ -521,6 +521,85 @@ impl RuntimeBackend for ProotLinuxBackend {
     }
 }
 
+/// guest 环境事实（执行探测结果），供 runtime_doctor、提示词注入与前端徽标使用。
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct GuestFacts {
+    pub backend: String,
+    pub sh: bool,
+    pub python: Option<String>,
+    pub git: Option<String>,
+    pub node: Option<String>,
+    pub curl: Option<String>,
+    pub workspace: bool,
+    pub tmp_writable: bool,
+    pub error: Option<String>,
+}
+
+/// 在指定后端内实际执行一次探测：shell 可运行 + 工具链版本 + 挂载点可达。
+pub async fn probe_guest_facts(
+    backend: &impl RuntimeBackend,
+    workspace: &Path,
+) -> Result<GuestFacts> {
+    let script = r#"
+echo "__sh__ok"
+test -d /workspace && echo "__workspace__ok" || echo "__workspace__missing"
+test -w /tmp && echo "__tmp__ok" || echo "__tmp__no"
+if command -v python3 >/dev/null 2>&1; then echo "__python__$(python3 --version 2>&1 | head -1)"; fi
+if command -v git >/dev/null 2>&1; then echo "__git__$(git --version 2>&1 | head -1)"; fi
+if command -v node >/dev/null 2>&1; then echo "__node__$(node -v 2>&1 | head -1)"; fi
+if command -v curl >/dev/null 2>&1; then echo "__curl__$(curl --version 2>&1 | head -1)"; fi
+"#;
+    let result = match backend.command_with_environment(
+        workspace,
+        "/bin/sh",
+        &["-lc".into(), script.trim().into()],
+        &BTreeMap::new(),
+    ) {
+        Ok(command) => command.output_limited(Duration::from_secs(20), 64 * 1024).await,
+        Err(error) => Err(error),
+    };
+    let mut facts = GuestFacts {
+        backend: match backend.kind() {
+            RuntimeBackendKind::ProotLinux => "proot_linux".into(),
+            RuntimeBackendKind::LegacyTermux => "legacy_termux".into(),
+        },
+        ..GuestFacts::default()
+    };
+    match result {
+        Ok(output) => {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines() {
+                let line = line.trim();
+                if let Some(_) = line.strip_prefix("__sh__ok") {
+                    facts.sh = true;
+                } else if line == "__workspace__ok" {
+                    facts.workspace = true;
+                } else if line == "__tmp__ok" {
+                    facts.tmp_writable = true;
+                } else if let Some(value) = line.strip_prefix("__python__") {
+                    facts.python = Some(value.trim().to_owned());
+                } else if let Some(value) = line.strip_prefix("__git__") {
+                    facts.git = Some(value.trim().to_owned());
+                } else if let Some(value) = line.strip_prefix("__node__") {
+                    facts.node = Some(value.trim().to_owned());
+                } else if let Some(value) = line.strip_prefix("__curl__") {
+                    facts.curl = Some(value.trim().to_owned());
+                }
+            }
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if !stderr.trim().is_empty() {
+                    facts.error = Some(stderr.trim().chars().take(300).collect());
+                }
+            }
+        }
+        Err(error) => {
+            facts.error = Some(format!("{error:#}").chars().take(300).collect());
+        }
+    }
+    Ok(facts)
+}
+
 #[derive(Clone, Debug)]
 pub struct RuntimeManager {
     root: PathBuf,

@@ -754,6 +754,7 @@ pub async fn serve(
     let files = ServeDir::new(static_dir).not_found_service(ServeFile::new(index));
     let app = Router::new()
         .route("/api/runtime/health", get(runtime_health))
+        .route("/api/runtime/doctor", get(runtime_doctor))
         .route("/api/runtime/port", get(runtime_port))
         .route(
             "/api/runtime/global-memory",
@@ -1488,6 +1489,35 @@ async fn runtime_health(State(state): State<AppState>) -> Json<Value> {
 
 async fn runtime_port(State(state): State<AppState>) -> Json<Value> {
     Json(json!({"port": state.port}))
+}
+
+/// 运行环境健康与事实（前端环境徽标/事实卡）：
+/// 返回 runtime 状态 + 一次真实执行探测（shell/工具链/挂载）。
+async fn runtime_doctor(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let runtime = RuntimeManager::open(&state.home)
+        .and_then(|manager| manager.state())
+        .map_err(ApiError::from)?;
+    let facts = if runtime.status == coomi_services::RuntimeInstallStatus::Ready {
+        if let Some(version) = runtime.active_version.clone() {
+            let backend = coomi_services::ProotLinuxBackend {
+                runtime_root: state.home.join("runtime-v2"),
+                version,
+            };
+            coomi_services::probe_guest_facts(&backend, &state.cwd)
+                .await
+                .ok()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let termux = coomi_services::LegacyTermuxBackend::from_coomi_home(&state.home);
+    Ok(Json(json!({
+        "runtime": runtime,
+        "facts": facts,
+        "termux_available": termux.prefix.join("bin/sh").is_file(),
+    })))
 }
 
 const TOOL_FAILURE_ANALYSIS_PROMPT: &str = r#"
@@ -4001,6 +4031,7 @@ async fn runtime_v2_action(
         let runtime_manager = manager.clone();
         let task_manager = Arc::clone(&state.task_manager);
         let task_id = record.id.clone();
+        let runtime_home = state.home.clone();
         tokio::spawn(async move {
             let _ = task_manager.transition(
                 &task_id,
@@ -4027,6 +4058,17 @@ async fn runtime_v2_action(
                     .download_artifact("debian-rootfs-arm64.tar.gz", &manifest.rootfs)
                     .await?;
                 runtime_manager.install(&manifest, &host, &rootfs)?;
+                // 安装后执行级冒烟：proot 必须真正跑起 guest 二进制（含解释器/符号链接）才算成功，
+                // 避免残缺 rootfs 被标记为 Ready。
+                {
+                    let backend = coomi_services::ProotLinuxBackend {
+                        runtime_root: runtime_home.join("runtime-v2"),
+                        version: manifest.runtime_version.clone(),
+                    };
+                    coomi_services::RuntimeBackend::health_check(&backend)
+                        .await
+                        .context("post-install guest health check failed")?;
+                }
                 drop(lease);
                 Ok(())
             }
@@ -5618,7 +5660,8 @@ async fn compact_web_session(
         policy_mode,
         &instructions,
         global_memory_enabled(&state.home),
-    );
+    )
+    .await;
     let mcp_runtime = Arc::new(McpRuntime::load(&state.home).await);
     let tools = CoreTools::new(cwd.clone(), policy)
         .with_skills_directory(state.home.join("skills"))
@@ -5831,7 +5874,8 @@ async fn run_turn(
         &instructions,
         global_memory,
         life_context.as_ref(),
-    );
+    )
+    .await;
     if cognitive_enabled {
         prompt_context.push_str(&cognitive_prompt_context(life_context.as_ref().expect("life context"))?);
     }
@@ -6768,7 +6812,7 @@ impl ApprovalHandler for BrowserApproval {
     }
 }
 
-fn system_prompt(
+async fn system_prompt(
     home: &Path,
     cwd: &Path,
     policy: AccessMode,
@@ -6776,9 +6820,10 @@ fn system_prompt(
     global_memory: bool,
 ) -> String {
     system_prompt_with_cognitive(home, cwd, policy, instructions, global_memory, None)
+        .await
 }
 
-fn system_prompt_with_cognitive(
+async fn system_prompt_with_cognitive(
     home: &Path,
     cwd: &Path,
     policy: AccessMode,
@@ -6867,6 +6912,27 @@ This map is shared with the main Agent and sub-agents. Skills add task-specific 
             prompt.push_str(
                 "\n\nRuntime: shell commands run inside the active Debian ProotLinux guest. The verified PRoot launcher is available as `/usr/local/bin/proot` and `COOMI_PROOT_HOST=/usr/local/bin/proot`; do not infer the backend from legacy Termux paths.",
             );
+            // 环境事实卡：真实执行一次探测，给出当前 guest 的工具链与挂载健康状态。
+            if let Some(version) = runtime.active_version.clone() {
+                let backend = coomi_services::ProotLinuxBackend {
+                    runtime_root: home.join("runtime-v2"),
+                    version,
+                };
+                if let Ok(facts) =
+                    coomi_services::probe_guest_facts(&backend, cwd).await
+                {
+                    prompt.push_str(&format!(
+                        "\nRuntime facts (live probe): shell={}, python={}, git={}, node={}, curl={}, workspace={}, tmp={}.",
+                        if facts.sh { "ok" } else { "BROKEN" },
+                        facts.python.as_deref().unwrap_or("-"),
+                        facts.git.as_deref().unwrap_or("-"),
+                        facts.node.as_deref().unwrap_or("-"),
+                        facts.curl.as_deref().unwrap_or("-"),
+                        if facts.workspace { "ok" } else { "missing" },
+                        if facts.tmp_writable { "writable" } else { "unwritable" },
+                    ));
+                }
+            }
         }
     }
     prompt.push_str(

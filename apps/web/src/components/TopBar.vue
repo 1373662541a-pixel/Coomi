@@ -3,11 +3,12 @@
  * 顶栏：汉堡 / 模型名 / 上下文用量。
  * 忙的时候底边跑一条 2px 蓝色扫光，让「正在干活」这件事在最顶层也能看见。
  */
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useConfigStore } from '@/stores/config'
 import { useSessionStore } from '@/stores/session'
 import { useConnectionStore } from '@/stores/connection'
+import { apiGet } from '@/bridge/http'
 import CoomiIcon from './CoomiIcon.vue'
 
 defineEmits<{ menu: [] }>()
@@ -67,6 +68,50 @@ function choose(providerId: string, model: string) {
   session.selectModel(providerId, model)
   modelOpen.value = false
 }
+
+// ── 运行环境（上下文环卡片底部徽标，来自 /api/runtime/doctor 真检测）──
+interface RuntimeDoctor {
+  runtime: { backend?: string; status?: string; active_version?: string | null; error?: string | null }
+  facts?: {
+    backend?: string; sh?: boolean; python?: string | null; git?: string | null
+    node?: string | null; curl?: string | null; workspace?: boolean; tmp_writable?: boolean
+  } | null
+  termux_available?: boolean
+}
+const runtimeInfo = ref<RuntimeDoctor | null>(null)
+const envBadgeClass = computed(() => {
+  const runtime = runtimeInfo.value?.runtime
+  if (runtime?.status === 'ready' && runtimeInfo.value?.facts?.sh) return 'ok'
+  if (runtime?.status === 'ready') return 'warn'
+  if (runtimeInfo.value?.termux_available) return 'warn'
+  return 'down'
+})
+const envBadgeLabel = computed(() => {
+  const doctor = runtimeInfo.value
+  const runtime = doctor?.runtime
+  if (runtime?.status === 'ready') {
+    return doctor?.facts?.sh ? 'Debian 12 · proot' : '环境异常'
+  }
+  if (doctor?.termux_available) return 'Termux 降级'
+  return '运行环境未就绪'
+})
+const envDetail = computed(() => {
+  const facts = runtimeInfo.value?.facts
+  if (!facts) return ''
+  const parts: string[] = []
+  if (facts.python) parts.push(`python ${facts.python.replace(/^Python /, '')}`)
+  if (facts.git) parts.push(`git ${facts.git.replace(/^git version /, '')}`)
+  if (facts.node) parts.push(`node ${facts.node}`)
+  if (facts.workspace !== false) parts.push('/workspace ✓')
+  return parts.join(' · ')
+})
+onMounted(async () => {
+  try {
+    runtimeInfo.value = await apiGet<RuntimeDoctor>('/api/runtime/doctor')
+  } catch {
+    runtimeInfo.value = null
+  }
+})
 
 function toggleModel() {
   modelOpen.value = !modelOpen.value
@@ -185,6 +230,13 @@ function browseInFileManager() {
         <span>会话标记路径</span>
         <button class="path-btn" @click="openPathPicker">{{ session.cwd || '点击选择' }}</button>
       </div>
+      <div v-if="runtimeInfo" class="usage-env">
+        <span>运行环境</span>
+        <span class="env-row">
+          <em class="env-badge" :class="envBadgeClass">{{ envBadgeLabel }}</em>
+          <small v-if="envDetail" class="env-detail">{{ envDetail }}</small>
+        </span>
+      </div>
     </div>
 
     <div v-if="pathPickerOpen" class="path-mask" @click="pathPickerOpen = false">
@@ -264,6 +316,20 @@ function browseInFileManager() {
   margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--border);
 }
 .usage-path span { font-size: 12px; color: var(--text-3); flex-shrink: 0; }
+.usage-env {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  margin-top: 6px; padding-top: 9px; border-top: 1px solid var(--border);
+}
+.usage-env > span { font-size: 12px; color: var(--text-3); flex-shrink: 0; }
+.usage-env .env-row { display: flex; flex-direction: column; gap: 3px; align-items: flex-end; min-width: 0; }
+.env-badge {
+  font-style: normal; font-size: 11px; padding: 3px 9px; border-radius: var(--r-pill);
+  white-space: nowrap;
+}
+.env-badge.ok { background: var(--ok-soft, #e8f5ee); color: var(--ok, #18794e); }
+.env-badge.warn { background: var(--warn-soft, #fdf3e2); color: var(--focus, #b4690e); }
+.env-badge.down { background: var(--fill); color: var(--text-3); }
+.env-detail { font-size: 10.5px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
 .path-btn {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-family: var(--font-mono); font-size: 11.5px; color: var(--blue);
