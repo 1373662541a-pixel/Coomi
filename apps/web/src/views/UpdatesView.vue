@@ -113,7 +113,7 @@ onMounted(() => {
 <style scoped>
 .page { display: flex; flex-direction: column; height: 100%; background: var(--page); }
 .body { flex: 1; overflow: auto; padding: 14px 12px calc(var(--safe-bottom) + 24px); }
-.channel-tabs { display: flex; gap: 8px; }
+.channel-tabs { display: flex; gap: 8px; margin-bottom: 22px; }
 .channel-tabs button {
   flex: 1; height: 38px; border-radius: 8px;
   background: var(--fill); color: var(--text-2); font-size: 13px;
