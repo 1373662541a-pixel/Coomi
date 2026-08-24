@@ -507,7 +507,7 @@ impl RuntimeBackend for ProotLinuxBackend {
             &self.runtime_root,
             "/bin/sh",
             &[
-                "-lc".into(),
+                "-c".into(),
                 "test -x /usr/bin/apt && test -x /usr/bin/python3".into(),
             ],
         )?;
@@ -552,7 +552,7 @@ if command -v curl >/dev/null 2>&1; then echo "__curl__$(curl --version 2>&1 | h
     let result = match backend.command_with_environment(
         workspace,
         "/bin/sh",
-        &["-lc".into(), script.trim().into()],
+        &["-c".into(), script.trim().into()],
         &BTreeMap::new(),
     ) {
         Ok(command) => command.output_limited(Duration::from_secs(20), 64 * 1024).await,
@@ -844,6 +844,12 @@ impl RuntimeManager {
             fs::remove_dir_all(&destination)?;
         }
         fs::rename(&staging, &destination)?;
+        // 清理 Termux 时代遗留的登录脚本（可能引用 /root/.cargo/env 等失效路径），
+        // 避免 guest 登录 shell（-lc）加载它们导致环境问题。
+        let guest_home = self.root.join("home");
+        for name in [".profile", ".bashrc", ".bash_profile", ".zshrc"] {
+            let _ = fs::remove_file(guest_home.join(name));
+        }
         state.previous_version = state.active_version.take();
         state.active_version = Some(manifest.runtime_version.clone());
         state.backend = RuntimeBackendKind::ProotLinux;
@@ -856,7 +862,13 @@ impl RuntimeManager {
     pub fn migrate_legacy_home(&self, legacy_home: &Path) -> Result<u64> {
         let destination = self.root.join("home");
         fs::create_dir_all(&destination)?;
-        copy_user_tree(legacy_home, &destination)
+        let copied = copy_user_tree(legacy_home, &destination)?;
+        // Termux 时代的登录脚本（.profile/.bashrc 等）在 guest 里会引用 /root/.cargo/env 等
+        // 不存在的路径，污染登录 shell（-lc）。迁移后统一清掉，让 guest 使用干净默认。
+        for name in [".profile", ".bashrc", ".bash_profile", ".zshrc"] {
+            let _ = fs::remove_file(destination.join(name));
+        }
+        Ok(copied)
     }
 
     pub fn rollback(&self) -> Result<RuntimeState> {
@@ -1035,7 +1047,10 @@ fn copy_user_tree(source: &Path, destination: &Path) -> Result<u64> {
     for entry in fs::read_dir(source)? {
         let entry = entry?;
         let name = entry.file_name();
-        if matches!(name.to_str(), Some("usr" | ".cache")) {
+        if matches!(
+            name.to_str(),
+            Some("usr" | ".cache" | ".profile" | ".bashrc" | ".bash_profile" | ".zshrc")
+        ) {
             continue;
         }
         let target = destination.join(&name);
