@@ -3995,6 +3995,7 @@ async fn runtime_v2_action(
                 .await
                 .is_ok()
             {
+                let _ = manager.ensure_guest_dns();
                 return Ok(Json(json!({"runtime": current, "already_ready": true})));
             }
             manager
@@ -4107,7 +4108,10 @@ async fn runtime_v2_action(
                 version,
             };
             match coomi_services::RuntimeBackend::health_check(&backend).await {
-                Ok(()) => Ok(current),
+                Ok(()) => {
+                    let _ = manager.ensure_guest_dns();
+                    Ok(current)
+                }
                 Err(error) => Err(error),
             }
         }
@@ -6922,12 +6926,13 @@ This map is shared with the main Agent and sub-agents. Skills add task-specific 
                     coomi_services::probe_guest_facts(&backend, cwd).await
                 {
                     prompt.push_str(&format!(
-                        "\nRuntime facts (live probe): shell={}, python={}, git={}, node={}, curl={}, workspace={}, tmp={}.",
+                        "\nRuntime facts (live probe): shell={}, python={}, git={}, node={}, curl={}, network={}, workspace={}, tmp={}.",
                         if facts.sh { "ok" } else { "BROKEN" },
                         facts.python.as_deref().unwrap_or("-"),
                         facts.git.as_deref().unwrap_or("-"),
                         facts.node.as_deref().unwrap_or("-"),
                         facts.curl.as_deref().unwrap_or("-"),
+                        facts.network.as_deref().unwrap_or("-"),
                         if facts.workspace { "ok" } else { "missing" },
                         if facts.tmp_writable { "writable" } else { "unwritable" },
                     ));

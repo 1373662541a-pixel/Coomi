@@ -530,6 +530,7 @@ pub struct GuestFacts {
     pub git: Option<String>,
     pub node: Option<String>,
     pub curl: Option<String>,
+    pub network: Option<String>,
     pub workspace: bool,
     pub tmp_writable: bool,
     pub error: Option<String>,
@@ -547,7 +548,7 @@ test -w /tmp && echo "__tmp__ok" || echo "__tmp__no"
 if command -v python3 >/dev/null 2>&1; then echo "__python__$(python3 --version 2>&1 | head -1)"; fi
 if command -v git >/dev/null 2>&1; then echo "__git__$(git --version 2>&1 | head -1)"; fi
 if command -v node >/dev/null 2>&1; then echo "__node__$(node -v 2>&1 | head -1)"; fi
-if command -v curl >/dev/null 2>&1; then echo "__curl__$(curl --version 2>&1 | head -1)"; fi
+if command -v curl >/dev/null 2>&1; then echo "__curl__$(curl --version 2>&1 | head -1)"; echo "__net__$(curl -sS -m 5 -o /dev/null -w '%{http_code}' https://coomi.septemc.com/ 2>&1)"; else echo "__net__no-curl"; fi
 "#;
     let result = match backend.command_with_environment(
         workspace,
@@ -584,6 +585,13 @@ if command -v curl >/dev/null 2>&1; then echo "__curl__$(curl --version 2>&1 | h
                     facts.node = Some(value.trim().to_owned());
                 } else if let Some(value) = line.strip_prefix("__curl__") {
                     facts.curl = Some(value.trim().to_owned());
+                } else if let Some(value) = line.strip_prefix("__net__") {
+                    let value = value.trim();
+                    facts.network = if value.is_empty() {
+                        None
+                    } else {
+                        Some(value.to_owned())
+                    };
                 }
             }
             if !output.status.success() {
@@ -850,6 +858,7 @@ impl RuntimeManager {
         for name in [".profile", ".bashrc", ".bash_profile", ".zshrc"] {
             let _ = fs::remove_file(guest_home.join(name));
         }
+        self.ensure_guest_dns()?;
         state.previous_version = state.active_version.take();
         state.active_version = Some(manifest.runtime_version.clone());
         state.backend = RuntimeBackendKind::ProotLinux;
@@ -859,8 +868,27 @@ impl RuntimeManager {
         Ok(state)
     }
 
-    pub fn migrate_legacy_home(&self, legacy_home: &Path) -> Result<u64> {
-        let destination = self.root.join("home");
+    /// 修复 guest DNS：debootstrap 产物里的 /etc/resolv.conf 可能停留在构建机
+    /// （如 systemd-resolved 的 127.0.0.53），guest 内无监听者导致解析全挂。
+    /// 统一重写为公共 DNS。对当前激活版本幂等。
+    pub fn ensure_guest_dns(&self) -> Result<()> {
+        let state = self.state()?;
+        let Some(version) = state.active_version else {
+            return Ok(());
+        };
+        let rootfs = self.root.join("versions").join(&version).join("rootfs");
+        fs::create_dir_all(rootfs.join("etc"))?;
+        fs::write(
+            rootfs.join("etc").join("resolv.conf"),
+            "# Coomi guest DNS (rewritten at install time)\n\
+             nameserver 223.5.5.5\n\
+             nameserver 119.29.29.29\n\
+             nameserver 8.8.8.8\n",
+        )?;
+        Ok(())
+    }
+
+    pub fn migrate_legacy_home(&self, legacy_home: &Path) -> Result<u64> {        let destination = self.root.join("home");
         fs::create_dir_all(&destination)?;
         let copied = copy_user_tree(legacy_home, &destination)?;
         // Termux 时代的登录脚本（.profile/.bashrc 等）在 guest 里会引用 /root/.cargo/env 等
