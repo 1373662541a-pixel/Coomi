@@ -49,7 +49,7 @@ const blocks = computed<TimelineBlockItem[]>(() => buildTimelineBlocks(session.t
 
 function syncDigitalLifeMode() {
   config.syncDigitalLifeEnabled()
-  if (!session.isBusy) session.setSessionMode(config.digitalLifeEnabled ? 'life' : 'agent')
+  if (!session.isBusy) session.syncLifeMode()
 }
 
 let ro: ResizeObserver | null = null
@@ -71,7 +71,8 @@ onMounted(() => {
   // 全局轮询各会话的「后台运行中」状态：切走会话后任务在引擎侧继续跑，
   // 抽屉/会话页据此显示转圈。轮询常驻（本地 API 开销极小），不依赖抽屉打开。
   void sessions.refreshRunning()
-  runningPoll = setInterval(() => sessions.refreshRunning(), 2000)
+  runningPoll = setInterval(() => { sessions.refreshRunning(); void session.refreshLifeUnread(); session.autoDeliverLifeIfReady() }, 2000)
+  void session.refreshLifeUnread()
   // 高度只要变就重新贴底（内部有 rAF 合并，不怕高频触发）
   if (typeof ResizeObserver !== 'undefined') {
     ro = new ResizeObserver(() => follow())
@@ -117,8 +118,8 @@ if (isUnattended()) {
 
 // ResizeObserver 不可用时的兜底：至少条目增减能跟上。
 watch(() => session.timeline.length, () => nextTick(follow))
-watch([() => config.digitalLifeEnabled, () => session.isBusy], ([enabled, busy]) => {
-  if (!busy) session.setSessionMode(enabled ? 'life' : 'agent')
+watch([() => config.digitalLifeEnabled, () => config.lifeGlobalMode, () => session.isBusy], ([, , busy]) => {
+  if (!busy) session.syncLifeMode()
 })
 
 function onDecide(callId: string, decision: ApprovalDecision) { session.approve(callId, decision) }
@@ -190,6 +191,18 @@ watch(() => session.pendingQuestion?.callId, (id, previous) => {
           <button class="retry-primary" @click="session.confirmUndo()">确认回撤</button>
         </div>
       </div>
+      <Transition name="pop">
+        <button
+          v-if="session.lifeUnread.length && session.isGlobalSession && session.mode === 'life' && !session.isBusy"
+          class="life-pill"
+          type="button"
+          @click="session.deliverLife()"
+        >
+          <CoomiIcon name="lifeRings" :size="15" />
+          <span class="life-pill-label">{{ session.lifeUnreadName || '数字生命体' }} 想对你说</span>
+          <span class="life-pill-preview">{{ session.lifeUnread[0].text }}</span>
+        </button>
+      </Transition>
       <StatusBar />
       <Composer />
     </div>
@@ -264,8 +277,23 @@ watch(() => session.pendingQuestion?.callId, (id, previous) => {
 .pop-enter-active, .pop-leave-active { transition: opacity .18s ease, transform .18s ease; }
 .pop-enter-from, .pop-leave-to { opacity: 0; transform: translateY(8px) scale(.9); }
 
-.retry-confirm { margin: 0 12px 6px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); box-shadow: var(--shadow-1); }
-.retry-confirm > div:first-child { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text-2); }
+.life-pill {
+  display: flex; align-items: center; gap: 7px;
+  margin: 0 12px 6px; padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: 12px;
+  background: linear-gradient(105deg, color-mix(in srgb, var(--accent-soft) 80%, var(--bg)), var(--bg));
+  color: var(--accent);
+  box-shadow: var(--shadow-1);
+  text-align: left;
+}
+.life-pill-label { flex: none; font-size: 12.5px; font-weight: 650; }
+.life-pill-preview {
+  flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  color: var(--text-3); font-size: 12px;
+}
+
+.retry-confirm { margin: 0 12px 6px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); box-shadow: var(--shadow-1); }.retry-confirm > div:first-child { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text-2); }
 .retry-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 9px; }
 .retry-actions button { min-height: 34px; padding: 0 13px; border-radius: 6px; font-size: 13px; font-weight: 600; }
 .retry-secondary { background: var(--fill); color: var(--text-2); }

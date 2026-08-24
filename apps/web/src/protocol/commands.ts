@@ -24,6 +24,8 @@ export interface UndoTurnCommand { command: 'undo_turn'; msg_id: string }
 export interface SetReasoningEffortCommand { command: 'set_reasoning_effort'; effort: ReasoningEffort }
 export interface SetMaxToolRoundsCommand { command: 'set_max_tool_rounds'; rounds: number }
 export interface AckEventCommand { command: 'ack_event'; event_seq: number }
+/** 数字生命体：把队列里唯一的 pending 问候投递到当前会话（气泡）。 */
+export interface DeliverLifeCommand { command: 'deliver_life' }
 
 export type AgentCommand =
   | SendMessageCommand | CancelCommand | JumpInCommand | ApproveToolCommand
@@ -31,6 +33,7 @@ export type AgentCommand =
   | ExitPlanModeCommand | SelectModelCommand | FileTransferResultCommand
   | SendGuideCommand | RetryTurnCommand | RegenerateResponseCommand | EditTurnCommand | UndoTurnCommand
   | SetReasoningEffortCommand | SetMaxToolRoundsCommand | AckEventCommand
+  | DeliverLifeCommand
 
 export const PROTOCOL_VERSION = 1
 export type EnvelopeType = 'event' | 'command' | 'ack' | 'error'

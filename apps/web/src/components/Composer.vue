@@ -201,7 +201,7 @@ watch(text, () => {
     </div>
 
     <div class="field" :class="{ busy: session.isBusy }">
-      <button v-if="config.digitalLifeEnabled" class="life-orbit" aria-label="查看数字生命统计" title="查看生命统计" @click="toggleLifeStats">
+      <button v-if="session.mode === 'life'" class="life-orbit" aria-label="查看数字生命统计" title="查看生命统计" @click="toggleLifeStats">
         <i class="orbit outer" /><i class="orbit inner" />
       </button>
       <div v-if="lifeStatsOpen" class="life-stats-card">

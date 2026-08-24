@@ -24,7 +24,9 @@ export function installSystemBackHandler(router: Router): void {
     if (closeTopOverlay()) return true
     const route = router.currentRoute.value.path
     if (route === '/') return false
-    if (route === '/appearance' || route === '/persona') goBack(router, '/settings')
+    // 三级页（记忆库/心情日记）先回二级（数字生命体）。
+    if (route.startsWith('/life/')) goBack(router, '/life')
+    else if (route === '/appearance' || route === '/persona') goBack(router, '/settings')
     else if (
       route === '/hooks'
       || route === '/life'

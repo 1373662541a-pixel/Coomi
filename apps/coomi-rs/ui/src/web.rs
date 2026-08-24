@@ -694,6 +694,8 @@ pub async fn serve(
     fs::create_dir_all(home.join("config"))?;
     fs::create_dir_all(home.join("sessions"))?;
     ensure_provider_document(&home)?;
+    // 全局常驻会话（侧边栏第一条）自愈：缺失/损坏都重建为可用空会话。
+    crate::life::ensure_global_session(&home, &cwd)?;
     anyhow::ensure!(
         static_dir.is_dir(),
         "static directory does not exist: {}",
@@ -748,6 +750,7 @@ pub async fn serve(
     };
     state.workflow_scheduler.start();
     refresh_registry_cache_background(state.clone());
+    crate::life::start_background(state.home.clone());
     // 引擎启动时补发上次会话遗留的未上报事件（如进程被系统杀掉前没来得及 flush）。
     Telemetry::new(&state.home).flush_background();
     let index = static_dir.join("index.html");
@@ -867,6 +870,13 @@ pub async fn serve(
             post(cognitive_install).delete(cognitive_uninstall),
         )
         .route("/api/cognitive/{action}", post(cognitive_action))
+        .route(
+            "/api/life/settings",
+            get(life_settings_get).put(life_settings_put),
+        )
+        .route("/api/life/unread", get(life_unread_get))
+        .route("/api/life/journal", get(life_journal_get))
+        .route("/api/life/memory", get(life_memory_get))
         .route(
             "/api/tool-failure-analysis",
             post(analyze_tool_failures).layer(DefaultBodyLimit::max(32 * 1024)),
@@ -2072,6 +2082,12 @@ async fn delete_session(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Value>, ApiError> {
+    // 全局常驻会话不可删除（自愈体系的一部分：任何错误都以修复收场）。
+    if id == crate::life::GLOBAL_SESSION_ID {
+        return Err(ApiError::bad_request(
+            "the global session cannot be deleted",
+        ));
+    }
     let store = SessionStore::new(&state.home);
     let session_id =
         Uuid::parse_str(&id).map_err(|_| ApiError::bad_request("invalid session id"))?;
@@ -3605,7 +3621,7 @@ fn copy_recursive_count(from: &Path, to: &Path) -> std::io::Result<u64> {
 }
 
 const DEFAULT_MAINTENANCE_PROMPT: &str = "请先扫描 Coomi 当前运行环境中的缓存、临时文件和可安全清理的残留，列出路径、大小和清理原因。只允许处理应用沙箱内明确安全的项目，禁止删除会话记录、Provider 配置和密钥、用户工作文件及系统目录。等待我确认后再执行删除，并汇报结果。";
-const DEFAULT_BACKUP_PROMPT: &str = "请帮助我制定并执行一次安全备份：先扫描我指定的目录，说明文件数量、大小和敏感信息风险；排除 Provider 明文密钥和系统目录，给出备份目标与清单，等待我确认后再复制，并验证备份结果。使用当前运行环境提供的路径，不要假设 Termux 或 Proot 的固定路径。";
+const DEFAULT_BACKUP_PROMPT: &str = "请帮助我制定并执行一次安全备份：先扫描我指定的目录，说明文件数量、大小和敏感信息风险；排除 Provider 明文密钥和系统目录，给出备份目标与清单，等待我确认后再复制，并验证备份结果。如已启用数字生命体，请一并纳入其档案目录（.coomi/life，含状态/记忆/心情日记等）。使用当前运行环境提供的路径，不要假设 Termux 或 Proot 的固定路径。";
 
 async fn get_maintenance_prompts(State(state): State<AppState>) -> Json<Value> {
     let settings = read_settings(&state.home);
@@ -4130,10 +4146,7 @@ fn cognitive_extension_root(home: &Path) -> PathBuf {
 }
 
 fn cognitive_state_root(home: &Path) -> PathBuf {
-    home.join("runtime-v2")
-        .join("home")
-        .join(".coomi")
-        .join("life")
+    crate::life::life_root(home)
 }
 
 fn write_embedded_file(path: &Path, content: &[u8]) -> Result<()> {
@@ -4713,6 +4726,97 @@ async fn cognitive_action(
     operation.map(Json).map_err(ApiError::from)
 }
 
+async fn life_settings_get(State(state): State<AppState>) -> Json<Value> {
+    let settings = crate::life::load_settings(&state.home);
+    let runtime = crate::life::load_runtime(&state.home);
+    Json(json!({
+        "enabled": settings.enabled,
+        "delivery": settings.delivery,
+        "dailyMode": settings.daily_mode,
+        "dailyLimitCustom": settings.daily_limit_custom,
+        "globalMode": settings.global_mode,
+        "windowStartMinutes": settings.window_start_minutes,
+        "windowEndMinutes": settings.window_end_minutes,
+        "minIntervalMinutes": settings.min_interval_minutes,
+        "quietAfterTurnMinutes": settings.quiet_after_turn_minutes,
+        "dayCount": runtime.day_count,
+        "lastProactiveAtMs": runtime.last_proactive_at_ms,
+    }))
+}
+
+async fn life_settings_put(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let settings = crate::life::update_settings(&state.home, &body).map_err(ApiError::from)?;
+    Ok(Json(json!({
+        "enabled": settings.enabled,
+        "delivery": settings.delivery,
+        "dailyMode": settings.daily_mode,
+        "dailyLimitCustom": settings.daily_limit_custom,
+        "globalMode": settings.global_mode,
+        "windowStartMinutes": settings.window_start_minutes,
+        "windowEndMinutes": settings.window_end_minutes,
+        "minIntervalMinutes": settings.min_interval_minutes,
+        "quietAfterTurnMinutes": settings.quiet_after_turn_minutes,
+    })))
+}
+
+async fn life_unread_get(State(state): State<AppState>) -> Json<Value> {
+    let pending = crate::life::peek_pending(&state.home);
+    let item = pending.as_ref().map(|entry| {
+        json!({
+            "id": entry.id,
+            "text": entry.text,
+            "trigger": entry.trigger,
+            "lifeName": entry.life_name,
+            "createdAtMs": entry.created_at_ms,
+        })
+    });
+    Json(json!({
+        "pending": item,
+        "enabled": crate::life::load_settings(&state.home).enabled,
+        "dailyLimit": crate::life::effective_daily_limit(&state.home),
+    }))
+}
+
+#[derive(Default, Deserialize)]
+struct LifeJournalQuery {
+    #[serde(default)]
+    limit: usize,
+    #[serde(default)]
+    offset: usize,
+}
+
+async fn life_journal_get(
+    State(state): State<AppState>,
+    Query(query): Query<LifeJournalQuery>,
+) -> Json<Value> {
+    let limit = if query.limit == 0 { 20 } else { query.limit };
+    Json(json!({
+        "entries": crate::life::journal_recent(&state.home, limit.max(1).min(200), query.offset),
+    }))
+}
+
+/// 记忆接口：最近 N 条 + 分页（二级界面「最近 2 条」与三级界面全量列表共用）。
+#[derive(Default, Deserialize)]
+struct LifeMemoryQuery {
+    #[serde(default)]
+    limit: usize,
+    #[serde(default)]
+    offset: usize,
+}
+
+async fn life_memory_get(
+    State(state): State<AppState>,
+    Query(query): Query<LifeMemoryQuery>,
+) -> Json<Value> {
+    let limit = if query.limit == 0 { 2 } else { query.limit };
+    Json(json!({
+        "entries": crate::life::memory_recent(&state.home, limit.max(1).min(200), query.offset),
+    }))
+}
+
 async fn fetch_provider_models(provider: &ProviderSettings) -> Result<Vec<String>, ApiError> {
     let base = provider.base_url.trim_end_matches('/');
     if base.is_empty() {
@@ -5191,6 +5295,76 @@ async fn handle_command(
             };
             *context.session_mode.write().await = mode;
             context.send_ack(envelope_id);
+        }
+        // 数字生命体 P1：把队列里唯一 pending 问候写入**全局常驻会话**并流式推送（气泡）。
+        // 与 dispatch_guide 相同，不调模型：文案由生命体调度器模板起草。
+        // 只有当前 WS 恰好是常驻会话时才推送事件（避免在别的会话里突然冒字）；
+        // 否则仅落盘，未读由侧边栏常驻项徽标 + 打开时开场问候消费。
+        "deliver_life" => {
+            context.send_ack(envelope_id);
+            let Some(entry) = crate::life::peek_pending(&state.home) else {
+                return;
+            };
+            match crate::life::mark_delivered(&state.home, &entry.id) {
+                Ok(true) => {}
+                Ok(false) | Err(_) => return,
+            }
+            let global_id = Uuid::parse_str(crate::life::GLOBAL_SESSION_ID)
+                .expect("global session id is a valid uuid");
+            let store = SessionStore::new(&state.home);
+            let cwd = state.cwd.clone();
+            let mut session = match store.load(global_id) {
+                Ok(session) => session,
+                Err(_) => {
+                    // 常驻会话被外部破坏：自愈重建后再写入。
+                    let mut session = Session::new(String::new(), String::new(), cwd.clone());
+                    session.id = global_id;
+                    session
+                }
+            };
+            session.mode = SessionMode::Life;
+            let mut message =
+                coomi_engine::ChatMessage::assistant(entry.text.clone(), Vec::new());
+            message.life_proactive = true;
+            let message_id = message.id.clone();
+            session.messages.push(message);
+            session.touch();
+            if let Err(error) = store.save(&session) {
+                context.send_error(
+                    envelope_id,
+                    format!("failed to save life message: {error:#}"),
+                );
+                return;
+            }
+            if session_id == crate::life::GLOBAL_SESSION_ID {
+                // 与 dispatch_guide 相同的节奏：16 字符/块 + 220ms。
+                let mut chunk = String::new();
+                let mut count = 0usize;
+                for ch in entry.text.chars() {
+                    chunk.push(ch);
+                    count += 1;
+                    if count >= 16 {
+                        context
+                            .task
+                            .push_event(json!({"event_type": "text_chunk", "content": chunk}));
+                        chunk.clear();
+                        count = 0;
+                        tokio::time::sleep(std::time::Duration::from_millis(220)).await;
+                    }
+                }
+                if !chunk.is_empty() {
+                    context
+                        .task
+                        .push_event(json!({"event_type": "text_chunk", "content": chunk}));
+                }
+                context.task.push_event(json!({
+                    "event_type": "life_delivered",
+                    "message_id": message_id,
+                    "trigger": entry.trigger,
+                    "text": entry.text,
+                }));
+                context.task.push_event(json!({"event_type": "turn_end"}));
+            }
         }
         "select_model" => {
             let provider = payload
@@ -5865,7 +6039,10 @@ async fn run_turn(
         policy = policy.with_blocked(blocked_private_dirs(&state.home));
     }
     let instructions = coomi_engine::discover_project_instructions(&cwd)?;
-    let cognitive_enabled = should_run_cognitive_turn(session.mode, recovery);
+    // 人格注入条件：会话处于生命模式（常驻/全局开关时前端会同步设置），
+    // 或者「用于全局会话」开关开启（引擎侧独立兜底，防前端漏发模式命令）。
+    let cognitive_enabled = should_run_cognitive_turn(session.mode, recovery)
+        || (!recovery && crate::life::global_mode(&state.home));
     let life_context = if cognitive_enabled {
         Some(cognitive_before_turn(state, prompt).await?)
     } else {
@@ -6064,7 +6241,10 @@ async fn run_turn(
         }
     }
     if cognitive_enabled {
-        cognitive_after_turn(state, prompt, &assistant_text).await?;
+        let turn_result = cognitive_after_turn(state, prompt, &assistant_text).await;
+        // 生命体运行记账（静默期护栏）：无论 sidecar 结果如何都刷新互动时间。
+        let _ = crate::life::record_turn(&state.home);
+        turn_result?;
     }
     Ok(())
 }
@@ -7627,8 +7807,8 @@ mod tests {
         assert_eq!(value["usage"]["turn_cache_hit_rate"], 0.9);
     }
 
-    #[test]
-    fn custom_prompt_injects_and_settings_merge() {
+    #[tokio::test]
+    async fn custom_prompt_injects_and_settings_merge() {
         let home = tempfile::tempdir().expect("temporary home");
         let project = tempfile::tempdir().expect("temporary project");
         let identity = "你是「小酷」，一个温暖、耐心的 AI 助手。";
@@ -7650,7 +7830,8 @@ mod tests {
             AccessMode::FullAccess,
             "",
             true,
-        );
+        )
+        .await;
         assert!(prompt.starts_with("## Custom Identity (身份定位)"));
         assert!(prompt.contains(identity));
         assert!(
@@ -7667,7 +7848,8 @@ mod tests {
             AccessMode::FullAccess,
             "",
             true,
-        );
+        )
+        .await;
         assert!(!prompt.contains(identity));
     }
 
@@ -7719,8 +7901,8 @@ mod tests {
         assert!(!report.contains("private.example"));
     }
 
-    #[test]
-    fn web_prompt_does_not_include_shared_persistent_memory() {
+    #[tokio::test]
+    async fn web_prompt_does_not_include_shared_persistent_memory() {
         let home = tempfile::tempdir().expect("temporary home");
         let project = tempfile::tempdir().expect("temporary project");
         MemoryManager::new(home.path(), project.path())
@@ -7739,7 +7921,8 @@ mod tests {
             AccessMode::FullAccess,
             "",
             true,
-        );
+        )
+        .await;
         assert!(!prompt.contains("CROSS_SESSION_SENTINEL"));
         assert!(!prompt.contains("Persistent memory:"));
         assert!(prompt.contains(&format!(
@@ -7761,7 +7944,8 @@ mod tests {
             AccessMode::FullAccess,
             "",
             false,
-        );
+        )
+        .await;
         assert!(locked.contains("global session memory is OFF"));
     }
 

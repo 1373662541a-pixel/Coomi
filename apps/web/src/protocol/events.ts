@@ -58,6 +58,13 @@ export interface SessionLoadedEvent {
   cwd: string
   usage: { input_tokens: number; output_tokens: number; total_tokens: number }
 }
+/** 数字生命体主动消息投递完成（气泡/开场问候）。 */
+export interface LifeDeliveredEvent {
+  event_type: 'life_delivered'
+  message_id: string
+  trigger: string
+  text: string
+}
 
 export type AgentEvent = (
   | TextChunkEvent | ReasoningChunkEvent | ToolStartEvent | ToolRunningEvent
@@ -69,6 +76,7 @@ export type AgentEvent = (
   | TurnEndEvent
   | SessionStateEvent
   | SessionLoadedEvent
+  | LifeDeliveredEvent
 ) & { event_seq?: number }
 
 export type AgentEventType = AgentEvent['event_type']

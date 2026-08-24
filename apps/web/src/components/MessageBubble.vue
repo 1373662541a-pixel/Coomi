@@ -25,6 +25,8 @@ let last = 0
 
 const isUser = computed(() => props.msg.kind === 'user')
 const isAssistant = computed(() => props.msg.kind === 'assistant')
+/** 生命体主动消息（气泡/开场问候）：带生命体标记的渲染样式。 */
+const isLife = computed(() => isAssistant.value && (props.msg as AssistantMessage).life === true)
 /** 只有最新一条用户消息可编辑重发。 */
 const isLastUser = computed(() => isUser.value && session.lastUserMessage === props.msg)
 /** 只有最新一条助手消息可回撤。 */
@@ -150,7 +152,8 @@ async function copyAll() {
     </div>
   </div>
 
-  <div v-else class="assistant">
+  <div v-else class="assistant" :class="{ life: isLife }">
+    <div v-if="isLife" class="life-tag"><CoomiIcon name="lifeRings" :size="12" /><span>生命体</span></div>
     <div v-for="(h, i) in blocks" :key="i" class="md blk cascade" v-html="h" />
     <FileInline v-if="filePaths.length" :paths="filePaths" />
     <span v-if="streaming" class="stream-caret" />
@@ -181,6 +184,23 @@ async function copyAll() {
 
 .assistant { max-width: 100%; color: var(--text); }
 .blk + .blk { margin-top: 10px; }
+
+/* 生命体主动消息：左侧渐变边条 + 柔和底色，弱化“这是一条系统消息”的距离感。 */
+.assistant.life { padding: 2px 0 4px; }
+.assistant.life .life-tag {
+  display: inline-flex; align-items: center; gap: 4px;
+  margin: 0 0 6px; padding: 3px 9px 3px 7px;
+  border-radius: var(--r-pill);
+  background: color-mix(in srgb, var(--accent-soft) 70%, var(--bg));
+  color: var(--accent); font-size: 11px; font-weight: 650;
+}
+.assistant.life .blk {
+  padding: 10px 13px;
+  border-left: 3px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+  border-radius: 4px 13px 13px 4px;
+  background: color-mix(in srgb, var(--accent-soft) 30%, var(--bg));
+}
+.assistant.life .blk + .blk { margin-top: 8px; }
 
 .user-wrap { display: flex; flex-direction: column; align-items: flex-end; max-width: 84%; }
 .user-acts { justify-content: flex-end; }

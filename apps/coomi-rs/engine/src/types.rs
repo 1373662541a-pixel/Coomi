@@ -109,6 +109,9 @@ pub struct ChatMessage {
     pub compaction_summary: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub internal: bool,
+    /// 数字生命体主动消息（气泡/开场问候）：由生命体队列直接写入，不来自模型。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub life_proactive: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_items: Vec<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -141,6 +144,7 @@ impl ChatMessage {
             tool_call_id: None,
             compaction_summary: false,
             internal: false,
+            life_proactive: false,
             provider_items: Vec::new(),
             images: Vec::new(),
         }
@@ -155,6 +159,7 @@ impl ChatMessage {
             tool_call_id: Some(call_id.into()),
             compaction_summary: false,
             internal: false,
+            life_proactive: false,
             provider_items: Vec::new(),
             images: Vec::new(),
         }
@@ -169,6 +174,7 @@ impl ChatMessage {
             tool_call_id: None,
             compaction_summary: false,
             internal: false,
+            life_proactive: false,
             provider_items: Vec::new(),
             images: Vec::new(),
         }

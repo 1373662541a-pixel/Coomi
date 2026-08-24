@@ -327,6 +327,13 @@ export const useConfigStore = defineStore('config', () => {
    */
   const globalMemory = ref(localStorage.getItem('coomi.globalMemory') === '1')
   const digitalLifeEnabled = ref(localStorage.getItem('coomi.digitalLifeEnabled') === '1')
+  /** 数字生命体「用于全局会话」：开启后所有对话都带生命体人格（引擎侧 settings.globalMode 为权威）。 */
+  const lifeGlobalMode = ref(localStorage.getItem('coomi.lifeGlobalMode') === '1')
+
+  function setLifeGlobalMode(enabled: boolean) {
+    lifeGlobalMode.value = enabled
+    localStorage.setItem('coomi.lifeGlobalMode', enabled ? '1' : '0')
+  }
 
   function syncDigitalLifeEnabled() {
     const bridge = (window as any).CoomiAndroid
@@ -593,7 +600,7 @@ export const useConfigStore = defineStore('config', () => {
   }
 
   return {
-    permissionMode, planMode, themeMode, reasoningEffort, maxToolRounds, connectionSettings, globalMemory, digitalLifeEnabled, customPrompt, providers, activeId, loading, usingMock, lastError, subAgentSettings,
+    permissionMode, planMode, themeMode, reasoningEffort, maxToolRounds, connectionSettings, globalMemory, digitalLifeEnabled, lifeGlobalMode, setLifeGlobalMode, customPrompt, providers, activeId, loading, usingMock, lastError, subAgentSettings,
     currentProviderId, currentModel, currentProvider, mergedProviders,
     fetchProviders, selectModel, validateAndSelectModel, setPermissionMode, setThemeMode, setReasoningEffort, setMaxToolRounds, fetchConnectionSettings, saveConnectionSettings, cyclePermissionMode, togglePlanMode,
     toggleGlobalMemory, syncGlobalMemoryFromEngine, setDigitalLifeEnabled, syncDigitalLifeEnabled, fetchCustomPrompt, saveCustomPrompt,

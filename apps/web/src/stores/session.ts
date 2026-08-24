@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed, shallowRef, watch } from 'vue'
 import { createTransport, type Transport } from '@/bridge'
-import { authedFetch } from '@/bridge/http'
+import { authedFetch, apiGet } from '@/bridge/http'
 import { isDemoMode } from '@/bridge/demoMode'
 import type { AgentEvent } from '@/protocol/events'
 import type { ReasoningEffortStats } from '@/protocol/events'
@@ -11,6 +11,7 @@ import { nextId } from '@/bridge/envelope'
 import { useConnectionStore } from './connection'
 import { useConfigStore } from './config'
 import { useSessionsStore } from './sessions'
+import { isGlobalSession as isGlobalSessionId } from '@/bridge/life'
 import { router } from '@/router'
 import type { AssistantMessage, LoopProgress, QuestionCard, ReasoningBlock, RunState, Timelineitem, ToolCard, ToolDiagnosticTrace } from './viewModel'
 
@@ -35,6 +36,12 @@ export const useSessionStore = defineStore('session', () => {
   /** 当前会话的工作目录（会话标记路径，绑定为会话执行目录）。 */
   const cwd = ref('')
   const loop = ref<LoopProgress>({ active: false, currentStep: 0, totalSteps: 0, status: '' })
+  /** 生命体待投递问候（队列唯一 pending → 气泡/开场问候的数据源）。 */
+  const lifeUnread = ref<LifeUnreadItem[]>([])
+  const lifeUnreadName = ref('')
+  const lifeDelivering = ref(false)
+  /** 本次打开会话是否已做过开场问候（避免轮询重复触发投递）。 */
+  let lifeAutoSent = false
   /** 编辑覆盖状态：非空表示输入框正处于「编辑上一条消息」模式。 */
   const pendingEdit = ref<{ mid: string; content: string } | null>(null)
   /** 回撤确认弹窗状态：非空表示等待用户确认回撤该轮。 */
@@ -304,6 +311,14 @@ export const useSessionStore = defineStore('session', () => {
       case 'loop_step_start':
         loop.value = { ...loop.value, active: true, totalSteps: ev.total_steps, currentStep: ev.step_index, currentDescription: ev.step_description }
         break
+      case 'life_delivered': {
+        // 气泡投递完成：把最后一条 assistant 标记为生命体气泡并复位投递态。
+        lifeDelivering.value = false
+        const last = timeline.value[timeline.value.length - 1]
+        if (last?.kind === 'assistant') last.life = true
+        void refreshLifeUnread()
+        break
+      }
       case 'turn_end':
         endAssistantStream(); cancelRunningTools(); connection.setRetry(null); runState.value = 'idle'
         {
@@ -357,9 +372,20 @@ export const useSessionStore = defineStore('session', () => {
 
   function activateSession(id: string) {
     sessionId.value = id
-    mode.value = sessions.find(id)?.mode ?? 'agent'
+    mode.value = resolveLifeMode(id)
     persistActiveSessionId(id)
+    lifeAutoSent = false
   }
+
+  /**
+   * 会话模式决议：生命体人格只属于「常驻会话」；「用于全局会话」开关开启后所有会话都带人格。
+   * 历史会话即使曾被切成 life，关闭全局开关后也强制回到 agent（人格只活在它该在的地方）。
+   */
+  function resolveLifeMode(id: string): 'agent' | 'life' {
+    return config.digitalLifeEnabled && (isGlobalSessionId(id) || config.lifeGlobalMode) ? 'life' : 'agent'
+  }
+
+  const isGlobalSession = computed(() => isGlobalSessionId(sessionId.value))
 
   function retryInterruptedTurn() {
     retryConfirmation.value = null
@@ -456,8 +482,56 @@ export const useSessionStore = defineStore('session', () => {
     sessions.setMode(sessionId.value, value)
     transport.value?.send({ command: 'set_session_mode', mode: value })
   }
+  /** 按「人格只属于常驻会话 / 用于全局会话开关」重算当前会话模式并同步引擎。 */
+  function syncLifeMode() {
+    if (isBusy.value) return
+    const next = resolveLifeMode(sessionId.value)
+    if (mode.value === next) return
+    mode.value = next
+    sessions.setMode(sessionId.value, next)
+    transport.value?.send({ command: 'set_session_mode', mode: next })
+  }
   function completeFileTransfer(requestId: string, paths: string[]) {
     transport.value?.send({ command: 'file_transfer_result', request_id: requestId, paths })
+  }
+
+  /** 生命体未读问候（/api/life/unread）：窗口轮询 + 打开会话时刷新。 */
+  async function refreshLifeUnread() {
+    try {
+      const data = await apiGet<{ pending: LifeUnreadItem | null; lifeName?: string } | null>('/api/life/unread')
+      const pending = data?.pending ?? null
+      lifeUnread.value = pending ? [pending] : []
+      lifeUnreadName.value = pending?.lifeName ?? ''
+      if (!pending) {
+        // 引擎侧已无未读（可能已投递/过期）：复位投递态，允许后续再触发。
+        lifeDelivering.value = false
+        lifeAutoSent = true
+      }
+    } catch {
+      /* 引擎未就绪时保持上次状态 */
+    }
+  }
+
+  /** 手动投递（气泡 pill）：引擎侧把队列第一条写入本会话并流式推送。 */
+  function deliverLife() {
+    if (!lifeUnread.value.length || lifeDelivering.value) return
+    lifeDelivering.value = true
+    lifeAutoSent = true
+    transport.value?.send({ command: 'deliver_life' })
+  }
+
+  /**
+   * 开场问候：常驻会话已打开且引擎已连、有未读时自动投递一次。
+   * 由 ChatView 常驻轮询每 2s 调用；lifeDelivering/lifeAutoSent 防止重复触发。
+   * 主动消息只在常驻会话出现，其他会话永不投递。
+   */
+  function autoDeliverLifeIfReady() {
+    if (lifeAutoSent || lifeDelivering.value) return
+    if (!isGlobalSessionId(sessionId.value)) return
+    if (mode.value !== 'life' || !lifeUnread.value.length || isBusy.value) return
+    if (!connection.isOpen) return
+    deliverLife()
+    void refreshLifeUnread()
   }
 
   function newSession() {
@@ -476,7 +550,7 @@ export const useSessionStore = defineStore('session', () => {
       const res = await authedFetch(`/api/sessions/${id}`)
       if (!res.ok) return false
       const session = await res.json()
-      mode.value = session.mode === 'life' ? 'life' : 'agent'
+      mode.value = resolveLifeMode(id)
       sessions.setMode(id, mode.value)
       const messages = (session.messages ?? []) as ChatMessageJson[]
       if (messages.length === 0) return false
@@ -515,7 +589,7 @@ export const useSessionStore = defineStore('session', () => {
       if (m.role === 'user') {
         items.push({ kind: 'user', id: nextId(), mid: m.id ?? '', content: m.content })
       } else if (m.role === 'assistant') {
-        if (m.content) items.push({ kind: 'assistant', id: nextId(), mid: m.id ?? '', content: m.content, streaming: false })
+        if (m.content) items.push({ kind: 'assistant', id: nextId(), mid: m.id ?? '', content: m.content, streaming: false, life: m.life_proactive === true })
         for (const tc of m.tool_calls ?? []) {
           items.push({
             kind: 'tool', callId: tc.id, toolName: tc.name,
@@ -757,10 +831,19 @@ export const useSessionStore = defineStore('session', () => {
     if (notice?.kind === 'notice') Object.assign(notice, patch)
   }
 
-  return { sessionId, mode, timeline, runState, usage, retryConfirmation, cwd, loop, isBusy, pendingEdit, undoConfirm, lastUserMessage, lastAssistantMessage, pendingApproval, pendingQuestion, connect, reconnect, disconnect, flushPersistence, sendMessage, cancel, approve, answerQuestion, setPermissionMode, setReasoningEffort, setMaxToolRounds, setSessionMode, togglePlanMode, selectModel, retryInterruptedTurn, dismissRetry, completeFileTransfer, newSession, openSession, deleteSession, setSessionCwd, startEditMessage, cancelEditMessage, requestUndo, confirmUndo, cancelUndo, undoTurn, sendGuide, consentToolFailureFeedback, finishToolFailureFeedback }
+  return { sessionId, mode, timeline, runState, usage, retryConfirmation, cwd, loop, isBusy, pendingEdit, undoConfirm, lastUserMessage, lastAssistantMessage, pendingApproval, pendingQuestion, lifeUnread, lifeUnreadName, lifeDelivering, isGlobalSession, resolveLifeMode, syncLifeMode, refreshLifeUnread, deliverLife, autoDeliverLifeIfReady, connect, reconnect, disconnect, flushPersistence, sendMessage, cancel, approve, answerQuestion, setPermissionMode, setReasoningEffort, setMaxToolRounds, setSessionMode, togglePlanMode, selectModel, retryInterruptedTurn, dismissRetry, completeFileTransfer, newSession, openSession, deleteSession, setSessionCwd, startEditMessage, cancelEditMessage, requestUndo, confirmUndo, cancelUndo, undoTurn, sendGuide, consentToolFailureFeedback, finishToolFailureFeedback }
 })
 
 function fmtTokens(n: number): string { return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n) }
+
+/** 生命体待投递问候（/api/life/unread 返回的 pending 项）。 */
+interface LifeUnreadItem {
+  id: string
+  text: string
+  trigger: string
+  lifeName?: string
+  createdAtMs?: number
+}
 
 function sanitizeToolName(name: string): string {
   return name.replace(/[^a-zA-Z0-9_.:-]/g, '').slice(0, 80) || 'unknown_tool'
@@ -865,6 +948,7 @@ interface ChatMessageJson {
   tool_call_id?: string
   compaction_summary?: boolean
   internal?: boolean
+  life_proactive?: boolean
   images?: Array<{ media_type: string; data: string }>
 }
 

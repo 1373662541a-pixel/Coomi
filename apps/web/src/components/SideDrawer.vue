@@ -7,7 +7,9 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSessionStore } from '@/stores/session'
+import { useConfigStore } from '@/stores/config'
 import { formatSessionTime, useSessionsStore, type SessionMeta } from '@/stores/sessions'
+import { GLOBAL_SESSION_ID } from '@/bridge/life'
 import CoomiIcon from './CoomiIcon.vue'
 
 const props = defineProps<{ open: boolean }>()
@@ -16,12 +18,28 @@ const emit = defineEmits<{ close: [] }>()
 const router = useRouter()
 const session = useSessionStore()
 const sessions = useSessionsStore()
+const config = useConfigStore()
 
 const menuFor = ref<SessionMeta | null>(null)
 const renamingId = ref('')
 const renameText = ref('')
 
 const isEmpty = computed(() => sessions.groups.length === 0)
+
+/** 全局常驻会话：标题跟随生命体开关/名称，未读显示数字徽标，永不消失。 */
+const globalMeta = computed(() =>
+  sessions.ensure(GLOBAL_SESSION_ID, config.digitalLifeEnabled ? '数字生命体' : '全局对话'),
+)
+const globalTitle = computed(() => {
+  const metaTitle = globalMeta.value.title
+  if (session.lifeUnreadName) return session.lifeUnreadName
+  if (config.digitalLifeEnabled) {
+    return metaTitle && metaTitle !== '新对话' ? metaTitle : '数字生命体'
+  }
+  return metaTitle && metaTitle !== '新对话' ? metaTitle : '全局对话'
+})
+const globalRunning = computed(() => sessions.isRunning(GLOBAL_SESSION_ID))
+const isGlobalMeta = (m: SessionMeta | null) => m?.id === GLOBAL_SESSION_ID
 
 // 抽屉一关就把临时态清掉；打开时立即刷新一次各会话的「后台运行中」
 // 状态（常驻轮询由 ChatView 全局负责，这里只保证打开瞬间是最新的）。
@@ -110,7 +128,24 @@ function openDashboard() {
       </button>
 
       <div class="list">
-        <!-- 历史会话列表始终可见；「全局会话记忆」开关只控制模型能否读取这些记录。 -->
+        <div
+          class="row global-row"
+          :class="{ cur: session.sessionId === GLOBAL_SESSION_ID }"
+          @click="pick(GLOBAL_SESSION_ID)"
+        >
+          <span class="gicon"><CoomiIcon name="lifeRings" :size="17" /></span>
+          <div class="rmain">
+            <p class="rtitle">{{ globalTitle }}</p>
+            <p class="rmeta">
+              <span>{{ formatSessionTime(globalMeta.updatedAt) }}</span>
+              <span v-if="session.lifeUnread.length" class="global-badge" aria-label="生命体未读消息">{{ session.lifeUnread.length }}</span>
+              <span v-if="globalRunning" class="rspin" aria-label="后台运行中" />
+            </p>
+          </div>
+          <button class="rmore" aria-label="更多" @click.stop="menuFor = globalMeta">
+            <CoomiIcon name="more" :size="17" />
+          </button>
+        </div>
         <p v-if="isEmpty" class="empty">
           还没有历史会话。<br />随便说点什么，标题会用你的第一句话。
         </p>
@@ -163,16 +198,19 @@ function openDashboard() {
     <div v-if="menuFor" class="sheet-wrap" @click.self="closeMenu">
       <div class="sheet">
         <p class="sheet-title">{{ menuFor.title }}</p>
-        <button class="sheet-item" @click="beginRename">
-          <CoomiIcon name="pencil" :size="18" /><span>重命名</span>
-        </button>
-        <button class="sheet-item" @click="doPin">
-          <CoomiIcon name="pin" :size="18" /><span>{{ menuFor.pinned ? '取消置顶' : '置顶' }}</span>
-        </button>
-        <button class="sheet-item danger" @click="doDelete">
-          <CoomiIcon name="trash" :size="18" /><span>删除会话</span>
-        </button>
-        <button class="sheet-cancel" @click="closeMenu">取消</button>
+          <button class="sheet-item" @click="beginRename">
+            <CoomiIcon name="pencil" :size="18" /><span>重命名</span>
+          </button>
+          <template v-if="!isGlobalMeta(menuFor)">
+            <button class="sheet-item" @click="doPin">
+              <CoomiIcon name="pin" :size="18" /><span>{{ menuFor.pinned ? '取消置顶' : '置顶' }}</span>
+            </button>
+            <button class="sheet-item danger" @click="doDelete">
+              <CoomiIcon name="trash" :size="18" /><span>删除会话</span>
+            </button>
+          </template>
+          <p v-else class="sheet-hint">全局常驻会话：永远置顶，不可删除</p>
+          <button class="sheet-cancel" @click="closeMenu">取消</button>
       </div>
     </div>
   </div>
@@ -263,6 +301,20 @@ function openDashboard() {
   animation: coomi-rspin 0.9s linear infinite;
 }
 @keyframes coomi-rspin { to { transform: rotate(360deg); } }
+/* 全局常驻会话：生命环图标 + 未读徽标（不用圆点区分） */
+.global-row .gicon {
+  flex: none; display: grid; place-items: center;
+  width: 30px; height: 30px; margin-right: 6px;
+  border-radius: 50%; color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 60%, var(--bg));
+}
+.global-badge {
+  display: inline-grid; place-items: center;
+  min-width: 16px; height: 16px; padding: 0 4px;
+  border-radius: 8px; background: var(--accent); color: #fff;
+  font-size: 10.5px; font-weight: 650; line-height: 1;
+}
+.sheet-hint { margin: 0; padding: 12px 14px; color: var(--text-3); font-size: 12px; }
 .rmeta {
   display: flex; align-items: center; gap: 4px; margin-top: 3px;
   font-size: 11.5px; color: var(--text-3);

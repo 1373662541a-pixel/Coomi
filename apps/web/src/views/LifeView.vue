@@ -38,6 +38,34 @@ interface IdentityConfig {
   preset: string
 }
 
+interface LifeSettings {
+  enabled: boolean
+  delivery: string
+  dailyMode: 'off' | 'auto' | 'custom'
+  dailyLimitCustom: number
+  globalMode: boolean
+  windowStartMinutes: number
+  windowEndMinutes: number
+  minIntervalMinutes: number
+  quietAfterTurnMinutes: number
+}
+
+interface JournalEntry {
+  at_ms: number
+  text: string
+  trigger: string
+  life_name: string
+  emotion: string
+  bond: number
+  needs: Record<string, number>
+}
+
+interface MemoryEntry {
+  at_ms: number
+  user: string
+  assistant: string
+}
+
 const router = useRouter()
 const config = useConfigStore()
 const session = useSessionStore()
@@ -49,6 +77,24 @@ const name = ref('Coomi Life')
 const address = ref('你')
 const preset = ref('balanced')
 const pendingIdentity = ref<IdentityConfig | null>(null)
+const lifeSettings = ref<LifeSettings | null>(null)
+const journal = ref<JournalEntry[]>([])
+const memories = ref<MemoryEntry[]>([])
+const dailyMode = ref<'off' | 'auto' | 'custom'>('auto')
+const customLimit = ref(2)
+const windowStart = ref(540)
+const windowEnd = ref(1380)
+const triggerLabels: Record<string, string> = {
+  lonely: '想你了', growth_checkin: '成长', support: '关心',
+  everyday: '日常问候',
+}
+const dailyModeOptions = [
+  { value: 'off', label: '关闭主动', note: '生命体不再主动找你' },
+  { value: 'auto', label: '自动判断', note: '按活跃度与拜访情况自动调整（默认）' },
+  { value: 'custom', label: '自定义数值', note: '自己设定，最高每天 100 条' },
+]
+const windowStartOptions = [7, 8, 9, 10, 11].map(h => ({ value: String(h * 60), label: `${h}:00` }))
+const windowEndOptions = [18, 19, 20, 21, 22, 23].map(h => ({ value: String(h * 60), label: `${h}:00` }))
 const presetOptions = [
   { value: 'balanced', label: '均衡' }, { value: 'warm', label: '温柔' },
   { value: 'cool', label: '高冷' }, { value: 'charming', label: '妩媚' },
@@ -57,8 +103,6 @@ const presetOptions = [
   { value: 'quiet', label: '沉静' }, { value: 'sharp', label: '毒舌' },
 ]
 const presetByLabel: Record<string, string> = Object.fromEntries(presetOptions.map(option => [option.label, option.value]))
-const memoryQuery = ref('')
-const memories = ref<string[]>([])
 const exportedPath = ref('')
 
 const profile = computed(() => status.value?.profile ?? null)
@@ -80,6 +124,75 @@ async function refresh() {
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : String(reason)
   }
+  await refreshLifePanel()
+}
+
+async function refreshLifePanel() {
+  try {
+    lifeSettings.value = await apiGet<LifeSettings>('/api/life/settings')
+    const settings = lifeSettings.value
+    dailyMode.value = settings?.dailyMode ?? 'auto'
+    customLimit.value = settings?.dailyLimitCustom ?? 2
+    windowStart.value = settings?.windowStartMinutes ?? 540
+    windowEnd.value = settings?.windowEndMinutes ?? 1380
+    config.setLifeGlobalMode(settings?.globalMode === true)
+  } catch { /* 引擎未就绪 */ }
+  try {
+    const data = await apiGet<{ entries: JournalEntry[] }>('/api/life/journal?limit=2')
+    journal.value = data?.entries ?? []
+  } catch { /* 引擎未就绪 */ }
+  try {
+    const data = await apiGet<{ entries: MemoryEntry[] }>('/api/life/memory?limit=2')
+    memories.value = data?.entries ?? []
+  } catch { /* 引擎未就绪 */ }
+}
+
+/** 全局人格开关：同步引擎 settings + 全局覆盖，ChatView 监听 lifeGlobalMode 后自动切模式。 */
+function toggleGlobalMode() {
+  const next = !config.lifeGlobalMode
+  config.setLifeGlobalMode(next)
+  session.syncLifeMode()
+  void updateLifeSettings({ globalMode: next })
+}
+
+function onDailyModeChange(value: string) {
+  dailyMode.value = value as 'off' | 'auto' | 'custom'
+  void updateLifeSettings({ dailyMode: dailyMode.value })
+}
+
+function onCustomLimitChange(event: Event) {
+  const value = Math.max(1, Math.min(100, Number((event.target as HTMLInputElement).value) || 2))
+  customLimit.value = value
+  void updateLifeSettings({ dailyLimitCustom: value })
+}
+
+function onWindowStartChange(value: string) {
+  windowStart.value = Number(value)
+  void updateLifeSettings({ windowStartMinutes: windowStart.value })
+}
+
+function onWindowEndChange(value: string) {
+  windowEnd.value = Number(value)
+  void updateLifeSettings({ windowEndMinutes: windowEnd.value })
+}
+
+function goMemory() { router.push('/life/memory') }
+function goJournal() { router.push('/life/journal') }
+
+/** 主动问候设置：局部更新 + 回读（引擎侧白名单+钳制后的值）。 */
+async function updateLifeSettings(patch: Partial<LifeSettings>) {
+  error.value = ''
+  try {
+    const settings = await apiSend<LifeSettings>('/api/life/settings', 'PUT', patch)
+    lifeSettings.value = settings
+  } catch (reason) {
+    error.value = reason instanceof Error ? reason.message : String(reason)
+  }
+}
+
+function formatJournalTime(atMs: number): string {
+  const d = new Date(atMs)
+  return `${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
 async function run(label: string, operation: () => Promise<unknown>, success: string) {
@@ -164,22 +277,10 @@ function toggleEnabled() {
   if (!profile.value) return
   const enabled = !config.digitalLifeEnabled
   config.setDigitalLifeEnabled(enabled)
-  session.setSessionMode(enabled ? 'life' : 'agent')
-}
-
-async function recall() {
-  if (busy.value) return
-  busy.value = 'memory'
-  error.value = ''
-  try {
-    memories.value = await apiSend<string[]>('/api/cognitive/memory', 'POST', {
-      profile_id: 'primary', query: memoryQuery.value, limit: 8,
-    })
-  } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason)
-  } finally {
-    busy.value = ''
-  }
+  // 模式决议（常驻/全局开关）后同步引擎。
+  session.syncLifeMode()
+  // 引擎侧主动问候总开关与前端一致：关闭时调度器不再入队。
+  void updateLifeSettings({ enabled })
 }
 
 async function exportProfile() {
@@ -221,9 +322,13 @@ onMounted(() => {
       <section class="group enable-group">
         <button :disabled="!profile" @click="toggleEnabled">
           <span class="life-mark"><CoomiIcon name="lifeRings" :size="22" /></span>
-          <span><strong>启用数字生命</strong><small>{{ profile ? '开启后对话将由数字生命模式接管' : '完成安装和觉醒后可开启' }}</small></span>
+          <span><strong>启用数字生命</strong><small>{{ profile ? '开启后生命体人格由常驻会话承载' : '完成安装和觉醒后可开启' }}</small></span>
           <i class="switch" :class="{ on: config.digitalLifeEnabled }" />
         </button>
+        <div class="toggle-row" @click="toggleGlobalMode">
+          <span><strong>用于全局会话</strong><small>开启后所有会话都使用生命体人格</small></span>
+          <i class="switch" :class="{ on: config.lifeGlobalMode }" />
+        </div>
       </section>
 
       <p class="sec-label">扩展</p>
@@ -263,11 +368,50 @@ onMounted(() => {
           </div>
           <p v-if="exportedPath" class="path">{{ exportedPath }}</p>
 
+          <p class="sec-label">主动问候（实验）</p>
+          <section class="group form-group">
+            <label><span>主动来消息</span><i class="switch" :class="{ on: lifeSettings?.enabled }" @click="updateLifeSettings({ enabled: !lifeSettings?.enabled })" /></label>
+            <label><span>每日上限</span>
+              <ThemeSelect v-model="dailyMode" :options="dailyModeOptions" title="每日主动上限" aria-label="每日主动上限" @update:model-value="onDailyModeChange" />
+            </label>
+            <label v-if="dailyMode === 'custom'"><span>自定义条数</span>
+              <input type="number" min="1" max="100" :value="customLimit" aria-label="自定义条数" @change="onCustomLimitChange" />
+            </label>
+            <label><span>时段</span>
+              <span class="window-picker">
+                <ThemeSelect :model-value="String(windowStart)" :options="windowStartOptions" title="开始时间" aria-label="开始时间" @update:model-value="onWindowStartChange" />
+                <b>–</b>
+                <ThemeSelect :model-value="String(windowEnd)" :options="windowEndOptions" title="结束时间" aria-label="结束时间" @update:model-value="onWindowEndChange" />
+              </span>
+            </label>
+            <p class="hint">仅气泡投递：它会在常驻会话里轻轻出现，不弹系统通知。设置后约一分钟后生效。</p>
+          </section>
+
           <p class="sec-label">记忆</p>
           <section class="group memory-group">
-            <div class="search"><input v-model="memoryQuery" placeholder="检索记忆" @keyup.enter="recall" /><button aria-label="检索" :disabled="!!busy" @click="recall"><CoomiIcon name="search" :size="17" /></button></div>
-            <p v-if="memories.length === 0" class="empty">暂无匹配记忆</p>
-            <p v-for="(item, index) in memories" :key="index" class="memory">{{ item }}</p>
+            <div class="group-head">
+              <span>最近记忆</span>
+              <button class="more-btn" @click="goMemory">查看更多<CoomiIcon name="chevronRight" :size="13" /></button>
+            </div>
+            <p v-if="memories.length === 0" class="empty">暂无记忆。和它多聊一阵后，这里会记录你们的关键对话。</p>
+            <div v-for="(item, index) in memories" :key="index" class="memory-block">
+              <p class="journal-head"><span>{{ formatJournalTime(item.at_ms) }}</span></p>
+              <p class="memory"><span>你：</span>{{ item.user }}</p>
+              <p class="memory"><span>{{ profile?.name || '数字生命体' }}：</span>{{ item.assistant }}</p>
+            </div>
+          </section>
+
+          <p class="sec-label">心情日记</p>
+          <section class="group memory-group">
+            <div class="group-head">
+              <span>最近日记</span>
+              <button class="more-btn" @click="goJournal">查看更多<CoomiIcon name="chevronRight" :size="13" /></button>
+            </div>
+            <p v-if="journal.length === 0" class="empty">暂无主动问候记录。开启「主动问候」后，它每次主动找你都会在这里留下一笔。</p>
+            <div v-for="(entry, index) in journal" :key="index" class="journal">
+              <p class="journal-head"><span>{{ formatJournalTime(entry.at_ms) }}</span><b>{{ triggerLabels[entry.trigger] ?? entry.trigger }}</b></p>
+              <p class="journal-text">{{ entry.text }}</p>
+            </div>
           </section>
 
           <p class="sec-label danger-label">数据</p>
@@ -323,4 +467,38 @@ button:disabled { opacity: .45; }
 .danger-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 8px; gap: 8px; }
 .danger-actions button { min-height: 38px; border-radius: 6px; background: var(--fill); color: var(--text-2); font-size: 13px; }
 .danger-actions button.danger { background: color-mix(in srgb, var(--danger) 10%, var(--bg)); color: var(--danger); }
+.form-group .switch { cursor: pointer; justify-self: end; }
+.toggle-row {
+  display: flex; align-items: center; gap: 12px;
+  min-height: 58px; padding: 9px 13px;
+  border-top: 1px solid var(--border);
+  cursor: pointer;
+}
+.toggle-row > span { display: flex; flex: 1; min-width: 0; flex-direction: column; }
+.toggle-row strong { color: var(--text); font-size: 13.5px; font-weight: 600; }
+.toggle-row small { margin-top: 2px; color: var(--text-3); font-size: 11.5px; line-height: 1.35; }
+.group-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 12px 8px; border-bottom: 1px solid var(--border);
+  color: var(--text-2); font-size: 12.5px; font-weight: 600;
+}
+.more-btn {
+  display: inline-flex; align-items: center; gap: 2px;
+  border: 0; background: none; padding: 2px 4px;
+  color: var(--blue); font-size: 12px; font-weight: 600;
+}
+.memory-block { padding: 9px 13px 4px; border-bottom: 1px solid var(--border); }
+.memory-block:last-child { border-bottom: 0; }
+.memory-block .journal-head { margin-bottom: 2px !important; }
+.memory-block .memory { padding: 1px 0 7px; color: var(--text-2); font-size: 12.5px; line-height: 1.55; }
+.memory-block .memory span { color: var(--text-3); }
+.window-picker { display: flex; align-items: center; gap: 8px; }
+.window-picker :deep(.select-trigger) { width: 84px; }
+.window-picker b { color: var(--text-3); font-weight: 400; }
+.hint { margin: 0; padding: 10px 13px 12px; color: var(--text-3); font-size: 12px; line-height: 1.55; }
+.journal { padding: 10px 13px; border-bottom: 1px solid var(--border); }
+.journal:last-child { border-bottom: 0; }
+.journal-head { display: flex; align-items: center; justify-content: space-between; margin: 0 0 4px; color: var(--text-3); font-size: 11.5px; }
+.journal-head b { color: var(--accent); font-size: 11.5px; font-weight: 650; }
+.journal-text { margin: 0; color: var(--text-2); font-size: 13px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 </style>
