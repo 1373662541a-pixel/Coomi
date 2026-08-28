@@ -34,6 +34,7 @@ public class CoomiEngineMonitor extends Service {
 
     private static final String LOG_TAG = "CoomiEngineMonitor";
     private static final int NOTIFICATION_ID = CoomiConstants.NOTIFICATION_ID;
+    private static final int TASK_NOTIFICATION_ID = NOTIFICATION_ID + 1;
     private static final int MONITOR_INTERVAL_MS = 30000; // 30s
     private static final int RESTART_DELAY_MS = 5000;
     private static final int MAX_RESTART_ATTEMPTS = 5;
@@ -55,21 +56,60 @@ public class CoomiEngineMonitor extends Service {
 
     /** Task state from the Web bridge: done or running:&lt;count&gt;. */
     private static volatile String sTaskStatus = null;
+    private static volatile String sTaskSessionId = "";
+    private static volatile boolean sTaskBackground = false;
+    private static volatile boolean sTaskNotificationActive = false;
+    private static volatile boolean sAppForeground = true;
     /** 当前运行中的 Monitor 实例（静态持有，供任务状态回调即时刷新通知）。 */
     private static volatile CoomiEngineMonitor sInstance = null;
 
     /** 前端任务状态回调：更新常驻通知的「任务执行中/已完成」文案。 */
     public static void setTaskStatus(String status) {
+        setTaskStatus(status, "", false);
+    }
+
+    /**
+     * Updates task state reported by the Web UI. Extra task notifications are
+     * deliberately limited to background work; the foreground service notice
+     * remains present solely to keep the engine alive.
+     */
+    public static void setTaskStatus(String status, String sessionId, boolean background) {
+        int previousCount = runningTaskCount(sTaskStatus);
+        boolean previousBackground = sTaskBackground;
         sTaskStatus = status;
+        if (sessionId != null && !sessionId.isEmpty()) sTaskSessionId = sessionId;
+        sTaskBackground = background || !sAppForeground;
         CoomiEngineMonitor instance = sInstance;
         if (instance != null) {
-            instance.updateWakeLockForTask();
+            instance.onTaskStateChanged(previousCount, runningTaskCount(status), previousBackground);
+        }
+    }
+
+    public static void setAppForeground(boolean foreground) {
+        sAppForeground = foreground;
+        CoomiEngineMonitor instance = sInstance;
+        if (instance == null) return;
+        if (foreground) {
+            sTaskBackground = false;
+            NotificationManager nm = (NotificationManager) instance.getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm != null) nm.cancel(TASK_NOTIFICATION_ID);
             instance.updateStatus(instance.mCurrentStatus);
+        } else if (runningTaskCount() > 0) {
+            sTaskBackground = true;
+            instance.onTaskStateChanged(runningTaskCount(), runningTaskCount(), true);
         }
     }
 
     private static int runningTaskCount() {
-        String status = sTaskStatus;
+        return runningTaskCount(sTaskStatus);
+    }
+
+    /** Used by the chat Activity to decide whether leaving should enter PiP. */
+    public static boolean hasRunningTasks() {
+        return runningTaskCount() > 0;
+    }
+
+    private static int runningTaskCount(String status) {
         if (status == null) return 0;
         if ("running".equals(status)) return 1;
         if (!status.startsWith("running:")) return 0;
@@ -278,6 +318,13 @@ public class CoomiEngineMonitor extends Service {
         );
         ch.setDescription("Coomi 引擎状态通知");
         nm.createNotificationChannel(ch);
+        NotificationChannel taskChannel = new NotificationChannel(
+            CoomiConstants.TASK_NOTIFICATION_CHANNEL_ID,
+            CoomiConstants.TASK_NOTIFICATION_CHANNEL_NAME,
+            NotificationManager.IMPORTANCE_DEFAULT
+        );
+        taskChannel.setDescription("后台或长时间运行任务的完成提醒");
+        nm.createNotificationChannel(taskChannel);
     }
 
     private void updateStatus(String status) {
@@ -286,24 +333,53 @@ public class CoomiEngineMonitor extends Service {
         if (nm != null) nm.notify(NOTIFICATION_ID, buildNotification("Coomi: " + status));
     }
 
+    private void onTaskStateChanged(int previousCount, int currentCount, boolean previousBackground) {
+        updateWakeLockForTask();
+        NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        if (nm == null) return;
+        if (currentCount == 0 && previousCount > 0 && previousBackground && !sTaskBackground) {
+            nm.notify(TASK_NOTIFICATION_ID, buildTaskNotification("后台任务已结束", false));
+            sTaskNotificationActive = false;
+        } else if (currentCount > 0 && sTaskBackground) {
+            nm.notify(TASK_NOTIFICATION_ID, buildTaskNotification(
+                "后台任务执行中" + (currentCount > 1 ? "（" + currentCount + " 个）" : ""), true));
+            sTaskNotificationActive = true;
+        } else if (currentCount > 0) {
+            if (sTaskNotificationActive) nm.cancel(TASK_NOTIFICATION_ID);
+            sTaskNotificationActive = false;
+        } else if (previousCount > 0 && previousBackground) {
+            nm.notify(TASK_NOTIFICATION_ID, buildTaskNotification("后台任务已结束", false));
+            sTaskNotificationActive = false;
+        }
+        updateStatus(mCurrentStatus);
+    }
+
     /** 通知点击目标：按「启动首页」设置跳控制台或对话页。只用 NEW_TASK 复用现有
      *  singleTask 实例，不用 CLEAR_TASK 清任务栈（否则会销毁正在跑的对话页导致任务中断）。 */
     private PendingIntent buildContentIntent() {
-        Class<?> target = CoomiHomePreference.isChatHome(this)
+        return buildContentIntent(false);
+    }
+
+    private PendingIntent buildContentIntent(boolean task) {
+        Class<?> target = task || CoomiHomePreference.isChatHome(this)
             ? com.termux.app.CoomiActivity.class : CoomiDashboardActivity.class;
         Intent i = new Intent(this, target);
         i.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        if (target == com.termux.app.CoomiActivity.class && !TextUtils.isEmpty(sTaskSessionId)) {
+            i.putExtra(com.termux.app.CoomiActivity.EXTRA_SESSION_ID, sTaskSessionId);
+        }
         int flags = PendingIntent.FLAG_UPDATE_CURRENT;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) flags |= PendingIntent.FLAG_IMMUTABLE;
-        return PendingIntent.getActivity(this, 0, i, flags);
+        // Keep the task click target independent from the persistent service notice.
+        return PendingIntent.getActivity(this, task ? 1 : 0, i, flags);
     }
 
     private Notification buildNotification(String contentText) {
         // 任务执行状态拼进正文：如「Coomi: 运行中 · 任务执行中」
         int runningTasks = runningTaskCount();
-        if (runningTasks > 0) {
+        if (runningTasks > 0 && sTaskBackground) {
             contentText += " · " + runningTasks + " 个任务执行中";
-        } else if ("done".equals(sTaskStatus)) {
+        } else if ("done".equals(sTaskStatus) && sTaskBackground) {
             contentText += " · 任务已完成";
         }
         return new NotificationCompat.Builder(this, CoomiConstants.NOTIFICATION_CHANNEL_ID)
@@ -314,6 +390,19 @@ public class CoomiEngineMonitor extends Service {
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setShowWhen(false)
+            .build();
+    }
+
+    private Notification buildTaskNotification(String text, boolean ongoing) {
+        return new NotificationCompat.Builder(this, CoomiConstants.TASK_NOTIFICATION_CHANNEL_ID)
+            .setContentTitle("Coomi 任务")
+            .setContentText(text)
+            .setSmallIcon(R.drawable.ic_service_notification)
+            .setContentIntent(buildContentIntent(true))
+            .setOngoing(ongoing)
+            .setAutoCancel(!ongoing)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setShowWhen(true)
             .build();
     }
 

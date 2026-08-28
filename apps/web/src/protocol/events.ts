@@ -10,6 +10,9 @@ export interface UsageInfo {
   context_ratio?: number
   context_used_tokens?: number
   context_window_tokens?: number
+  first_token_latency_ms?: number | null
+  output_tokens_per_second?: number | null
+  turn_total_tokens?: number
 }
 export interface ReasoningEffortStats {
   turns: number
@@ -65,6 +68,10 @@ export interface LifeDeliveredEvent {
   trigger: string
   text: string
 }
+export interface CollaborationStartedEvent { event_type: 'collaboration_started'; cycles: number }
+export interface CollaborationPhaseEvent { event_type: 'collaboration_phase'; phase: 'coder' | 'reviewer'; cycle: number; status: string }
+export interface CollaborationReviewEvent { event_type: 'collaboration_review'; cycle: number; status: 'approved' | 'findings' | 'error'; content: string }
+export interface CollaborationFinishedEvent { event_type: 'collaboration_finished'; cycle?: number; status?: 'approved' | 'findings' | 'error'; summary?: string }
 
 export type AgentEvent = (
   | TextChunkEvent | ReasoningChunkEvent | ToolStartEvent | ToolRunningEvent
@@ -77,6 +84,7 @@ export type AgentEvent = (
   | SessionStateEvent
   | SessionLoadedEvent
   | LifeDeliveredEvent
+  | CollaborationStartedEvent | CollaborationPhaseEvent | CollaborationReviewEvent | CollaborationFinishedEvent
 ) & { event_seq?: number }
 
 export type AgentEventType = AgentEvent['event_type']

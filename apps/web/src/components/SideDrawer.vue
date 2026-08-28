@@ -88,6 +88,11 @@ async function doPin() {
   if (await sessions.togglePin(menuFor.value.id)) closeMenu()
 }
 
+async function doClear() {
+  if (!menuFor.value) return
+  if (await session.clearSessionData(menuFor.value.id)) closeMenu()
+}
+
 function doDelete() {
   if (!menuFor.value) return
   session.deleteSession(menuFor.value.id)
@@ -201,7 +206,13 @@ function openDashboard() {
           <button class="sheet-item" @click="beginRename">
             <CoomiIcon name="pencil" :size="18" /><span>重命名</span>
           </button>
-          <template v-if="!isGlobalMeta(menuFor)">
+          <template v-if="isGlobalMeta(menuFor)">
+            <button class="sheet-item danger" @click="doClear">
+              <CoomiIcon name="trash" :size="18" /><span>清空会话数据</span>
+            </button>
+            <p class="sheet-hint">全局常驻会话：可清空数据，不可删除</p>
+          </template>
+          <template v-else>
             <button class="sheet-item" @click="doPin">
               <CoomiIcon name="pin" :size="18" /><span>{{ menuFor.pinned ? '取消置顶' : '置顶' }}</span>
             </button>
@@ -209,7 +220,6 @@ function openDashboard() {
               <CoomiIcon name="trash" :size="18" /><span>删除会话</span>
             </button>
           </template>
-          <p v-else class="sheet-hint">全局常驻会话：永远置顶，不可删除</p>
           <button class="sheet-cancel" @click="closeMenu">取消</button>
       </div>
     </div>

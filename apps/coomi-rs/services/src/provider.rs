@@ -28,6 +28,7 @@ use serde_json::Map;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::error::Error as StdError;
 use std::time::Duration;
 
 pub struct HttpModelProvider {
@@ -39,7 +40,10 @@ impl HttpModelProvider {
     pub fn new(config: ProviderConfig) -> Result<Self> {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(180))
+            // A streamed completion has no fixed body length. A total timeout
+            // would abort otherwise healthy generations after 180 seconds;
+            // use a per-read timeout so every received chunk resets the clock.
+            .read_timeout(Duration::from_secs(180))
             .build()
             .context("failed to build provider HTTP client")?;
         Ok(Self { config, client })
@@ -83,7 +87,9 @@ impl HttpModelProvider {
             request.reasoning_effort.as_deref(),
             Some(false),
         );
-        let response = self.send_with_reasoning_fallback(&endpoint, &body).await?;
+        let response = self
+            .send_with_reasoning_fallback(&endpoint, &body, false)
+            .await?;
         let value = checked_json(response, "response_body").await?;
         let message = value
             .pointer("/choices/0/message")
@@ -141,7 +147,9 @@ impl HttpModelProvider {
             request.reasoning_effort.as_deref(),
             Some(false),
         );
-        let response = self.send_with_reasoning_fallback(&endpoint, &body).await?;
+        let response = self
+            .send_with_reasoning_fallback(&endpoint, &body, true)
+            .await?;
         let status = response.status();
         if !status.is_success() {
             return checked_json(response, "response_body")
@@ -290,7 +298,9 @@ impl HttpModelProvider {
             request.reasoning_effort.as_deref(),
             Some(true),
         );
-        let response = self.send_with_reasoning_fallback(&endpoint, &body).await?;
+        let response = self
+            .send_with_reasoning_fallback(&endpoint, &body, false)
+            .await?;
         let value = checked_json(response, "response_body").await?;
         let mut content = String::new();
         let mut tool_calls = Vec::new();
@@ -364,7 +374,9 @@ impl HttpModelProvider {
             request.reasoning_effort.as_deref(),
             Some(true),
         );
-        let response = self.send_with_reasoning_fallback(&endpoint, &body).await?;
+        let response = self
+            .send_with_reasoning_fallback(&endpoint, &body, true)
+            .await?;
         let status = response.status();
         if !status.is_success() {
             return checked_json(response, "response_body")
@@ -559,7 +571,7 @@ impl HttpModelProvider {
                         name: call
                             .get("name")
                             .and_then(Value::as_str)
-                            .unwrap_or("unknown")
+                            .unwrap_or("provider_protocol_error")
                             .to_owned(),
                         reason: error.to_string(),
                     }),
@@ -599,9 +611,23 @@ impl HttpModelProvider {
 
     /// 400 兜底：逐级剥离非标准参数后重试（reasoning → top_k → 并行工具 → 全部工具），
     /// 直到成功或全部失败。全部失败时返回首个响应的原始错误详情。
-    async fn send_with_reasoning_fallback(&self, endpoint: &str, body: &Value) -> Result<Response> {
-        let response = self
-            .authenticated(self.client.post(endpoint))
+    async fn send_with_reasoning_fallback(
+        &self,
+        endpoint: &str,
+        body: &Value,
+        streaming: bool,
+    ) -> Result<Response> {
+        let request = || {
+            let builder = self.authenticated(self.client.post(endpoint));
+            if streaming {
+                builder
+                    .header(reqwest::header::ACCEPT, "text/event-stream")
+                    .header(reqwest::header::CACHE_CONTROL, "no-cache")
+            } else {
+                builder
+            }
+        };
+        let response = request()
             .json(body)
             .send()
             .await
@@ -665,8 +691,7 @@ impl HttpModelProvider {
         );
 
         for fallback in &steps {
-            let retry = self
-                .authenticated(self.client.post(endpoint))
+            let retry = request()
                 .json(fallback)
                 .send()
                 .await
@@ -962,16 +987,22 @@ async fn send_request(builder: RequestBuilder, phase: &'static str) -> Result<Re
 }
 
 fn transport_error(phase: &'static str, error: reqwest::Error) -> anyhow::Error {
-    let chain = format!("{error:#}").to_ascii_lowercase();
-    let kind = if error.is_builder() {
+    let is_builder = error.is_builder();
+    let is_body = error.is_body();
+    let is_redirect = error.is_redirect();
+    let is_timeout = error.is_timeout();
+    let is_connect = error.is_connect();
+    let detail = transport_error_chain(error);
+    let chain = detail.to_ascii_lowercase();
+    let kind = if is_builder {
         ProviderErrorKind::RequestBuild
-    } else if error.is_body() {
+    } else if is_body {
         ProviderErrorKind::RequestBody
-    } else if error.is_redirect() {
+    } else if is_redirect {
         ProviderErrorKind::Redirect
-    } else if error.is_timeout() {
+    } else if is_timeout {
         ProviderErrorKind::Timeout
-    } else if error.is_connect() {
+    } else if is_connect {
         if chain.contains("dns")
             || chain.contains("name resolution")
             || chain.contains("lookup address")
@@ -993,7 +1024,6 @@ fn transport_error(phase: &'static str, error: reqwest::Error) -> anyhow::Error 
         ProviderErrorKind::Request
     };
     let retryable = retryable_transport_kind(kind);
-    let detail = error.without_url().to_string();
     ProviderRequestError {
         phase,
         kind,
@@ -1013,7 +1043,25 @@ fn retryable_transport_kind(kind: ProviderErrorKind) -> bool {
             | ProviderErrorKind::Connect
             | ProviderErrorKind::Dns
             | ProviderErrorKind::Request
+            | ProviderErrorKind::Stream
     )
+}
+
+/// reqwest intentionally displays only a generic message for body decoder
+/// failures. Preserve its source chain (without the request URL) so logs can
+/// distinguish a timeout, peer reset, incomplete chunked body, or HTTP/2 error.
+fn transport_error_chain(error: reqwest::Error) -> String {
+    let error = error.without_url();
+    let mut parts = vec![error.to_string()];
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !text.is_empty() && parts.last().is_none_or(|previous| previous != &text) {
+            parts.push(text);
+        }
+        source = cause.source();
+    }
+    parts.join(": ")
 }
 
 async fn read_sse(
@@ -1021,22 +1069,70 @@ async fn read_sse(
     phase: &'static str,
     mut consume: impl FnMut(Value) -> Result<()>,
 ) -> Result<()> {
+    let status = response.status();
+    let version = response.version();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("unknown")
+        .to_owned();
+    let transfer_encoding = response
+        .headers()
+        .get(reqwest::header::TRANSFER_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("none")
+        .to_owned();
+    let content_encoding = response
+        .headers()
+        .get(reqwest::header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("identity")
+        .to_owned();
+    let content_length = response
+        .headers()
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("unknown")
+        .to_owned();
     let request_id = response_request_id(response.headers());
     let mut stream = response.bytes_stream();
     let mut buffer = Vec::new();
-    while let Some(chunk) = stream.next().await {
+    let mut bytes_received = 0_u64;
+    let mut chunks_received = 0_u64;
+    let mut saw_done = false;
+    'stream: while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|error| {
-            let detail = error.without_url().to_string();
+            let kind = if error.is_timeout() {
+                ProviderErrorKind::Timeout
+            } else {
+                ProviderErrorKind::Stream
+            };
+            let detail = format!(
+                "{}; http_status={} http_version={:?} content_type={} transfer_encoding={} content_encoding={} content_length={} bytes_received={} chunks_received={} saw_done={}",
+                transport_error_chain(error),
+                status.as_u16(),
+                version,
+                content_type,
+                transfer_encoding,
+                content_encoding,
+                content_length,
+                bytes_received,
+                chunks_received,
+                saw_done,
+            );
             anyhow::Error::new(ProviderRequestError {
                 phase,
-                kind: ProviderErrorKind::Stream,
-                status: None,
+                kind,
+                status: Some(status.as_u16()),
                 retry_after_ms: None,
                 request_id: request_id.clone(),
-                retryable: true,
+                retryable: retryable_transport_kind(kind),
                 detail,
             })
         })?;
+        chunks_received = chunks_received.saturating_add(1);
+        bytes_received = bytes_received.saturating_add(chunk.len() as u64);
         buffer.extend_from_slice(&chunk);
         while let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
             let mut line = buffer.drain(..=newline).collect::<Vec<_>>();
@@ -1058,8 +1154,14 @@ async fn read_sse(
                 continue;
             };
             let data = data.trim();
-            if data.is_empty() || data == "[DONE]" {
+            if data.is_empty() {
                 continue;
+            }
+            if data == "[DONE]" {
+                saw_done = true;
+                // The SSE protocol has an explicit terminator. Do not wait
+                // for a proxy/provider to close the keep-alive connection.
+                break 'stream;
             }
             let value = serde_json::from_str(data).map_err(|_| {
                 anyhow::Error::new(ProviderRequestError {
@@ -1074,6 +1176,9 @@ async fn read_sse(
             })?;
             consume(value)?;
         }
+    }
+    if saw_done {
+        return Ok(());
     }
     Ok(())
 }
@@ -1134,6 +1239,26 @@ impl ChatStreamState {
                     target.arguments.push_str(arguments);
                 }
             }
+            if let Some(name) = item.get("name").and_then(Value::as_str) {
+                // A few OpenAI-compatible gateways flatten function.name onto
+                // the tool-call item while keeping arguments under function.
+                target.name.push_str(name);
+            }
+            if let Some(arguments) = item.get("arguments").and_then(Value::as_str) {
+                target.arguments.push_str(arguments);
+            }
+        }
+        // Legacy Chat Completions implementations may emit one tool call as
+        // delta.function_call instead of delta.tool_calls[]. Preserve it as
+        // index zero so the call can still be validated and executed.
+        if let Some(function) = delta.get("function_call") {
+            let target = self.tools.entry(0).or_default();
+            if let Some(name) = function.get("name").and_then(Value::as_str) {
+                target.name.push_str(name);
+            }
+            if let Some(arguments) = function.get("arguments").and_then(Value::as_str) {
+                target.arguments.push_str(arguments);
+            }
         }
         Ok(())
     }
@@ -1151,8 +1276,11 @@ impl ChatStreamState {
             if call.name.trim().is_empty() {
                 invalid_tool_calls.push(InvalidToolCall {
                     id,
-                    name: "unknown".into(),
-                    reason: "streamed tool call has no function name".into(),
+                    name: "provider_protocol_error".into(),
+                    reason: format!(
+                        "streamed tool call has no function name (arguments_bytes={})",
+                        call.arguments.len()
+                    ),
                 });
                 continue;
             }
@@ -1299,7 +1427,7 @@ impl ResponsesStreamState {
             if call.name.trim().is_empty() {
                 invalid_tool_calls.push(InvalidToolCall {
                     id,
-                    name: "unknown".into(),
+                    name: "provider_protocol_error".into(),
                     reason: "streamed tool call has no function name".into(),
                 });
                 continue;
@@ -1783,7 +1911,7 @@ fn invalid_tool_call(value: &Value, error: anyhow::Error) -> InvalidToolCall {
         name: function
             .get("name")
             .and_then(Value::as_str)
-            .unwrap_or("unknown")
+            .unwrap_or("provider_protocol_error")
             .to_owned(),
         reason: error.to_string(),
     }
@@ -2061,6 +2189,64 @@ mod tests {
         assert!(response.tool_calls.is_empty());
         assert_eq!(response.invalid_tool_calls.len(), 1);
         assert_eq!(response.invalid_tool_calls[0].name, "read_file");
+    }
+
+    #[test]
+    fn streamed_tool_calls_accept_flattened_and_legacy_function_shapes() {
+        let mut flattened = ChatStreamState::default();
+        flattened
+            .consume(
+                &json!({
+                    "choices": [{"delta": {"tool_calls": [{
+                        "index": 0,
+                        "id": "call-flat",
+                        "name": "read_file",
+                        "arguments": "{\"path\":\"README.md\"}"
+                    }]}}]
+                }),
+                &IgnoreStream,
+            )
+            .expect("consume flattened tool delta");
+        let response = flattened.finish().expect("finish flattened stream");
+        assert_eq!(response.tool_calls[0].name, "read_file");
+
+        let mut legacy = ChatStreamState::default();
+        legacy
+            .consume(
+                &json!({
+                    "choices": [{"delta": {"function_call": {
+                        "name": "read_file",
+                        "arguments": "{\"path\":\"README.md\"}"
+                    }}}]
+                }),
+                &IgnoreStream,
+            )
+            .expect("consume legacy function delta");
+        let response = legacy.finish().expect("finish legacy stream");
+        assert_eq!(response.tool_calls[0].name, "read_file");
+    }
+
+    #[test]
+    fn streamed_tool_call_without_name_is_protocol_error() {
+        let mut state = ChatStreamState::default();
+        state
+            .consume(
+                &json!({
+                    "choices": [{"delta": {"tool_calls": [{
+                        "index": 0,
+                        "id": "call-missing-name",
+                        "function": {"arguments": "{}"}
+                    }]}}]
+                }),
+                &IgnoreStream,
+            )
+            .expect("consume malformed tool delta");
+        let response = state.finish().expect("finish malformed stream");
+        assert!(response.tool_calls.is_empty());
+        assert_eq!(response.invalid_tool_calls[0].name, "provider_protocol_error");
+        assert!(response.invalid_tool_calls[0]
+            .reason
+            .contains("arguments_bytes=2"));
     }
 
     #[test]

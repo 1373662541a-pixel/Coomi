@@ -40,7 +40,7 @@ const showStop = computed(() => session.isBusy && !canSend.value)
 const modeLabel = computed(() => PERMISSION_MODES.find(m => m.mode === config.permissionMode)?.label ?? '')
 const providerReady = computed(() => config.providers.some(provider => (
   provider.id === config.activeId
-  && provider.models.length > 0
+  && (provider.models.length > 0 || Boolean(provider.model?.trim()))
   && Boolean(provider.baseUrl)
 )))
 
@@ -80,6 +80,10 @@ function onKeydown(e: KeyboardEvent) {
 }
 
 function cycleMode() { session.setPermissionMode(config.cyclePermissionMode()) }
+function cycleSessionMode() {
+  const next = session.mode === 'agent' ? 'team' : session.mode === 'team' ? 'agent' : 'agent'
+  session.setSessionMode(next)
+}
 
 async function insert(t: string) {
   text.value = text.value.trim() ? text.value.replace(/\s+$/, '') + '\n' + t : t
@@ -184,6 +188,10 @@ watch(text, () => {
     <div v-if="transferText" class="transfer">
       <span>{{ transferText }}</span><progress :value="transferProgress" max="100" />
     </div>
+    <div v-if="session.collaboration.active" class="collaboration-status">
+      <CoomiIcon name="subtask" :size="14" />
+      <span>协作第 {{ session.collaboration.cycle }} 轮 · {{ session.collaboration.phase === 'reviewer' ? '审查模型' : '改码模型' }}{{ session.collaboration.status === 'running' ? '处理中' : session.collaboration.status }}</span>
+    </div>
     <div v-if="quickOpen || lifeStatsOpen" class="quick-scrim" @click="quickOpen = false; lifeStatsOpen = false" />
     <div v-if="quickOpen" class="quick">
       <p class="qhead reasoning-head">推理强度</p>
@@ -237,6 +245,10 @@ watch(text, () => {
           <CoomiIcon name="target" :size="14" />
           <span>计划</span>
         </button>
+        <button class="pill" :class="{ on: session.mode === 'team' }" title="切换改码审查协作模式" @click="cycleSessionMode">
+          <CoomiIcon name="subtask" :size="14" />
+          <span>{{ session.mode === 'team' ? '协作' : '单模型' }}</span>
+        </button>
         <button class="pill" :class="{ on: config.permissionMode === 'auto', 'warn-on': config.permissionMode === 'full' }" @click="cycleMode">
           <CoomiIcon name="shield" :size="14" />
           <span>{{ modeLabel }}</span>
@@ -278,6 +290,11 @@ watch(text, () => {
 .transfer { display: flex; align-items: center; gap: 8px; margin: 0 2px 6px; font-size: 11.5px; color: var(--text-2); }
 .transfer span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .transfer progress { width: 76px; height: 4px; accent-color: var(--blue); }
+.collaboration-status {
+  display:flex; align-items:center; gap:6px; margin:0 2px 6px; padding:6px 10px;
+  border:1px solid color-mix(in srgb, var(--blue) 35%, var(--border)); border-radius:var(--r-pill);
+  background:var(--blue-soft); color:var(--blue); font-size:11.5px;
+}
 
 .field {
   position: relative;

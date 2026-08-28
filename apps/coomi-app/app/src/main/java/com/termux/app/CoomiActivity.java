@@ -78,6 +78,8 @@ public class CoomiActivity extends Activity {
 
     /** Intent extra：直达前端 hash 路由，如 "#/catalog"。 */
     public static final String EXTRA_ROUTE = "coomi.route";
+    /** Intent extra：通知点击后直达指定会话。 */
+    public static final String EXTRA_SESSION_ID = "coomi.session_id";
     public static final String EXTRA_PREFILL_DRAFT = "coomi.prefill_draft";
     /** Return to the setup wizard instead of the dashboard when leaving a setup route. */
     public static final String EXTRA_RETURN_TO_SETUP = "coomi.return_to_setup";
@@ -165,6 +167,7 @@ public class CoomiActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        CoomiEngineMonitor.setAppForeground(true);
         String currentMode = CoomiTheme.getMode(this);
         if (mAppliedThemeMode == null || !mAppliedThemeMode.equals(currentMode)) {
             mAppliedThemeMode = currentMode;
@@ -281,7 +284,9 @@ public class CoomiActivity extends Activity {
         // 支持从控制台直达特定前端路由（如 SKILL/MCP 管理页 #/catalog）。
         String route = getIntent().getStringExtra(EXTRA_ROUTE);
         String prefill = getIntent().getStringExtra(EXTRA_PREFILL_DRAFT);
+        String sessionId = getIntent().getStringExtra(EXTRA_SESSION_ID);
         String url = "http://127.0.0.1:" + port + "/?token=" + token
+            + (sessionId != null && !sessionId.isEmpty() ? "&session_id=" + Uri.encode(sessionId) : "")
             + (route != null && route.startsWith("#") ? route : "");
         final String target = url;
         runOnUiThread(() -> {
@@ -298,9 +303,15 @@ public class CoomiActivity extends Activity {
         if (mWebView == null || !mPageLoaded || intent == null) return;
         String route = intent.getStringExtra(EXTRA_ROUTE);
         String prefill = intent.getStringExtra(EXTRA_PREFILL_DRAFT);
+        String sessionId = intent.getStringExtra(EXTRA_SESSION_ID);
         runOnUiThread(() -> {
             if (route != null && route.startsWith("#/")) {
                 mWebView.evaluateJavascript("window.location.hash=" + JSONObject.quote(route.substring(1)), null);
+            }
+            if (sessionId != null && !sessionId.isEmpty()) {
+                mWebView.evaluateJavascript(
+                    "window.dispatchEvent(new CustomEvent('coomi:open-session',{detail:{sessionId:" + JSONObject.quote(sessionId) + "}}))",
+                    null);
             }
             if (prefill != null && !prefill.isEmpty()) {
                 mWebView.postDelayed(() -> mWebView.evaluateJavascript(
@@ -468,6 +479,16 @@ public class CoomiActivity extends Activity {
         @JavascriptInterface
         public void updateTaskStatus(String status) {
             CoomiEngineMonitor.setTaskStatus(status);
+        }
+
+        /**
+         * Reports whether the task belongs to a background session. Keeping
+         * this as a separate bridge method preserves compatibility with older
+         * Web bundles while the 1.4.5 bundle can target a specific session.
+         */
+        @JavascriptInterface
+        public void updateTaskStatusDetails(String status, String sessionId, boolean background) {
+            CoomiEngineMonitor.setTaskStatus(status, sessionId, background);
         }
 
         /** 报错反馈：返回设备与 App 诊断信息（不含对话内容、不含 API Key）。 */
@@ -945,7 +966,24 @@ public class CoomiActivity extends Activity {
     @Override
     protected void onPause() {
         evaluateJavascript("window.dispatchEvent(new Event('coomi:flush-persistence'))");
+        CoomiEngineMonitor.setAppForeground(false);
         super.onPause();
+    }
+
+    /** Keep the active task visible while the user watches another app. */
+    @Override
+    public void onUserLeaveHint() {
+        super.onUserLeaveHint();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N
+            && CoomiEngineMonitor.hasRunningTasks()
+            && !isInPictureInPictureMode()) {
+            try {
+                enterPictureInPictureMode();
+            } catch (RuntimeException ignored) {
+                // Some vendor launchers reject PiP transitions; the task
+                // notification remains the reliable fallback in that case.
+            }
+        }
     }
 
     @Override

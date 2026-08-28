@@ -358,7 +358,7 @@ impl ProviderRegistry {
                     .as_deref()
                     .is_some_and(|candidate| candidate.eq_ignore_ascii_case(model))
                 || in_models;
-            if allowed {
+            if allowed || !model.trim().is_empty() {
                 let mut provider = provider.clone();
                 provider.model = model.to_string();
                 apply_model_context_window(&mut provider);

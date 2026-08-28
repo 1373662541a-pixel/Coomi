@@ -22,26 +22,23 @@ const usageOpen = ref(false)
 const pathPickerOpen = ref(false)
 const pathInput = ref('')
 const pathNotice = ref('')
-const activeModelCategory = ref<'text' | 'vision' | 'image'>('text')
+const activeModelCategory = ref('')
 const pathQuickOptions = computed(() => session.cwd ? [session.cwd] : [])
 const modelGroups = computed(() => {
-  const groups: Record<'text' | 'vision' | 'image', Array<{ providerId: string; provider: string; model: string }>> = { text: [], vision: [], image: [] }
-  for (const provider of [...config.providers].sort((a, b) => Number(b.id === config.activeId) - Number(a.id === config.activeId))) {
-    for (const model of provider.models) {
-      const capabilities = provider.capabilityOverrides?.[model]
-      const item = { providerId: provider.id, provider: provider.name, model }
-      if (capabilities?.text ?? true) groups.text.push(item)
-      if (capabilities?.vision ?? false) groups.vision.push(item)
-      if (capabilities?.image_generation ?? false) groups.image.push(item)
-    }
-  }
-  return [
-    { id: 'text' as const, label: '文本模型', items: groups.text },
-    { id: 'vision' as const, label: '图像理解', items: groups.vision },
-    { id: 'image' as const, label: '图像生成', items: groups.image },
-  ]
+  return [...config.providers]
+    .sort((a, b) => Number(b.id === config.activeId) - Number(a.id === config.activeId))
+    .map(provider => ({
+      id: provider.id,
+      label: provider.name,
+      items: [...new Set([...(provider.models ?? []), provider.model].filter(Boolean))]
+        .map(model => ({ providerId: provider.id, provider: provider.name, model: model! })),
+    }))
 })
-const activeModelGroup = computed(() => modelGroups.value.find(group => group.id === activeModelCategory.value)!)
+const activeModelGroup = computed(() => modelGroups.value.find(group => group.id === activeModelCategory.value) ?? {
+  id: '__empty__',
+  label: '供应商',
+  items: [] as Array<{ providerId: string; provider: string; model: string }>,
+})
 const usagePercent = computed(() => Math.min(100, Math.max(0, Math.round((session.usage?.contextRatio ?? 0) * 100))))
 const usageStroke = computed(() => `${usagePercent.value} ${100 - usagePercent.value}`)
 const effortLabels = { auto: '自动', low: '低', medium: '中', high: '高', xhigh: '超高' } as const
@@ -120,7 +117,7 @@ function toggleModel() {
     const selected = modelGroups.value.find(group => group.items.some(item => (
       item.providerId === config.currentProviderId && item.model === config.currentModel
     )))
-    activeModelCategory.value = selected?.id ?? 'text'
+    activeModelCategory.value = selected?.id ?? modelGroups.value[0]?.id ?? ''
   }
 }
 
@@ -170,7 +167,7 @@ function browseInFileManager() {
 
     <button v-if="modelOpen" class="model-scrim" aria-label="关闭模型选择" @click="modelOpen = false" />
     <div v-if="modelOpen" class="model-menu">
-      <div class="model-tabs" role="tablist" aria-label="模型分类">
+      <div v-if="modelGroups.length" class="model-tabs" role="tablist" aria-label="按供应商选择模型">
         <button
           v-for="group in modelGroups"
           :key="group.id"
@@ -189,7 +186,7 @@ function browseInFileManager() {
           <span><b>{{ item.model }}</b><small>{{ item.provider }}</small></span>
           <CoomiIcon v-if="item.providerId === config.currentProviderId && item.model === config.currentModel" name="check" :size="15" />
         </button>
-        <p v-if="activeModelGroup.items.length === 0" class="model-empty">该分类暂无可用模型</p>
+        <p v-if="activeModelGroup.items.length === 0" class="model-empty">{{ modelGroups.length ? '该供应商暂无可用模型' : '暂无已配置供应商' }}</p>
       </section>
     </div>
 
@@ -205,6 +202,9 @@ function browseInFileManager() {
       <p class="usage-title">上下文用量</p>
       <div v-if="session.usage" class="usage-stats">
         <div><span>会话 Token</span><strong>{{ formatTokens(session.usage.total) }}</strong></div>
+        <div><span>输出速度</span><strong>{{ session.usage.outputTokensPerSecond == null ? '--' : `${session.usage.outputTokensPerSecond.toFixed(1)} token/s` }}</strong></div>
+        <div><span>首 token 延迟</span><strong>{{ session.usage.firstTokenLatencyMs == null ? '--' : formatDuration(session.usage.firstTokenLatencyMs) }}</strong></div>
+        <div><span>本轮总 token</span><strong>{{ session.usage.turnTotalTokens == null ? '--' : formatTokens(session.usage.turnTotalTokens) }}</strong></div>
         <div><span>上下文使用</span><strong>{{ formatTokens(session.usage.contextUsed) }} / {{ formatTokens(session.usage.contextWindow) }}</strong></div>
         <div><span>本轮缓存命中</span><strong>{{ formatPercent(session.usage.turnCacheHitRate) }}</strong></div>
         <div><span>会话平均命中</span><strong>{{ formatPercent(session.usage.cacheHitRate) }}</strong></div>
@@ -275,7 +275,8 @@ function browseInFileManager() {
   border-radius: var(--r-card); background: var(--bg); box-shadow: var(--shadow-2);
 }
 .model-tabs {
-  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  max-width: 100%; overflow-x: auto;
   min-height: 42px; border-bottom: 1px solid var(--border);
 }
 .model-tabs button {

@@ -127,6 +127,9 @@ impl CoreTools {
 
     pub fn with_config_home(mut self, home: PathBuf) -> Self {
         let _ = CatalogInstaller::new(&home).install_runtime_environment_skill();
+        // Bundled skill-creator is always present and enabled on first use;
+        // its enabled flag remains user-controlled in config/skills.json.
+        let _ = CatalogInstaller::new(&home).install_skill("skill-creator");
         let legacy = LegacyTermuxBackend::from_coomi_home(&home);
         self.policy = self.policy.clone().with_allowed_roots([
             home.join("runtime-v2").join("home"),

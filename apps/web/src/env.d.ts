@@ -15,6 +15,8 @@ interface Window {
     saveImageData?(dataUrl: string, fileName: string): void
     /** 通知原生层任务运行状态（更新通知栏：执行中 / 已完成）。 */
     updateTaskStatus?(status: string): void
+    /** 1.4.5 后台任务通知协议，携带会话定位信息。 */
+    updateTaskStatusDetails?(status: string, sessionId: string, background: boolean): void
     /** 获取设备与 App 诊断信息（报错反馈使用，不含对话内容）。 */
     getDiagnostics?(): string
     /** 原生上报报错反馈（绕过 WebView CORS）：json 为反馈体，callbackId 用于异步回调。 */

@@ -342,7 +342,10 @@ impl EndpointResolver {
             .next()
             .unwrap_or_default()
             .to_ascii_lowercase();
-        let suffix = if matches!(last.as_str(), "v1" | "v1beta") {
+        // A provider may expose a non-standard explicit version such as `/v4`
+        // (智谱 coding endpoint). Once the user supplied a version segment,
+        // preserve it verbatim instead of appending the protocol default.
+        let suffix = if is_version_segment(&last) {
             existing_version_suffix
         } else {
             default_suffix
@@ -357,6 +360,14 @@ impl EndpointResolver {
             )
         }
     }
+}
+
+fn is_version_segment(segment: &str) -> bool {
+    let Some(rest) = segment.strip_prefix('v') else {
+        return false;
+    };
+    let digit_count = rest.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    digit_count > 0 && rest.chars().all(|ch| ch.is_ascii_alphanumeric())
 }
 
 pub fn resolve_reasoning_effort(
@@ -632,6 +643,22 @@ mod tests {
             EndpointResolver::new("https://a.test", ProviderProtocol::Gemini).inference("gemini"),
             "https://a.test/v1beta/models/gemini:generateContent"
         );
+    }
+
+    #[test]
+    fn endpoint_resolver_preserves_explicit_nonstandard_versions() {
+        let zhipu = EndpointResolver::new(
+            "https://open.bigmodel.cn/api/coding/paas/v4",
+            ProviderProtocol::OpenAiCompatible,
+        );
+        assert_eq!(
+            zhipu.inference("glm-4.5"),
+            "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
+        );
+        assert_eq!(zhipu.models(), "https://open.bigmodel.cn/api/coding/paas/v4/models");
+
+        let v4 = EndpointResolver::new("https://example.test/v4", ProviderProtocol::OpenAiCompatible);
+        assert_eq!(v4.inference("m"), "https://example.test/v4/chat/completions");
     }
 
     #[test]

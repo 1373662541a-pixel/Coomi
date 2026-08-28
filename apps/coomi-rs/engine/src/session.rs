@@ -26,6 +26,7 @@ static SESSION_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 pub enum SessionMode {
     #[default]
     Agent,
+    Team,
     Life,
 }
 
@@ -92,6 +93,19 @@ impl Session {
     pub fn switch_model(&mut self, provider_id: impl Into<String>, model: impl Into<String>) {
         self.provider_id = provider_id.into();
         self.model = model.into();
+        self.touch();
+    }
+
+    /// Remove conversation/runtime data while retaining the session identity
+    /// and user-facing metadata (title, pin, model and mode).
+    pub fn clear_data(&mut self) {
+        self.messages.clear();
+        self.usage = TokenUsage::default();
+        self.context = ContextState::default();
+        self.plan = None;
+        self.loop_state = None;
+        self.hooks_started = false;
+        self.summary.clear();
         self.touch();
     }
 
@@ -189,6 +203,16 @@ impl SessionStore {
     }
 
     pub fn save(&self, session: &Session) -> Result<()> {
+        self.save_inner(session, false)
+    }
+
+    /// Save a task checkpoint while preserving metadata changed by the user
+    /// after the in-memory turn was started (title, pin, provider, model).
+    pub fn save_checkpoint(&self, session: &Session) -> Result<()> {
+        self.save_inner(session, true)
+    }
+
+    fn save_inner(&self, session: &Session, preserve_model: bool) -> Result<()> {
         let _guard = SESSION_WRITE_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
@@ -220,6 +244,15 @@ impl SessionStore {
                 persisted.title_manually_set = true;
             }
             persisted.pinned = existing.pinned;
+            // Model selection can change while an older in-memory turn is
+            // still checkpointing. Keep the newest per-session selection from
+            // disk instead of letting that stale turn roll it back.
+            if preserve_model && !existing.provider_id.trim().is_empty() {
+                persisted.provider_id = existing.provider_id;
+            }
+            if preserve_model && !existing.model.trim().is_empty() {
+                persisted.model = existing.model;
+            }
         }
         let bytes = serde_json::to_vec_pretty(&persisted)?;
         // 原子写：先写临时文件再 rename，避免崩溃/断电留下截断的 JSON，
@@ -253,6 +286,13 @@ impl SessionStore {
         fs::remove_file(&path)
             .with_context(|| format!("failed to delete session {}", path.display()))?;
         Ok(true)
+    }
+
+    pub fn clear_data(&self, id: Uuid) -> Result<Session> {
+        let mut session = self.load(id)?;
+        session.clear_data();
+        self.save(&session)?;
+        Ok(session)
     }
 
     pub fn update_metadata(
@@ -541,10 +581,15 @@ mod tests {
         store
             .update_metadata(stale.id, Some("用户标题"), Some(true))
             .expect("persist metadata");
+        let mut selected = store.load(stale.id).expect("load selected session");
+        selected.switch_model("new-provider", "new-model");
+        store.save(&selected).expect("persist session model");
         stale
             .messages
             .push(ChatMessage::assistant("done", Vec::new()));
-        store.save(&stale).expect("save stale checkpoint");
+        store
+            .save_checkpoint(&stale)
+            .expect("save stale checkpoint");
 
         let loaded = SessionStore::new(home.path())
             .load(stale.id)
@@ -552,6 +597,8 @@ mod tests {
         assert_eq!(loaded.title, "用户标题");
         assert!(loaded.title_manually_set);
         assert!(loaded.pinned);
+        assert_eq!(loaded.provider_id, "new-provider");
+        assert_eq!(loaded.model, "new-model");
         assert_eq!(loaded.messages.len(), 2);
         let listed = store.list(None).expect("list sessions");
         assert!(listed[0].pinned);

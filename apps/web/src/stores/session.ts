@@ -21,7 +21,7 @@ export const useSessionStore = defineStore('session', () => {
   const sessions = useSessionsStore()
 
   const sessionId = ref(readActiveSessionId())
-  const mode = ref<'agent' | 'life'>(sessions.find(sessionId.value)?.mode ?? 'agent')
+  const mode = ref<'agent' | 'team' | 'life'>(sessions.find(sessionId.value)?.mode ?? 'agent')
   const timeline = ref<Timelineitem[]>(sessions.loadTranscript(sessionId.value))
   const runState = ref<RunState>('idle')
   const usage = ref<{
@@ -31,11 +31,15 @@ export const useSessionStore = defineStore('session', () => {
     turnCacheHitRate: number | null; turnCacheDataAvailable: boolean
     reasoningEfforts: Partial<Record<ReasoningEffort, ReasoningEffortStats>>
     contextCategories: Partial<Record<'system_tools' | 'messages' | 'skills' | 'mcp_tools' | 'system_prompt' | 'other', number>>
+    firstTokenLatencyMs: number | null
+    outputTokensPerSecond: number | null
+    turnTotalTokens: number | null
   } | null>(null)
   const retryConfirmation = ref<string | null>(null)
   /** 当前会话的工作目录（会话标记路径，绑定为会话执行目录）。 */
   const cwd = ref('')
   const loop = ref<LoopProgress>({ active: false, currentStep: 0, totalSteps: 0, status: '' })
+  const collaboration = ref({ active: false, phase: '', cycle: 0, cycles: 0, status: '', review: '' })
   /** 生命体待投递问候（队列唯一 pending → 气泡/开场问候的数据源）。 */
   const lifeUnread = ref<LifeUnreadItem[]>([])
   const lifeUnreadName = ref('')
@@ -75,6 +79,9 @@ export const useSessionStore = defineStore('session', () => {
   })
 
   persistActiveSessionId(sessionId.value)
+  if (typeof window !== 'undefined') {
+    ;(window as Window & { __coomiActiveSessionId?: string }).__coomiActiveSessionId = sessionId.value
+  }
 
   // Native task status is derived from /api/tasks in the sessions store. A
   // foreground idle session must not overwrite another session's running state.
@@ -139,8 +146,11 @@ export const useSessionStore = defineStore('session', () => {
       if (status.state === 'open') {
         t.send({ command: 'set_permission_mode', mode: config.permissionMode })
         t.send({ command: 'set_session_mode', mode: mode.value })
-        if (config.currentProviderId && config.currentModel) {
-          t.send({ command: 'select_model', provider_id: config.currentProviderId, model: config.currentModel })
+        const meta = sessions.find(targetSessionId)
+        const providerId = meta?.providerId || config.currentProviderId
+        const model = meta?.model || config.currentModel
+        if (providerId && model) {
+          t.send({ command: 'select_model', provider_id: providerId, model })
         }
         t.send({ command: 'set_reasoning_effort', effort: config.reasoningEffort })
         t.send({ command: 'set_max_tool_rounds', rounds: config.maxToolRounds })
@@ -282,6 +292,17 @@ export const useSessionStore = defineStore('session', () => {
           turnCacheDataAvailable: ev.usage.turn_cache_data_available ?? previous?.turnCacheDataAvailable ?? false,
           reasoningEfforts: ev.reasoning_efforts ?? previous?.reasoningEfforts ?? {},
           contextCategories: ev.context_categories ?? previous?.contextCategories ?? {},
+          // `null` is an intentional reset at the start of a new turn. Only
+          // retain the previous value when an older engine omitted the field.
+          firstTokenLatencyMs: ev.usage.first_token_latency_ms === undefined
+            ? previous?.firstTokenLatencyMs ?? null
+            : ev.usage.first_token_latency_ms,
+          outputTokensPerSecond: ev.usage.output_tokens_per_second === undefined
+            ? previous?.outputTokensPerSecond ?? null
+            : ev.usage.output_tokens_per_second,
+          turnTotalTokens: ev.usage.turn_total_tokens === undefined
+            ? previous?.turnTotalTokens ?? null
+            : ev.usage.turn_total_tokens,
         }
         break
       }
@@ -319,6 +340,18 @@ export const useSessionStore = defineStore('session', () => {
         void refreshLifeUnread()
         break
       }
+      case 'collaboration_started':
+        collaboration.value = { active: true, phase: '', cycle: 0, cycles: ev.cycles, status: 'started', review: '' }
+        break
+      case 'collaboration_phase':
+        collaboration.value = { ...collaboration.value, active: true, phase: ev.phase, cycle: ev.cycle, status: ev.status }
+        break
+      case 'collaboration_review':
+        collaboration.value = { ...collaboration.value, active: true, phase: 'reviewer', cycle: ev.cycle, status: ev.status, review: ev.content }
+        break
+      case 'collaboration_finished':
+        collaboration.value = { ...collaboration.value, active: false, phase: 'reviewer', cycle: ev.cycle ?? collaboration.value.cycle, status: ev.status ?? collaboration.value.status, review: ev.summary ?? collaboration.value.review }
+        break
       case 'turn_end':
         endAssistantStream(); cancelRunningTools(); connection.setRetry(null); runState.value = 'idle'
         {
@@ -363,6 +396,9 @@ export const useSessionStore = defineStore('session', () => {
           turnCacheDataAvailable: usage.value?.turnCacheDataAvailable ?? false,
           reasoningEfforts: usage.value?.reasoningEfforts ?? {},
           contextCategories: usage.value?.contextCategories ?? {},
+          firstTokenLatencyMs: usage.value?.firstTokenLatencyMs ?? null,
+          outputTokensPerSecond: usage.value?.outputTokensPerSecond ?? null,
+          turnTotalTokens: usage.value?.turnTotalTokens ?? null,
         }
         if (typeof ev.cwd === 'string' && ev.cwd) cwd.value = ev.cwd
         break
@@ -372,7 +408,11 @@ export const useSessionStore = defineStore('session', () => {
 
   function activateSession(id: string) {
     sessionId.value = id
+    if (typeof window !== 'undefined') {
+      ;(window as Window & { __coomiActiveSessionId?: string }).__coomiActiveSessionId = id
+    }
     mode.value = resolveLifeMode(id)
+    collaboration.value = { active: false, phase: '', cycle: 0, cycles: 0, status: '', review: '' }
     persistActiveSessionId(id)
     lifeAutoSent = false
   }
@@ -381,8 +421,9 @@ export const useSessionStore = defineStore('session', () => {
    * 会话模式决议：生命体人格只属于「常驻会话」；「用于全局会话」开关开启后所有会话都带人格。
    * 历史会话即使曾被切成 life，关闭全局开关后也强制回到 agent（人格只活在它该在的地方）。
    */
-  function resolveLifeMode(id: string): 'agent' | 'life' {
-    return config.digitalLifeEnabled && (isGlobalSessionId(id) || config.lifeGlobalMode) ? 'life' : 'agent'
+  function resolveLifeMode(id: string): 'agent' | 'team' | 'life' {
+    if (config.digitalLifeEnabled && (isGlobalSessionId(id) || config.lifeGlobalMode)) return 'life'
+    return sessions.find(id)?.mode === 'team' ? 'team' : 'agent'
   }
 
   const isGlobalSession = computed(() => isGlobalSessionId(sessionId.value))
@@ -475,8 +516,9 @@ export const useSessionStore = defineStore('session', () => {
       return
     }
     transport.value?.send({ command: 'select_model', provider_id: providerId, model })
+    sessions.setModel(sessionId.value, providerId, model)
   }
-  function setSessionMode(value: 'agent' | 'life') {
+  function setSessionMode(value: 'agent' | 'team' | 'life') {
     if (isBusy.value || mode.value === value) return
     mode.value = value
     sessions.setMode(sessionId.value, value)
@@ -675,6 +717,27 @@ export const useSessionStore = defineStore('session', () => {
     try { localStorage.removeItem(`coomi.draft.${id}`) } catch { /* ignore */ }
   }
 
+  async function clearSessionData(id: string): Promise<boolean> {
+    if (!window.confirm('清空该会话的消息、工具记录和上下文？会保留标题、置顶、模型与人格设置。')) return false
+    try {
+      const response = await authedFetch(`/api/sessions/${encodeURIComponent(id)}/clear`, { method: 'POST' })
+      if (!response.ok) return false
+      sessions.clearTranscript(id)
+      sessions.touch(id, { turns: 0 })
+      if (id === sessionId.value) {
+        endAssistantStream()
+        timeline.value = []
+        usage.value = null
+        loop.value = { active: false, currentStep: 0, totalSteps: 0, status: '' }
+        runState.value = 'idle'
+        reconnect()
+      }
+      return true
+    } catch {
+      return false
+    }
+  }
+
   /** 更新当前会话的工作目录（会话标记路径）。成功后引擎后续 turn 都在该目录执行。 */
   async function setSessionCwd(path: string): Promise<boolean> {
     const id = sessionId.value
@@ -831,7 +894,7 @@ export const useSessionStore = defineStore('session', () => {
     if (notice?.kind === 'notice') Object.assign(notice, patch)
   }
 
-  return { sessionId, mode, timeline, runState, usage, retryConfirmation, cwd, loop, isBusy, pendingEdit, undoConfirm, lastUserMessage, lastAssistantMessage, pendingApproval, pendingQuestion, lifeUnread, lifeUnreadName, lifeDelivering, isGlobalSession, resolveLifeMode, syncLifeMode, refreshLifeUnread, deliverLife, autoDeliverLifeIfReady, connect, reconnect, disconnect, flushPersistence, sendMessage, cancel, approve, answerQuestion, setPermissionMode, setReasoningEffort, setMaxToolRounds, setSessionMode, togglePlanMode, selectModel, retryInterruptedTurn, dismissRetry, completeFileTransfer, newSession, openSession, deleteSession, setSessionCwd, startEditMessage, cancelEditMessage, requestUndo, confirmUndo, cancelUndo, undoTurn, sendGuide, consentToolFailureFeedback, finishToolFailureFeedback }
+  return { sessionId, mode, timeline, runState, usage, retryConfirmation, cwd, loop, collaboration, isBusy, pendingEdit, undoConfirm, lastUserMessage, lastAssistantMessage, pendingApproval, pendingQuestion, lifeUnread, lifeUnreadName, lifeDelivering, isGlobalSession, resolveLifeMode, syncLifeMode, refreshLifeUnread, deliverLife, autoDeliverLifeIfReady, connect, reconnect, disconnect, flushPersistence, sendMessage, cancel, approve, answerQuestion, setPermissionMode, setReasoningEffort, setMaxToolRounds, setSessionMode, togglePlanMode, selectModel, retryInterruptedTurn, dismissRetry, completeFileTransfer, newSession, openSession, deleteSession, clearSessionData, setSessionCwd, startEditMessage, cancelEditMessage, requestUndo, confirmUndo, cancelUndo, undoTurn, sendGuide, consentToolFailureFeedback, finishToolFailureFeedback }
 })
 
 function fmtTokens(n: number): string { return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n) }
@@ -918,6 +981,8 @@ function isUuid(value: string): boolean {
 
 function readActiveSessionId(): string {
   try {
+    const requested = new URLSearchParams(window.location.search).get('session_id') ?? ''
+    if (isUuid(requested)) return requested
     const saved = localStorage.getItem(ACTIVE_SESSION_KEY) ?? ''
     if (isUuid(saved)) return saved
   } catch {

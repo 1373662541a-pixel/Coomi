@@ -157,6 +157,7 @@
             android:configChanges="orientation|screenSize|smallestScreenSize|density|screenLayout|keyboard|keyboardHidden|navigation|uiMode"
             android:label="@string/application_name"
             android:launchMode="singleTask"
+            android:supportsPictureInPicture="true"
             android:resizeableActivity="true"
             android:theme="@style/Theme.Coomi.Web"
             tools:targetApi="n" />

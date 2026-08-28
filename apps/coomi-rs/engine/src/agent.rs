@@ -530,8 +530,30 @@ impl Agent {
             self.run_checkpoint(session);
 
             if !response.invalid_tool_calls.is_empty() {
+                // A missing function name is a provider protocol failure, not
+                // an argument-shape problem. Sending a correction prompt
+                // cannot repair a tool call whose target is unknown and only
+                // causes an avoidable second model request.
+                let protocol_failure = response
+                    .invalid_tool_calls
+                    .iter()
+                    .any(|call| {
+                        call.reason.contains("no function name")
+                            || call.name == "provider_protocol_error"
+                    });
+                if protocol_failure {
+                    invalid_tool_retry_used = true;
+                }
                 if invalid_tool_retry_used {
                     for invalid in &response.invalid_tool_calls {
+                        // A missing function name is a provider protocol
+                        // failure, not an executable tool call. Do not emit a
+                        // synthetic `unknown` tool card into the transcript.
+                        if invalid.reason.contains("no function name")
+                            || invalid.name == "provider_protocol_error"
+                        {
+                            continue;
+                        }
                         let call = crate::ToolCall {
                             id: invalid.id.clone(),
                             name: invalid.name.clone(),
@@ -544,7 +566,11 @@ impl Agent {
                         observer.on_event(&AgentEvent::ToolStarted(call.clone()));
                         observer.on_event(&AgentEvent::ToolFinished { call, result });
                     }
-                    let recovery_message = "工具参数在一次纠正后仍未通过校验，相关工具未执行。请调整请求或补充参数后继续。";
+                    let recovery_message = if protocol_failure {
+                        "模型返回了不完整的工具调用（缺少函数名），相关工具未执行。请重试；如持续发生，请更换模型或检查供应商的工具调用兼容性。"
+                    } else {
+                        "工具参数在一次纠正后仍未通过校验，相关工具未执行。请调整请求或补充参数后继续。"
+                    };
                     observer.on_event(&AgentEvent::Text(recovery_message.into()));
                     session
                         .messages

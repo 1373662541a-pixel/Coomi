@@ -38,12 +38,25 @@ const config = useConfigStore()
 
 const scroller = ref<HTMLElement | null>(null)
 const virtualScroller = ref<InstanceType<typeof DynamicScroller> | null>(null)
+/** 空状态使用 main，时间线挂载后切换到 DynamicScroller 自己的滚动容器。 */
+const scrollHost = ref<HTMLElement | null>(null)
 const content = ref<HTMLElement | null>(null)
 const drawerOpen = ref(false)
 /** 全局轮询「后台运行中」状态的定时器（会话列表转圈的数据源）。 */
 let runningPoll: ReturnType<typeof setInterval> | null = null
+const openSessionFromNative = (event: Event) => {
+  const id = (event as CustomEvent<{ sessionId?: string }>).detail?.sessionId
+  if (id) void session.openSession(id)
+}
 
-const { following, follow, jumpToBottom } = useAutoScroll(scroller)
+const { following, follow, jumpToBottom } = useAutoScroll(scrollHost)
+
+function syncScrollHost() {
+  const virtualEl = virtualScroller.value?.$el as HTMLElement | undefined
+  scrollHost.value = session.timeline.length > 0 && virtualEl instanceof HTMLElement
+    ? virtualEl
+    : scroller.value
+}
 
 const blocks = computed<TimelineBlockItem[]>(() => buildTimelineBlocks(session.timeline))
 
@@ -56,6 +69,7 @@ let ro: ResizeObserver | null = null
 
 onMounted(() => {
   session.connect()
+  window.addEventListener('coomi:open-session', openSessionFromNative)
   window.addEventListener('coomi:flush-persistence', session.flushPersistence)
   // 记录引擎当前工作目录，会话列表据此把不同项目的会话隔离开。
   void apiGet<{ cwd?: string }>('/api/runtime/health')
@@ -78,8 +92,14 @@ onMounted(() => {
     ro = new ResizeObserver(() => follow())
     if (content.value) ro.observe(content.value)
     if (scroller.value) ro.observe(scroller.value)
+    syncScrollHost()
+    if (scrollHost.value && scrollHost.value !== scroller.value) {
+      ro.observe(scrollHost.value)
+      const wrapper = scrollHost.value.querySelector<HTMLElement>('.vue-recycle-scroller__item-wrapper')
+      if (wrapper) ro.observe(wrapper)
+    }
   }
-  nextTick(follow)
+  nextTick(() => { syncScrollHost(); follow() })
   // 演示模式自动播一轮，省得进来还要先打字才能看见瀑布流。
   if (shouldAutoplay() && session.timeline.length === 0) {
     setTimeout(() => { if (session.timeline.length === 0) session.sendMessage(DEMO_PROMPT) }, 700)
@@ -87,6 +107,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('coomi:open-session', openSessionFromNative)
   window.removeEventListener('coomi:flush-persistence', session.flushPersistence)
   window.removeEventListener('focus', syncDigitalLifeMode)
   session.flushPersistence()
@@ -116,8 +137,14 @@ if (isUnattended()) {
   })
 }
 
-// ResizeObserver 不可用时的兜底：至少条目增减能跟上。
-watch(() => session.timeline.length, () => nextTick(follow))
+// ResizeObserver 不可用时的兜底：至少条目增减能跟上；同时更新空态/虚拟列表滚动宿主。
+watch(() => session.timeline.length, () => nextTick(() => { syncScrollHost(); follow() }), { flush: 'post' })
+watch(scrollHost, host => {
+  if (!ro || !host || host === scroller.value) return
+  ro.observe(host)
+  const wrapper = host.querySelector<HTMLElement>('.vue-recycle-scroller__item-wrapper')
+  if (wrapper) ro.observe(wrapper)
+}, { flush: 'post' })
 watch([() => config.digitalLifeEnabled, () => config.lifeGlobalMode, () => session.isBusy], ([, , busy]) => {
   if (!busy) session.syncLifeMode()
 })
@@ -154,7 +181,6 @@ watch(() => session.pendingQuestion?.callId, (id, previous) => {
           :min-item-size="48"
           :buffer="640"
           class="virtual-stream"
-          page-mode
         >
           <template #default="{ item, index, active }">
             <DynamicScrollerItem
@@ -163,6 +189,8 @@ watch(() => session.pendingQuestion?.callId, (id, previous) => {
               :size-dependencies="[item, item.t === 'one' ? item.item : item.cards]"
               :data-index="index"
               class="virtual-item"
+              emit-resize
+              @resize="follow"
             >
               <TimelineBlock :block="item" />
             </DynamicScrollerItem>
@@ -262,7 +290,11 @@ watch(() => session.pendingQuestion?.callId, (id, previous) => {
   width: 100%; min-width: 0; min-height: 100%; padding: 10px 12px 18px; overflow-x: hidden;
 }
 .empty-inner { min-height: 100%; }
-.virtual-stream { width: 100%; min-width: 0; padding: 10px 12px 18px; overflow: visible; }
+.virtual-stream {
+  width: 100%; height: 100%; min-width: 0; min-height: 0; box-sizing: border-box;
+  padding: 10px 12px 18px; overflow-y: auto; overflow-x: hidden;
+  -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain;
+}
 .virtual-item { width: 100%; min-width: 0; padding-bottom: 12px; }
 
 .to-bottom {

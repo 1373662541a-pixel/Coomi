@@ -87,6 +87,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::OnceLock;
@@ -694,6 +695,12 @@ pub async fn serve(
     fs::create_dir_all(home.join("config"))?;
     fs::create_dir_all(home.join("sessions"))?;
     ensure_provider_document(&home)?;
+    // Make the bundled Skill visible immediately in the catalog, even before
+    // the first chat turn constructs CoreTools. The installer preserves a
+    // user's explicit disabled state on subsequent engine starts.
+    if let Err(error) = coomi_catalogs::CatalogInstaller::new(&home).install_skill("skill-creator") {
+        eprintln!("[catalog] failed to install bundled skill-creator: {error:#}");
+    }
     // 全局常驻会话（侧边栏第一条）自愈：缺失/损坏都重建为可用空会话。
     crate::life::ensure_global_session(&home, &cwd)?;
     anyhow::ensure!(
@@ -775,6 +782,10 @@ pub async fn serve(
             "/api/settings/subagents",
             get(get_subagent_settings).put(set_subagent_settings),
         )
+        .route(
+            "/api/settings/collaboration",
+            get(get_collaboration_settings).put(set_collaboration_settings),
+        )
         .route("/api/runtime/hooks", get(get_hooks).put(set_hooks))
         .route("/api/memory", get(list_memory).post(create_memory))
         .route(
@@ -805,6 +816,7 @@ pub async fn serve(
                 .post(update_session_metadata)
                 .delete(delete_session),
         )
+        .route("/api/sessions/{id}/clear", post(clear_session_data))
         .route("/api/sessions/{id}/cwd", post(set_session_cwd))
         .route("/api/sessions/{id}/messages/{msg_id}/edit", post(edit_session_message))
         .route("/api/sessions/{id}/messages/{msg_id}", delete(delete_session_message))
@@ -1210,6 +1222,103 @@ struct SubAgentSettings {
     max_agents: usize,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CollaborationSettings {
+    #[serde(default)]
+    coder_selector: String,
+    #[serde(default)]
+    reviewer_selector: String,
+    #[serde(default = "default_coder_prompt")]
+    coder_prompt: String,
+    #[serde(default = "default_reviewer_prompt")]
+    reviewer_prompt: String,
+    #[serde(default = "default_review_cycles")]
+    max_cycles: u8,
+    #[serde(default = "default_review_tests")]
+    review_tests: bool,
+}
+
+fn default_coder_prompt() -> String {
+    "You are the implementation engineer. Inspect the repository, make only the requested code changes, and run the smallest relevant tests. Do not spend the turn on a long review discussion. Report changed files, behavior, tests, and remaining risks.".into()
+}
+
+fn default_reviewer_prompt() -> String {
+    "You are a read-only code reviewer. Never edit, delete, commit, reset, or format files. Review only the current task diff and evidence. Report only actionable findings with severity, file, line, evidence, and a concrete fix. Return APPROVED when no blocking issue remains.".into()
+}
+
+const fn default_review_cycles() -> u8 { 2 }
+const fn default_review_tests() -> bool { true }
+
+impl Default for CollaborationSettings {
+    fn default() -> Self {
+        Self {
+            coder_selector: String::new(),
+            reviewer_selector: String::new(),
+            coder_prompt: default_coder_prompt(),
+            reviewer_prompt: default_reviewer_prompt(),
+            max_cycles: default_review_cycles(),
+            review_tests: default_review_tests(),
+        }
+    }
+}
+
+fn read_collaboration_settings(home: &Path) -> CollaborationSettings {
+    read_settings(home)
+        .get("collaboration")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
+}
+
+fn validate_collaboration_settings(
+    home: &Path,
+    mut value: CollaborationSettings,
+) -> Result<CollaborationSettings, ApiError> {
+    value.coder_selector = value.coder_selector.trim().to_owned();
+    value.reviewer_selector = value.reviewer_selector.trim().to_owned();
+    value.coder_prompt = value.coder_prompt.trim().to_owned();
+    value.reviewer_prompt = value.reviewer_prompt.trim().to_owned();
+    if value.coder_prompt.chars().count() > CUSTOM_PROMPT_MAX_CHARS
+        || value.reviewer_prompt.chars().count() > CUSTOM_PROMPT_MAX_CHARS
+    {
+        return Err(ApiError::bad_request("collaboration prompts are too long"));
+    }
+    if value.reviewer_selector.is_empty() {
+        return Err(ApiError::bad_request("reviewerSelector is required"));
+    }
+    if !(1..=3).contains(&value.max_cycles) {
+        return Err(ApiError::bad_request("maxCycles must be between 1 and 3"));
+    }
+    let registry = ProviderRegistry::load(&providers_path(home)).map_err(ApiError::from)?;
+    for (label, selector) in [("coderSelector", &value.coder_selector), ("reviewerSelector", &value.reviewer_selector)] {
+        if !selector.is_empty() && registry.resolve(Some(selector)).is_err() {
+            return Err(ApiError::bad_request(format!("{label} does not reference a configured provider/model")));
+        }
+    }
+    Ok(value)
+}
+
+fn persist_collaboration_settings(home: &Path, value: &CollaborationSettings) -> Result<(), ApiError> {
+    let mut settings = read_settings(home);
+    settings["collaboration"] = serde_json::to_value(value)
+        .map_err(|error| ApiError::internal(format!("failed to serialize collaboration settings: {error}")))?;
+    write_settings(home, &settings)
+}
+
+async fn get_collaboration_settings(State(state): State<AppState>) -> Result<Json<CollaborationSettings>, ApiError> {
+    Ok(Json(read_collaboration_settings(&state.home)))
+}
+
+async fn set_collaboration_settings(
+    State(state): State<AppState>,
+    Json(body): Json<CollaborationSettings>,
+) -> Result<Json<CollaborationSettings>, ApiError> {
+    let value = validate_collaboration_settings(&state.home, body)?;
+    persist_collaboration_settings(&state.home, &value)?;
+    Ok(Json(value))
+}
+
 const fn default_subagent_limit() -> usize {
     20
 }
@@ -1413,7 +1522,7 @@ async fn set_subagent_settings(
 }
 
 /// 定制身份提示词的最大长度（字符）。防止超大文本挤占每次对话的上下文。
-const CUSTOM_PROMPT_MAX_CHARS: usize = 20_000;
+const CUSTOM_PROMPT_MAX_CHARS: usize = 4_000;
 
 /// 定制身份提示词：用户设置的专属身份/定位指令，注入到系统提示词。
 pub(crate) fn custom_prompt(home: &Path) -> String {
@@ -2097,6 +2206,38 @@ async fn delete_session(
     Ok(Json(json!({ "deleted": deleted })))
 }
 
+async fn clear_session_data(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let session_id =
+        Uuid::parse_str(&id).map_err(|_| ApiError::bad_request("invalid session id"))?;
+    // Clearing while a turn is running would allow its completion handler to
+    // persist the old transcript again. Stop the in-memory task first, then
+    // clear and save the authoritative session record.
+    let active_task = state
+        .tasks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&id)
+        .cloned();
+    if let Some(task) = active_task {
+        let _ = stop_session_task(&state, &id, &task).await;
+    }
+    let session = SessionStore::new(&state.home)
+        .clear_data(session_id)
+        .map_err(|error| ApiError::internal(format!("failed to clear session {id}: {error:#}")))?;
+    Ok(Json(json!({
+        "cleared": true,
+        "id": id,
+        "title": session.title,
+        "pinned": session.pinned,
+        "provider_id": session.provider_id,
+        "model": session.model,
+        "mode": session.mode,
+    })))
+}
+
 #[derive(Deserialize)]
 struct MessageEdit {
     /// 新的消息正文（改文本用）。
@@ -2596,6 +2737,9 @@ async fn uninstall_skill_catalog(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Value>, ApiError> {
+    if id.eq_ignore_ascii_case("skill-creator") {
+        return Err(ApiError::bad_request("skill-creator is built in and cannot be uninstalled"));
+    }
     let home = state.home.clone();
     let task_id = id.clone();
     let path = tokio::task::spawn_blocking(move || {
@@ -3852,11 +3996,9 @@ async fn select_provider_model(
         .get(&id)
         .cloned()
         .ok_or_else(|| ApiError::not_found("provider not found"))?;
-    if !provider_models(&provider).iter().any(|item| item == model) {
-        return Err(ApiError::bad_request(
-            "model is not declared for this provider",
-        ));
-    }
+    // A model list is an aid for discovery, not an allow-list. Providers such
+    // as Volcengine Ark can fail their catalog endpoint while a user-supplied
+    // model ID remains perfectly callable.
     provider.model = model.to_owned();
     validate_provider_activation(&provider)?;
     verify_provider_credentials(&provider).await?;
@@ -3867,17 +4009,30 @@ async fn select_provider_model(
 }
 
 async fn verify_provider_credentials(provider: &ProviderSettings) -> Result<(), ApiError> {
-    let models = fetch_provider_models(provider).await.map_err(|error| {
-        ApiError::bad_gateway(format!(
-            "provider credential verification failed: {}",
-            error.message
-        ))
-    })?;
     let selected = provider.model.trim();
-    if !selected.is_empty() && !models.iter().any(|model| model == selected) {
-        return Err(ApiError::bad_gateway(format!(
-            "provider credential verification succeeded, but model `{selected}` is not available"
-        )));
+    if selected.is_empty() {
+        return Err(ApiError::bad_request("provider must have a model before activation"));
+    }
+    match fetch_provider_models(provider).await {
+        Ok(models) if !models.is_empty() => {
+            if !models.iter().any(|model| model == selected) {
+                eprintln!(
+                    "model `{selected}` is not present in the provider catalog; allowing manual model ID"
+                );
+            }
+        }
+        Ok(_) => {
+            // Empty catalogs are treated like an unavailable catalog. The
+            // selected model remains the source of truth for invocation.
+        }
+        Err(error) => {
+            // Do not block activation solely because `/models` is unavailable.
+            // The actual completion request will report an actionable API error.
+            eprintln!(
+                "model discovery unavailable during activation for {}: {}",
+                provider.display, error.message
+            );
+        }
     }
     Ok(())
 }
@@ -3934,19 +4089,24 @@ async fn discover_provider_models(
         .get(&id)
         .cloned()
         .ok_or_else(|| ApiError::not_found("provider not found"))?;
-    let models = fetch_provider_models(&provider).await?;
-    if models.is_empty() {
-        return Err(ApiError::bad_request(
-            "provider returned no available models",
-        ));
-    }
+    let (models, stale) = match fetch_provider_models(&provider).await {
+        Ok(models) if !models.is_empty() => (models, false),
+        Ok(_) => (provider_models(&provider), true),
+        Err(error) => {
+            let cached = provider_models(&provider);
+            if cached.is_empty() {
+                return Err(error);
+            }
+            (cached, true)
+        }
+    };
     if persist {
         if let Some(settings) = document.providers.get_mut(&id) {
             apply_provider_models(settings, &models, document.active == id)?;
         }
         document.save(&path).map_err(ApiError::from)?;
     }
-    Ok(Json(json!({"models": models})))
+    Ok(Json(json!({"models": models, "stale": stale})))
 }
 
 async fn runtime_v2_state(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -5097,7 +5257,12 @@ async fn handle_command(
                 context.send_error(envelope_id, "a turn is already running");
                 return;
             }
-            if let Err(error) = begin_managed_task(state, session_id, &task, "agent") {
+            let task_kind = if *context.session_mode.read().await == SessionMode::Team {
+                "team"
+            } else {
+                "agent"
+            };
+            if let Err(error) = begin_managed_task(state, session_id, &task, task_kind) {
                 task.running.store(false, Ordering::SeqCst);
                 context.send_error(envelope_id, format!("failed to create task: {error:#}"));
                 return;
@@ -5115,16 +5280,28 @@ async fn handle_command(
             };
             let turn_context = Arc::clone(&context);
             let turn_task = Arc::clone(&task);
+            let team_mode = *context.session_mode.read().await == SessionMode::Team;
             let spawned = tokio::spawn(async move {
-                let result = run_turn(
-                    &turn_state,
-                    &turn_session_id,
-                    &turn_prompt,
-                    false,
-                    Arc::clone(&turn_context),
-                    Arc::clone(&turn_task),
-                )
-                .await;
+                let result = if team_mode {
+                    run_team_turn(
+                        &turn_state,
+                        &turn_session_id,
+                        &turn_prompt,
+                        Arc::clone(&turn_context),
+                        Arc::clone(&turn_task),
+                    )
+                    .await
+                } else {
+                    run_turn(
+                        &turn_state,
+                        &turn_session_id,
+                        &turn_prompt,
+                        false,
+                        Arc::clone(&turn_context),
+                        Arc::clone(&turn_task),
+                    )
+                    .await
+                };
                 let failed = result.is_err();
                 if let Err(error) = result {
                     let message = format!("{error:#}");
@@ -5287,6 +5464,7 @@ async fn handle_command(
         "set_session_mode" => {
             let mode = match payload.get("mode").and_then(Value::as_str) {
                 Some("agent") => SessionMode::Agent,
+                Some("team") => SessionMode::Team,
                 Some("life") => SessionMode::Life,
                 _ => {
                     context.send_error(envelope_id, "invalid session mode");
@@ -5294,6 +5472,17 @@ async fn handle_command(
                 }
             };
             *context.session_mode.write().await = mode;
+            if let Ok(id) = Uuid::parse_str(session_id) {
+                let store = SessionStore::new(&state.home);
+                if let Ok(mut session) = store.load(id) {
+                    session.mode = mode;
+                    session.touch();
+                    if let Err(error) = store.save(&session) {
+                        context.send_error(envelope_id, format!("failed to save session mode: {error}"));
+                        return;
+                    }
+                }
+            }
             context.send_ack(envelope_id);
         }
         // 数字生命体 P1：把队列里唯一 pending 问候写入**全局常驻会话**并流式推送（气泡）。
@@ -5386,12 +5575,9 @@ async fn handle_command(
                             .get(provider)
                             .cloned()
                             .expect("checked above");
-                        let models = provider_models(&candidate);
-                        if !models.iter().any(|item| item == model) {
-                            context
-                                .send_error(envelope_id, "model is not declared for this provider");
-                            return;
-                        }
+                        // Catalog discovery is optional. A manually entered model ID
+                        // must remain selectable when the provider does not expose a
+                        // working `/models` endpoint.
                         candidate.model = model.to_owned();
                         if let Err(error) = validate_provider_activation(&candidate) {
                             context.send_error(envelope_id, error.message);
@@ -5411,6 +5597,35 @@ async fn handle_command(
                                 format!("failed to persist model: {error}"),
                             );
                             return;
+                        }
+                        // Persist the selection on the session itself as well
+                        // as the provider default. This is what keeps two
+                        // sessions independent when their models differ.
+                        if let Ok(parsed_id) = Uuid::parse_str(session_id) {
+                            let store = SessionStore::new(&state.home);
+                            match store.load(parsed_id) {
+                                Ok(mut session) => {
+                                    session.switch_model(provider.to_owned(), model.to_owned());
+                                    if let Err(error) = store.save(&session) {
+                                        context.send_error(
+                                            envelope_id,
+                                            format!("failed to persist session model: {error}"),
+                                        );
+                                        return;
+                                    }
+                                }
+                                Err(error) if store.contains(parsed_id) => {
+                                    context.send_error(
+                                        envelope_id,
+                                        format!("failed to load session model: {error}"),
+                                    );
+                                    return;
+                                }
+                                Err(_) => {
+                                    // New sessions are created on their first
+                                    // turn, after this command is received.
+                                }
+                            }
                         }
                     }
                     Ok(_) => {
@@ -5814,12 +6029,26 @@ async fn compact_web_session(
 ) -> Result<()> {
     let registry = ProviderRegistry::load(&providers_path(&state.home))?;
     let selected = context.selected_model.read().await.clone();
-    let provider_config = registry.resolve(selected.as_deref())?;
     let store = SessionStore::new(&state.home);
     let id = Uuid::parse_str(session_id)?;
     let mut session = store
         .load(id)
         .context("failed to load session for compaction")?;
+    // A persisted session model is authoritative for all operations in that
+    // session, including compaction. The connection selection is only a
+    // fallback for new sessions that have not been written yet.
+    let session_selector = (!session.provider_id.is_empty() && !session.model.is_empty())
+        .then(|| format!("{}:{}", session.provider_id, session.model));
+    let team_settings = read_collaboration_settings(&state.home);
+    let selector = if session.mode == SessionMode::Team {
+        (!team_settings.coder_selector.is_empty())
+            .then_some(team_settings.coder_selector.clone())
+            .or(session_selector)
+            .or(selected)
+    } else {
+        session_selector.or(selected)
+    };
+    let provider_config = registry.resolve(selector.as_deref())?;
     let cwd = if session.cwd.is_dir() {
         session.cwd.clone()
     } else {
@@ -5997,12 +6226,15 @@ async fn run_turn(
     let store = SessionStore::new(&state.home);
     let requested_id = Uuid::parse_str(session_id).context("invalid session id")?;
     let existing = store.load(requested_id).ok();
-    let selector = selected.as_deref().or_else(|| {
-        existing.as_ref().and_then(|session| {
-            (!session.provider_id.is_empty()).then_some(session.provider_id.as_str())
-        })
+    let session_selector = existing.as_ref().and_then(|session| {
+        (!session.provider_id.is_empty() && !session.model.is_empty())
+            .then(|| format!("{}:{}", session.provider_id, session.model))
     });
-    let provider_config = registry.resolve(selector)?;
+    // Existing session metadata wins over a connection's last transient
+    // selection. The select_model command persists changes before the next
+    // send_message command is handled on this websocket.
+    let selector = session_selector.or(selected);
+    let provider_config = registry.resolve(selector.as_deref())?;
     let mut session = load_or_create_web_session(
         &store,
         requested_id,
@@ -6057,6 +6289,11 @@ async fn run_turn(
         life_context.as_ref(),
     )
     .await;
+    if session.mode == SessionMode::Team {
+        let team_settings = read_collaboration_settings(&state.home);
+        prompt_context.push_str("\n\nTeam role instructions (implementation phase):\n");
+        prompt_context.push_str(&team_settings.coder_prompt);
+    }
     if cognitive_enabled {
         prompt_context.push_str(&cognitive_prompt_context(life_context.as_ref().expect("life context"))?);
     }
@@ -6186,7 +6423,7 @@ async fn run_turn(
         .with_checkpoint({
             let checkpoint_store = SessionStore::new(&state.home);
             Arc::new(move |session: &Session| {
-                if let Err(error) = checkpoint_store.save(session) {
+                if let Err(error) = checkpoint_store.save_checkpoint(session) {
                     eprintln!("[checkpoint] failed to save session: {error}");
                 }
             })
@@ -6216,7 +6453,7 @@ async fn run_turn(
     if let Err(error) = &turn_result {
         maybe_degrade_vision(state, session_id, &session, error);
     }
-    store.save(&session)?;
+    store.save_checkpoint(&session)?;
     let mut assistant_text = turn_result?;
 
     while session
@@ -6231,7 +6468,7 @@ async fn run_turn(
             maybe_degrade_vision(state, session_id, &session, error);
         }
         session.touch();
-        store.save(&session)?;
+        store.save_checkpoint(&session)?;
         let continuation = loop_result?;
         if !continuation.trim().is_empty() {
             if !assistant_text.is_empty() {
@@ -6247,6 +6484,148 @@ async fn run_turn(
         turn_result?;
     }
     Ok(())
+}
+
+async fn run_team_turn(
+    state: &AppState,
+    session_id: &str,
+    prompt: &str,
+    context: Arc<ConnectionContext>,
+    task: Arc<SessionTask>,
+) -> Result<()> {
+    let settings = read_collaboration_settings(&state.home);
+    anyhow::ensure!(
+        !settings.reviewer_selector.is_empty(),
+        "改码审查模式未配置审查模型，请在设置中选择 reviewerSelector"
+    );
+    let cycles = settings.max_cycles.clamp(1, 3);
+    task.push_event(json!({
+        "event_type": "collaboration_started",
+        "cycles": cycles,
+    }));
+
+    for cycle in 0..cycles {
+        task.push_event(json!({
+            "event_type": "collaboration_phase",
+            "phase": "coder",
+            "cycle": cycle + 1,
+            "status": "running",
+        }));
+        run_turn(
+            state,
+            session_id,
+            prompt,
+            cycle > 0,
+            Arc::clone(&context),
+            Arc::clone(&task),
+        )
+        .await?;
+        task.push_event(json!({
+            "event_type": "collaboration_phase",
+            "phase": "coder",
+            "cycle": cycle + 1,
+            "status": "completed",
+        }));
+
+        let registry = ProviderRegistry::load(&providers_path(&state.home))?;
+        let reviewer_provider = registry.resolve(Some(&settings.reviewer_selector))?;
+        let store = SessionStore::new(&state.home);
+        let session = store.load(Uuid::parse_str(session_id)?)?;
+        let cwd = if session.cwd.is_dir() {
+            session.cwd.clone()
+        } else {
+            state.cwd.clone()
+        };
+        let diff = workspace_diff(&cwd);
+        let review_task = format!(
+            "Review the user's request and only the current implementation diff.\n\nUser request:\n{prompt}\n\nCurrent diff:\n{diff}\n\n{}\nReturn APPROVED when there is no blocking issue.",
+            if settings.review_tests {
+                "Check the existing test evidence in the conversation and identify missing or failing relevant tests."
+            } else {
+                "Do not require additional test execution; review the implementation and evidence already present."
+            }
+        );
+        task.push_event(json!({
+            "event_type": "collaboration_phase",
+            "phase": "reviewer",
+            "cycle": cycle + 1,
+            "status": "running",
+            "model": format!("{}:{}", reviewer_provider.id, reviewer_provider.model),
+        }));
+        let reviewer_id = "team-reviewer".to_owned();
+        let scheduler = AgentScheduler::new(
+            cwd,
+            state.home.clone(),
+            reviewer_provider.clone(),
+            AccessMode::ReadOnly,
+            settings.reviewer_prompt.clone(),
+        )
+        .with_sub_agents(
+            vec![ConfiguredSubAgent {
+                id: reviewer_id.clone(),
+                provider: reviewer_provider,
+                description: "read-only implementation reviewer".into(),
+            }],
+            Some(reviewer_id.clone()),
+        )
+        .without_persistent_memory();
+        let agent_id = scheduler
+            .spawn(review_task, &session.messages, Some("all"), Some(&reviewer_id))
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?;
+        let snapshot = scheduler.wait(&[agent_id], 900_000).await;
+        let review = snapshot
+            .first()
+            .map(|item| item.output.clone())
+            .unwrap_or_else(|| "审查模型未返回结果".into());
+        let approved = review
+            .lines()
+            .any(|line| line.trim().eq_ignore_ascii_case("APPROVED"));
+        task.push_event(json!({
+            "event_type": "collaboration_review",
+            "cycle": cycle + 1,
+            "status": if approved { "approved" } else { "findings" },
+            "content": review,
+        }));
+        if approved || cycle + 1 >= cycles {
+            task.push_event(json!({
+                "event_type": "collaboration_phase",
+                "phase": "reviewer",
+                "cycle": cycle + 1,
+                "status": if approved { "approved" } else { "completed_with_findings" },
+            }));
+            break;
+        }
+
+        let mut session = store.load(Uuid::parse_str(session_id)?)?;
+        session.messages.push(ChatMessage::internal_user(format!(
+            "<team_review_feedback>审查模型反馈如下。请只修复有证据的问题，完成后运行相关测试并继续改码：\n{review}\n</team_review_feedback>"
+        )));
+        store.save_checkpoint(&session)?;
+        task.push_event(json!({
+            "event_type": "collaboration_phase",
+            "phase": "coder",
+            "cycle": cycle + 2,
+            "status": "queued",
+        }));
+    }
+    task.push_event(json!({ "event_type": "collaboration_finished" }));
+    Ok(())
+}
+
+fn workspace_diff(cwd: &Path) -> String {
+    let output = Command::new("git")
+        .current_dir(cwd)
+        .args(["diff", "--no-ext-diff", "--unified=3"])
+        .output();
+    let Ok(output) = output else {
+        return "(git diff unavailable; review the changed files from the conversation)".into();
+    };
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    if text.trim().is_empty() {
+        text = "(working tree has no tracked diff; inspect files and test evidence)".into();
+    }
+    text.chars().take(60_000).collect()
 }
 
 /// 图片降级：请求失败且会话含图片时，仅在错误明确指向图片协议时标记。
@@ -6318,7 +6697,12 @@ fn load_or_create_web_session(
     if session.cwd.as_os_str().is_empty() {
         session.cwd = cwd.to_path_buf();
     }
-    session.switch_model(provider_id, model);
+    // The resolved provider/model is the selection for this connection. Keep
+    // the on-disk session metadata aligned with it, including when an older
+    // session was opened after the user picked a different model.
+    if session.provider_id != provider_id || session.model != model {
+        session.switch_model(provider_id, model);
+    }
     Ok(session)
 }
 
@@ -6330,6 +6714,7 @@ struct BrowserObserver {
     started: StdMutex<HashMap<String, Instant>>,
     download_calls: StdMutex<HashMap<String, String>>,
     usage: StdMutex<BrowserUsageState>,
+    first_token_at: StdMutex<Option<Instant>>,
     context_categories: BTreeMap<String, u64>,
 }
 
@@ -6346,6 +6731,9 @@ struct BrowserUsageState {
     turn_output_tokens: u64,
     turn_cache_data_available: bool,
     turn_active: bool,
+    turn_output_chars: u64,
+    first_token_latency_ms: Option<u64>,
+    output_tokens_per_second: Option<f64>,
     context_used_tokens: u64,
     context_window_tokens: u64,
 }
@@ -6376,6 +6764,7 @@ impl BrowserObserver {
                 cache_data_available: cache_observed_input_tokens > 0,
                 ..BrowserUsageState::default()
             }),
+            first_token_at: StdMutex::new(None),
             context_categories,
         }
     }
@@ -6400,6 +6789,12 @@ impl BrowserObserver {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .elapsed();
+        event["usage"]["first_token_latency_ms"] = state
+            .first_token_latency_ms
+            .map_or(Value::Null, |value| json!(value));
+        event["usage"]["output_tokens_per_second"] = state
+            .output_tokens_per_second
+            .map_or(Value::Null, |value| json!(value));
         event["reasoning_efforts"] = load_reasoning_stats_value(
             &self.home,
             current_turn.as_ref(),
@@ -6442,8 +6837,19 @@ fn browser_usage_event(state: BrowserUsageState) -> Value {
                 }
             }),
             "turn_cache_data_available": state.turn_cache_data_available,
+            "first_token_latency_ms": Value::Null,
+            "output_tokens_per_second": Value::Null,
+            "turn_total_tokens": state.turn_input_tokens.saturating_add(state.turn_output_tokens),
         },
     })
+}
+
+/// Calculate generation throughput after the first token has arrived. Ignore
+/// sub-millisecond samples so the first streamed chunk cannot produce an
+/// artificially huge token/s value from a near-zero denominator.
+fn calculate_output_speed(output_tokens: f64, generation_elapsed: Duration) -> Option<f64> {
+    let seconds = generation_elapsed.as_secs_f64();
+    (output_tokens > 0.0 && seconds >= 0.001).then_some(output_tokens / seconds)
 }
 
 const REASONING_EFFORTS: [&str; 5] = ["auto", "low", "medium", "high", "xhigh"];
@@ -6693,8 +7099,45 @@ impl AgentObserver for BrowserObserver {
     fn on_event(&self, event: &AgentEvent) {
         match event {
             AgentEvent::Text(content) | AgentEvent::TextDelta(content) => {
+                let now = Instant::now();
+                let first_token_is_new = {
+                    let mut first = self.first_token_at.lock().unwrap_or_else(|p| p.into_inner());
+                    if first.is_none() {
+                        *first = Some(now);
+                        true
+                    } else {
+                        false
+                    }
+                };
+                let first_token_latency_ms = first_token_is_new.then(|| {
+                    self.turn_started
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .elapsed()
+                        .as_millis() as u64
+                });
+                let generation_elapsed = self
+                    .first_token_at
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .map(|at| at.elapsed())
+                    .unwrap_or_default();
+                if let Ok(mut state) = self.usage.lock() {
+                    if state.first_token_latency_ms.is_none() {
+                        state.first_token_latency_ms = first_token_latency_ms;
+                    }
+                    state.turn_output_chars = state.turn_output_chars.saturating_add(content.chars().count() as u64);
+                    let output_tokens = if state.turn_output_tokens > 0 {
+                        state.turn_output_tokens as f64
+                    } else {
+                        state.turn_output_chars as f64 / 4.0
+                    };
+                    state.output_tokens_per_second =
+                        calculate_output_speed(output_tokens, generation_elapsed);
+                }
                 self.task
                     .push_event(json!({"event_type": "text_chunk", "content": content}));
+                self.send_usage();
             }
             AgentEvent::ReasoningDelta(content) => {
                 self.task
@@ -6799,6 +7242,12 @@ impl AgentObserver for BrowserObserver {
                 self.send_usage();
             }
             AgentEvent::TurnCompleted { total, turn } => {
+                let generation_elapsed = self
+                    .first_token_at
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .map(|at| at.elapsed())
+                    .unwrap_or_default();
                 if let Ok(mut state) = self.usage.lock() {
                     state.input_tokens = total.input_tokens;
                     state.cached_input_tokens = total.cached_input_tokens;
@@ -6811,6 +7260,13 @@ impl AgentObserver for BrowserObserver {
                     state.turn_output_tokens = turn.output_tokens;
                     state.turn_cache_data_available = turn.cache_data_available;
                     state.turn_active = false;
+                    let output_tokens = if state.turn_output_tokens > 0 {
+                        state.turn_output_tokens as f64
+                    } else {
+                        state.turn_output_chars as f64 / 4.0
+                    };
+                    state.output_tokens_per_second =
+                        calculate_output_speed(output_tokens, generation_elapsed);
                 }
                 let elapsed = {
                     let mut started = self
@@ -6823,6 +7279,7 @@ impl AgentObserver for BrowserObserver {
                 };
                 update_reasoning_stats(&self.home, &self.reasoning_effort, turn, elapsed);
                 self.send_usage();
+                *self.first_token_at.lock().unwrap_or_else(|p| p.into_inner()) = None;
             }
             AgentEvent::ConnectionRetry {
                 attempt,
@@ -6892,7 +7349,11 @@ impl AgentObserver for BrowserObserver {
                     state.turn_output_tokens = 0;
                     state.turn_cache_data_available = false;
                     state.turn_active = true;
+                    state.turn_output_chars = 0;
+                    state.first_token_latency_ms = None;
+                    state.output_tokens_per_second = None;
                 }
+                *self.first_token_at.lock().unwrap_or_else(|p| p.into_inner()) = None;
                 self.send_usage();
             }
             AgentEvent::CompactionStarted { .. } | AgentEvent::QueuedInputAccepted(_) => {}
@@ -7368,18 +7829,6 @@ fn validate_provider_activation(provider: &ProviderSettings) -> Result<(), ApiEr
             "provider must have a model before activation",
         ));
     }
-    if let Some(declared) = provider.extra.get("models").and_then(Value::as_array) {
-        let declared = declared
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::trim)
-            .filter(|model| !model.is_empty());
-        if !declared.clone().any(|model| model == provider.model.trim()) {
-            return Err(ApiError::bad_request(
-                "provider model must be declared in its model list before activation",
-            ));
-        }
-    }
     Ok(())
 }
 
@@ -7396,7 +7845,7 @@ fn default_base_url(id: &str) -> String {
         "anthropic" => "https://api.anthropic.com/v1",
         "google" | "gemini" => "https://generativelanguage.googleapis.com/v1beta",
         "deepseek" => "https://api.deepseek.com/v1",
-        "zhipu" => "https://open.bigmodel.cn/api/paas/v4",
+        "zhipu" => "https://open.bigmodel.cn/api/coding/paas/v4",
         "minimax" => "https://api.minimaxi.com/v1",
         "opencode" => "https://opencode.ai/zen/go/v1",
         _ => "",
@@ -7697,6 +8146,14 @@ mod tests {
     }
 
     #[test]
+    fn output_speed_ignores_zero_and_near_zero_generation_windows() {
+        assert_eq!(calculate_output_speed(20.0, Duration::ZERO), None);
+        assert_eq!(calculate_output_speed(20.0, Duration::from_micros(999)), None);
+        assert_eq!(calculate_output_speed(20.0, Duration::from_millis(1000)), Some(20.0));
+        assert_eq!(calculate_output_speed(0.0, Duration::from_secs(1)), None);
+    }
+
+    #[test]
     fn empty_model_array_clears_non_active_provider() {
         let input = json!({"models": []});
         let models = parse_model_array(&input)
@@ -7741,16 +8198,12 @@ mod tests {
         );
 
         provider.api_key = "secret".into();
-        provider.model = "missing".into();
+        provider.model = "manual-model-id".into();
         provider
             .extra
             .insert("models".into(), json!(["main", "fast"]));
-        assert!(
-            validate_provider_activation(&provider)
-                .expect_err("activation needs a declared model")
-                .message
-                .contains("declared")
-        );
+        validate_provider_activation(&provider)
+            .expect("manual model IDs are allowed when discovery is unavailable");
     }
 
     #[test]

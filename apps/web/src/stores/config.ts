@@ -31,6 +31,14 @@ export interface ModelParameters {
 export interface CapabilityOverride { text?: boolean; vision?: boolean; image_generation?: boolean; reasoning?: boolean }
 export interface SubAgentConfig { id: string; providerId: string; model: string; description?: string }
 export interface SubAgentSettings { agents: SubAgentConfig[]; fallbackId?: string; maxAgents: number }
+export interface CollaborationSettings {
+  coderSelector: string
+  reviewerSelector: string
+  coderPrompt: string
+  reviewerPrompt: string
+  maxCycles: number
+  reviewTests: boolean
+}
 
 export type ProviderProtocol = 'openai_compatible' | 'openai_responses' | 'anthropic_messages' | 'gemini_native'
 export type ProviderStatus = 'unconfigured' | 'configured' | 'current'
@@ -60,7 +68,7 @@ export interface ProviderPreset {
 
 export const BUILTIN_PROVIDER_PRESETS: ProviderPreset[] = [
   { id: 'deepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', protocol: 'openai_compatible' },
-  { id: 'zhipu', name: '智谱', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', protocol: 'openai_compatible' },
+  { id: 'zhipu', name: '智谱', baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4', protocol: 'openai_compatible' },
   { id: 'minimax', name: 'MiniMax', baseUrl: 'https://api.minimaxi.com/v1', protocol: 'openai_compatible' },
   { id: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', protocol: 'openai_responses' },
   { id: 'anthropic', name: 'Anthropic', baseUrl: 'https://api.anthropic.com/v1', protocol: 'anthropic_messages' },
@@ -78,7 +86,9 @@ export interface ProviderInput {
 }
 
 export function providerStatus(provider: ProviderConfig, activeId: string): ProviderStatus {
-  const configured = Boolean(provider.hasKey && provider.models.length > 0)
+  // A manually entered model is valid even when the provider catalog could
+  // not be fetched (for example Volcengine Ark's intermittent `/models`).
+  const configured = Boolean(provider.hasKey && (provider.models.length > 0 || provider.model?.trim()))
   if (configured && provider.id === activeId) return 'current'
   return configured ? 'configured' : 'unconfigured'
 }
@@ -183,6 +193,9 @@ export const useConfigStore = defineStore('config', () => {
   const savedRounds = Number(localStorage.getItem('coomi.maxToolRounds'))
   const maxToolRounds = ref([192, 256, 512].includes(savedRounds) ? savedRounds : 192)
   const subAgentSettings = ref<SubAgentSettings>({ agents: [], maxAgents: 20 })
+  const collaborationSettings = ref<CollaborationSettings>({
+    coderSelector: '', reviewerSelector: '', coderPrompt: '', reviewerPrompt: '', maxCycles: 2, reviewTests: true,
+  })
   const connectionSettings = ref<ConnectionSettings>({
     providerRetryCount: readStoredInt('coomi.providerRetryCount', 0, 10, DEFAULT_CONNECTION_SETTINGS.providerRetryCount),
     wsRetryCount: readStoredInt('coomi.wsRetryCount', 0, 30, DEFAULT_CONNECTION_SETTINGS.wsRetryCount),
@@ -375,6 +388,39 @@ export const useConfigStore = defineStore('config', () => {
         fallbackId: saved.fallbackId,
         maxAgents: Math.max(1, Math.min(30, saved.maxAgents || value.maxAgents)),
       }
+      return true
+    } catch (e) {
+      lastError.value = String(e)
+      return false
+    }
+  }
+
+  async function fetchCollaborationSettings(): Promise<boolean> {
+    if (usingMock.value) return true
+    try {
+      const data = await apiGet<CollaborationSettings>('/api/settings/collaboration')
+      collaborationSettings.value = { ...collaborationSettings.value, ...data }
+      return true
+    } catch (e) {
+      lastError.value = String(e)
+      return false
+    }
+  }
+
+  async function saveCollaborationSettings(value: CollaborationSettings): Promise<boolean> {
+    const normalized = {
+      ...value,
+      coderSelector: value.coderSelector.trim(),
+      reviewerSelector: value.reviewerSelector.trim(),
+      maxCycles: Math.max(1, Math.min(3, Math.trunc(value.maxCycles))),
+    }
+    if (usingMock.value) {
+      collaborationSettings.value = normalized
+      return true
+    }
+    try {
+      const saved = await apiSend<CollaborationSettings>('/api/settings/collaboration', 'PUT', normalized)
+      collaborationSettings.value = { ...collaborationSettings.value, ...saved }
       return true
     } catch (e) {
       lastError.value = String(e)
@@ -600,11 +646,11 @@ export const useConfigStore = defineStore('config', () => {
   }
 
   return {
-    permissionMode, planMode, themeMode, reasoningEffort, maxToolRounds, connectionSettings, globalMemory, digitalLifeEnabled, lifeGlobalMode, setLifeGlobalMode, customPrompt, providers, activeId, loading, usingMock, lastError, subAgentSettings,
+    permissionMode, planMode, themeMode, reasoningEffort, maxToolRounds, connectionSettings, globalMemory, digitalLifeEnabled, lifeGlobalMode, setLifeGlobalMode, customPrompt, providers, activeId, loading, usingMock, lastError, subAgentSettings, collaborationSettings,
     currentProviderId, currentModel, currentProvider, mergedProviders,
     fetchProviders, selectModel, validateAndSelectModel, setPermissionMode, setThemeMode, setReasoningEffort, setMaxToolRounds, fetchConnectionSettings, saveConnectionSettings, cyclePermissionMode, togglePlanMode,
     toggleGlobalMemory, syncGlobalMemoryFromEngine, setDigitalLifeEnabled, syncDigitalLifeEnabled, fetchCustomPrompt, saveCustomPrompt,
-    upsertProvider, deleteProvider, activateProvider, copyProvider, revealProviderKey, discoverModels, fetchSubAgentSettings, saveSubAgentSettings,
+    upsertProvider, deleteProvider, activateProvider, copyProvider, revealProviderKey, discoverModels, fetchSubAgentSettings, saveSubAgentSettings, fetchCollaborationSettings, saveCollaborationSettings,
   }
 })
 

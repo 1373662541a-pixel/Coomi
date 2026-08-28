@@ -491,7 +491,8 @@ function goDashboard() {
                   <button class="act" :disabled="busy !== null" @click.stop="setEnabled('skill', item, !item.enabled)">
                     {{ item.enabled ? '停用' : '启用' }}
                   </button>
-                  <button class="act danger" :disabled="busy !== null" @click.stop="confirmDelete('skill', item)">删除</button>
+                  <button v-if="item.id !== 'skill-creator'" class="act danger" :disabled="busy !== null" @click.stop="confirmDelete('skill', item)">删除</button>
+                  <span v-else class="cmeta">内置 Skill，不可卸载</span>
                 </template>
                 <button v-else class="act" :disabled="busy !== null" @click.stop="confirmSkillInstall(item)">
                   {{ busy === item.id ? '安装中…' : '安装' }}
@@ -546,7 +547,8 @@ function goDashboard() {
                 </div>
                 <div class="dops">
                   <template v-if="item.installed">
-                    <button class="act danger" :disabled="busy !== null" @click.stop="confirmDelete('skill', item)">删除</button>
+                    <button v-if="item.id !== 'skill-creator'" class="act danger" :disabled="busy !== null" @click.stop="confirmDelete('skill', item)">删除</button>
+                    <span v-else class="cmeta">内置 Skill，不可卸载</span>
                   </template>
                   <button v-else class="act" :disabled="busy !== null" @click.stop="confirmSkillInstall(item)">
                     {{ busy === item.id ? '安装中…' : '安装' }}

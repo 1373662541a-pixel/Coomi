@@ -37,10 +37,12 @@ export interface SessionMeta {
   preview?: string
   /** 引擎侧模型名。 */
   model?: string
+  /** 引擎侧供应商 ID，与 model 一起组成会话级模型选择。 */
+  providerId?: string
   /** 用户手动重命名过：true 时引擎推导的标题不再覆盖。 */
   renamed?: boolean
   /** Versioned conversation mode; older metadata defaults to agent. */
-  mode?: 'agent' | 'life'
+  mode?: 'agent' | 'team' | 'life'
 }
 
 export interface SessionGroup {
@@ -110,6 +112,8 @@ export const useSessionsStore = defineStore('sessions', () => {
   const runningIds = ref<Set<string>>(new Set())
   const tasks = ref<TaskInfo[]>([])
   const taskConcurrencyLimit = ref(5)
+  /** Foreground chats stay quiet; a turn running this long gets task status. */
+  const LONG_TASK_MS = 10_000
 
   async function refreshTasks() {
     try {
@@ -117,9 +121,22 @@ export const useSessionsStore = defineStore('sessions', () => {
       tasks.value = data.tasks ?? []
       taskConcurrencyLimit.value = data.concurrency_limit || 5
       runningIds.value = new Set(tasks.value.filter(task => task.running).map(task => task.session_id))
-      window.CoomiAndroid?.updateTaskStatus?.(
-        data.running_count > 0 ? `running:${data.running_count}` : 'done',
-      )
+      const activeSessionId = (window as Window & { __coomiActiveSessionId?: string }).__coomiActiveSessionId ?? ''
+      const runningTask = tasks.value.find(task => task.running)
+      const longTask = tasks.value.find(task => task.running
+        && task.started_at > 0
+        && Date.now() - task.started_at * 1000 >= LONG_TASK_MS)
+      const backgroundTask = tasks.value.find(task => task.running && task.session_id !== activeSessionId)
+        ?? longTask
+        ?? (document.visibilityState !== 'visible' ? runningTask : undefined)
+      const status = data.running_count > 0 ? `running:${data.running_count}` : 'done'
+      const sessionId = backgroundTask?.session_id ?? runningTask?.session_id ?? ''
+      const background = Boolean(backgroundTask)
+      if (window.CoomiAndroid?.updateTaskStatusDetails) {
+        window.CoomiAndroid.updateTaskStatusDetails(status, sessionId, background)
+      } else {
+        window.CoomiAndroid?.updateTaskStatus?.(status)
+      }
     } catch {
       /* Keep the last engine-authoritative snapshot while reconnecting. */
     }
@@ -321,8 +338,15 @@ export const useSessionsStore = defineStore('sessions', () => {
     persistMeta()
   }
 
-  function setMode(id: string, mode: 'agent' | 'life') {
+  function setMode(id: string, mode: 'agent' | 'team' | 'life') {
     ensure(id).mode = mode
+    persistMeta()
+  }
+
+  function setModel(id: string, providerId: string, model: string) {
+    const meta = ensure(id)
+    meta.providerId = providerId
+    meta.model = model
     persistMeta()
   }
 
@@ -443,6 +467,10 @@ export const useSessionsStore = defineStore('sessions', () => {
     }
   }
 
+  function clearTranscript(id: string) {
+    try { localStorage.removeItem(TRANSCRIPT_PREFIX + id) } catch { /* ignore */ }
+  }
+
   function clearAll() {
     for (const m of metas.value) {
       try {
@@ -479,7 +507,7 @@ export const useSessionsStore = defineStore('sessions', () => {
         created_at: string
         title_manually_set: boolean
         pinned: boolean
-        mode?: 'agent' | 'life'
+        mode?: 'agent' | 'team' | 'life'
       }>
       const localById = new Map(metas.value.map(m => [m.id, m]))
       const legacyMigrations: Array<Promise<unknown>> = []
@@ -509,6 +537,7 @@ export const useSessionsStore = defineStore('sessions', () => {
           summary: r.summary || local?.summary,
           preview: r.preview || local?.preview,
           model: r.model || local?.model,
+          providerId: r.provider_id || local?.providerId,
           renamed: r.title_manually_set || Boolean(legacyTitle),
           mode: r.mode ?? local?.mode ?? 'agent',
         }
@@ -531,8 +560,8 @@ export const useSessionsStore = defineStore('sessions', () => {
     metas, query, sorted, filtered, groups, currentCwd, setCurrentCwd,
     tasks, runningIds, taskConcurrencyLimit, refreshTasks, cancelTask, taskAction, taskDetail,
     syncFromEngine,
-    ensure, touch, setMode, rename, togglePin, remove, find, deriveTitle,
-    saveTranscript, loadTranscript, migrateId, clearAll,
+    ensure, touch, setMode, setModel, rename, togglePin, remove, find, deriveTitle,
+    saveTranscript, loadTranscript, clearTranscript, migrateId, clearAll,
     refreshRunning, isRunning,
   }
 })

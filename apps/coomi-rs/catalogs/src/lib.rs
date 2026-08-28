@@ -14,6 +14,7 @@ const MCP_CATALOG: &str = include_str!("../mcp.json");
 const SKILL_CATALOG: &str = include_str!("../skills.json");
 const CUSTOM_ITERATION_SKILL: &str = include_str!("../coomi-custom-iteration.md");
 const RUNTIME_ENVIRONMENT_SKILL: &str = include_str!("../runtime-environments.md");
+const SKILL_CREATOR_SKILL: &str = include_str!("../skill-creator.md");
 const COOMIDEV_ENV: &str = include_str!("../../../../tools/mobile-build/coomidev-env.sh");
 const COOMIDEV_DOCTOR: &str = include_str!("../../../../tools/mobile-build/coomidev-doctor.sh");
 const COOMIDEV_BUILD: &str = include_str!("../../../../tools/mobile-build/build-coomidev.sh");
@@ -139,6 +140,25 @@ impl CatalogInstaller {
     }
 
     pub fn install_skill(&self, id: &str) -> Result<PathBuf> {
+        if id.eq_ignore_ascii_case("skill-creator") {
+            let destination = self.home.join("skills").join("skill-creator");
+            fs::create_dir_all(&destination)?;
+            fs::write(destination.join("SKILL.md"), SKILL_CREATOR_SKILL)?;
+            save_skill_metadata(
+                &self.home,
+                &SkillEntry {
+                    id: "skill-creator".into(),
+                    name: "Skill Creator".into(),
+                    description: "Create and update reusable Coomi Skills.".into(),
+                    repository: "Coomi/bundled".into(),
+                    git_ref: "1.4.5".into(),
+                    subdir: "skill-creator".into(),
+                },
+                &destination,
+                "bundled",
+            )?;
+            return Ok(destination);
+        }
         self.install_skill_inner(id, false)
     }
 
@@ -218,6 +238,9 @@ impl CatalogInstaller {
 
     /// 卸载 Skill：删除 skills/{id} 目录与 config/skills.json 中的条目。
     pub fn uninstall_skill(&self, id: &str) -> Result<PathBuf> {
+        if id.eq_ignore_ascii_case("skill-creator") {
+            anyhow::bail!("Skill `skill-creator` is built in and cannot be uninstalled");
+        }
         // 与安装一致：id 必须先在内置目录中解析出合法条目，杜绝路径穿越
         // （id=".."、"%2E%2E%2F" 等经 URL 解码后越界删除任意目录）。
         let catalog = builtin_skills()?;
@@ -405,10 +428,17 @@ fn save_skill_metadata(
         .get_mut("skills")
         .and_then(Value::as_object_mut)
         .context("Skill config must contain an object named `skills`")?;
+    // Reinstalling a bundled Skill is idempotent. Preserve a user's manual
+    // disable choice instead of turning it back on during every engine start.
+    let enabled = skills
+        .get(&entry.id)
+        .and_then(|value| value.get("enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
     skills.insert(
         entry.id.clone(),
         json!({
-            "enabled": true,
+            "enabled": enabled,
             "path": destination,
             "source": entry.id,
             "source_type": "catalog",
@@ -493,6 +523,29 @@ mod tests {
             document.pointer("/servers/filesystem/enabled"),
             Some(&Value::Bool(true))
         );
+    }
+
+    #[test]
+    fn bundled_skill_reinstall_preserves_manual_disable() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let installer = CatalogInstaller::new(home.path());
+        installer
+            .install_skill("skill-creator")
+            .expect("install bundled skill");
+
+        let config_path = home.path().join("config/skills.json");
+        let mut document: Value = serde_json::from_slice(&fs::read(&config_path).expect("read skill config"))
+            .expect("parse skill config");
+        document["skills"]["skill-creator"]["enabled"] = Value::Bool(false);
+        fs::write(&config_path, serde_json::to_vec_pretty(&document).expect("encode skill config"))
+            .expect("disable skill");
+
+        installer
+            .install_skill("skill-creator")
+            .expect("reinstall bundled skill");
+        let updated: Value = serde_json::from_slice(&fs::read(config_path).expect("read updated config"))
+            .expect("parse updated config");
+        assert_eq!(updated["skills"]["skill-creator"]["enabled"], Value::Bool(false));
     }
 
     #[test]
