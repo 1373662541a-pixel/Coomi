@@ -33,8 +33,9 @@ import org.json.JSONObject;
  */
 public final class UpdateChecker {
 
+    // CoomiDev releases are published by GitHub Actions in the user's fork.
     private static final String UPDATE_URL =
-        "https://updates.septemc.com/coomi/android/latest.json";
+        "https://api.github.com/repos/1373662541a-pixel/Coomi/releases/latest";
     private static final String TAG = "UpdateChecker";
 
     public interface Callback {
@@ -73,8 +74,12 @@ public final class UpdateChecker {
                     while ((n = in.read(chunk)) >= 0) buffer.write(chunk, 0, n);
                     JSONObject json = new JSONObject(new String(buffer.toByteArray(), StandardCharsets.UTF_8));
                     int remoteCode = json.optInt("versionCode", 0);
-                    String version = json.optString("version", "");
-                    String notes = json.optString("notes", "");
+                    String version = json.optString("tag_name", "");
+                    String notes = json.optString("body", "");
+                    if (remoteCode == 0) {
+                        try { remoteCode = Integer.parseInt(version.replaceAll("[^0-9]", "")); }
+                        catch (Exception ignored) { }
+                    }
                     int current = currentVersionCode(context);
                     callback.onResult(remoteCode > current, version, notes, null);
                 }
@@ -105,10 +110,23 @@ public final class UpdateChecker {
                     while ((n = in.read(chunk)) >= 0) buffer.write(chunk, 0, n);
                     JSONObject json = new JSONObject(new String(buffer.toByteArray(), StandardCharsets.UTF_8));
                     int remoteCode = json.optInt("versionCode", 0);
-                    String version = json.optString("version", "");
-                    String notes = json.optString("notes", "");
-                    String file = json.optString("file", "");
-                    String apkUrl = UPDATE_URL.substring(0, UPDATE_URL.lastIndexOf('/')) + "/" + file;
+                    String version = json.optString("tag_name", "");
+                    String notes = json.optString("body", "");
+                    if (remoteCode == 0) {
+                        try { remoteCode = Integer.parseInt(version.replaceAll("[^0-9]", "")); }
+                        catch (Exception ignored) { }
+                    }
+                    org.json.JSONArray assets = json.optJSONArray("assets");
+                    String apkUrl = "";
+                    if (assets != null) {
+                        for (int i = 0; i < assets.length(); i++) {
+                            JSONObject asset = assets.optJSONObject(i);
+                            if (asset != null && asset.optString("name", "").endsWith(".apk")) {
+                                apkUrl = asset.optString("browser_download_url", "");
+                                break;
+                            }
+                        }
+                    }
                     int current = currentVersionCode(context);
                     boolean hasUpdate = remoteCode > current;
                     if (hasUpdate && autoInstall) {

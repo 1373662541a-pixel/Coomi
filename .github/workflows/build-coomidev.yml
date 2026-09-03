@@ -32,7 +32,7 @@ on:
           - debug
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: build-coomidev-${{ github.ref }}
@@ -45,6 +45,8 @@ jobs:
       COOMI_DEV_BUILD: "1"
       TERMUX_PACKAGE_VARIANT: "apt-android-7"
       COOMI_BUNDLE_RUNTIME: "1"
+      TERMUX_APP_VERSION_CODE: "${{ github.run_number }}"
+      TERMUX_APP_VERSION_NAME: "1.4.${{ github.run_number }}"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -167,10 +169,27 @@ jobs:
           set -euxo pipefail
           find apps/coomi-app/app/build/outputs/apk -name '*.apk' -exec ls -la {} +
 
-      - name: Upload CoomiDev APK
+      - name: Prepare release APK
+        run: |
+          set -euxo pipefail
+          mkdir -p release
+          APK=$(find apps/coomi-app/app/build/outputs/apk -name '*.apk' | head -1)
+          cp "$APK" "release/CoomiDev-${{ env.TERMUX_APP_VERSION_NAME }}.apk"
+          sha256sum release/*.apk > release/SHA256SUMS.txt
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "coomidev-${{ env.TERMUX_APP_VERSION_NAME }}"
+          name: "CoomiDev ${{ env.TERMUX_APP_VERSION_NAME }}"
+          generate_release_notes: true
+          files: |
+            release/*.apk
+            release/SHA256SUMS.txt
+      - name: Upload CoomiDev APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CoomiDev-${{ inputs.build_type }}-arm64-v8a
+          name: CoomiDev-${{ env.TERMUX_APP_VERSION_NAME }}-arm64-v8a
           path: |
-            apps/coomi-app/app/build/outputs/apk/**/*.apk
+            release/*.apk
+            release/SHA256SUMS.txt
           if-no-files-found: error
