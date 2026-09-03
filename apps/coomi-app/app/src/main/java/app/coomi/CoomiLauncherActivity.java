@@ -455,7 +455,9 @@ public class CoomiLauncherActivity extends Activity {
         mStatusText.setText(R.string.coomi_starting);
         Intent intent = new Intent(this, chatHome
             ? com.termux.app.CoomiActivity.class : CoomiDashboardActivity.class);
-        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        // 清掉上次留下的控制台/对话任务根页面，避免桌面再次启动时绕过 Launcher。
+        // 这样每次从桌面打开应用都会重新读取「启动首页」偏好。
+        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
         startActivity(intent);
         finish();
     }
