@@ -51,6 +51,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Runtime V2 builds an ARM64 Debian rootfs through Docker/QEMU. Free unused
+      # hosted-runner toolchains before pulling its image to avoid disk exhaustion.
+      - name: Free disk space for Runtime V2
+        run: |
+          set -euxo pipefail
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /usr/local/share/powershell /usr/share/swift
+          docker system prune --all --force --volumes
+          df -h
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
