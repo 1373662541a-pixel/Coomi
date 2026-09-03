@@ -107,28 +107,18 @@ jobs:
           rustc --version
           cargo --version
 
-      - name: Generate CoomiDev signing keystore + local.properties
+      - name: Configure fixed CoomiDev signing keystore
         run: |
           set -euxo pipefail
-          KS="$HOME/coomidev-release.jks"
-          ALIAS="coomidev"
-          STOREPASS="coomidev"
-          KEYPASS="coomidev"
-          rm -f "$KS"
-          keytool -genkeypair -v \
-            -keystore "$KS" \
-            -alias "$ALIAS" \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -storepass "$STOREPASS" -keypass "$KEYPASS" \
-            -dname "CN=CoomiDev, OU=Operit, O=1373662541a-pixel, L=Local, ST=Local, C=CN" \
-            >/dev/null 2>&1
-          # local.properties 在 .gitignore 内，不会入库。
+          KS="$GITHUB_WORKSPACE/signing/coomidev-release.jks"
+          test -f "$KS"
+          # local.properties is ignored and supplies the checked-in private signing identity to Gradle.
           cat > local.properties <<EOF
           sdk.dir=$ANDROID_HOME
           coomi.signing.storeFile=$KS
-          coomi.signing.keyAlias=$ALIAS
-          coomi.signing.storePassword=$STOREPASS
-          coomi.signing.keyPassword=$KEYPASS
+          coomi.signing.keyAlias=coomidev
+          coomi.signing.storePassword=CoomiDev-Private-2026
+          coomi.signing.keyPassword=CoomiDev-Private-2026
           EOF
 
       - name: Install web front-end deps
