@@ -160,6 +160,8 @@ jobs:
       - name: Build CoomiDev APK
         run: |
           set -euxo pipefail
+          # gradlew 在上游以 100644 入库（无可执行位），这里显式补上执行权限。
+          chmod +x gradlew apps/coomi-app/gradlew
           ./gradlew --no-daemon \
             :app:assemble${{ inputs.build_type == 'debug' && 'Debug' || 'Release' }} \
             --stacktrace
