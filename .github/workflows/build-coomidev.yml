@@ -110,7 +110,12 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- -y --profile minimal --default-toolchain stable
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          rustup target add aarch64-linux-android
+          # coomi-rs 通过 rust-toolchain.toml 锁定 channel；Android 目标必须装到该锁定工具链上，
+          # 否则 cargo 在 apps/coomi-rs 内切到锁定版本后找不到 aarch64-linux-android 的 core（E0463）。
+          COOMI_TC=$(cd apps/coomi-rs && sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' rust-toolchain.toml)
+          echo "coomi rust toolchain = ${COOMI_TC}"
+          rustup toolchain install --profile minimal "$COOMI_TC"
+          rustup target add --toolchain "$COOMI_TC" aarch64-linux-android
           rustc --version
           cargo --version
 
