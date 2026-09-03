@@ -10,6 +10,18 @@ name: Build CoomiDev APK
 #       不依赖仓库内官方 testkey_untrusted.jks 的私有口令。
 
 on:
+  # 推送到 main 且改到构建相关文件时自动构建（手机端手动 Run 不方便，故加自动触发）。
+  push:
+    branches: ["main"]
+    paths:
+      - 'apps/coomi-app/**'
+      - 'apps/coomi-rs/**'
+      - 'apps/web/**'
+      - 'assets/**'
+      - 'gradle/**'
+      - '**/*.gradle'
+      - 'gradle.properties'
+      - '.github/workflows/build-coomidev.yml'
   workflow_dispatch:
     inputs:
       include_runtime:
