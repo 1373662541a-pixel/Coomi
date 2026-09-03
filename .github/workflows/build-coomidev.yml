@@ -1,10 +1,8 @@
 name: Build CoomiDev APK
 
 # 云端构建 CoomiDev 定制 APK（包名 com.coomidev.android / 应用名 CoomiDev / 引擎端口 18765）。
-# 手动触发：Actions -> Build CoomiDev APK -> Run workflow。
-#   - include_runtime：是否打包 Runtime V2（PRoot host + Debian rootfs）。
-#     官方完整 APK 需要它，但资产超大、构建慢；默认 false 可快速产出核心 APK
-#     （Termux bootstrap + Rust 引擎 + Vue 前端）验证整条构建链路。
+# 始终内置 Runtime V2（PRoot host + Debian rootfs）——Coomi v1.4.5 引擎运行在 PRoot+Debian 环境，
+# 缺这两套资产会像 v1.4.5 精简包那样无法完成引擎部署。
 #   - build_type：release（已开混淆）/ debug。
 # 签名：每次在本 runner 上用 keytool 生成一把稳定自持的开发签名并写入 local.properties，
 #       不依赖仓库内官方 testkey_untrusted.jks 的私有口令。
@@ -24,11 +22,6 @@ on:
       - '.github/workflows/build-coomidev.yml'
   workflow_dispatch:
     inputs:
-      include_runtime:
-        description: "Bundle Runtime V2 (PRoot host + Debian rootfs, 大且慢)"
-        required: false
-        default: false
-        type: boolean
       build_type:
         description: "构建变体"
         required: false
@@ -51,8 +44,7 @@ jobs:
     env:
       COOMI_DEV_BUILD: "1"
       TERMUX_PACKAGE_VARIANT: "apt-android-7"
-      # 未开 include_runtime 时保持非 "1"，stageCoomiRuntimeV2 会被 onlyIf 跳过。
-      COOMI_BUNDLE_RUNTIME: "${{ inputs.include_runtime && '1' || '' }}"
+      COOMI_BUNDLE_RUNTIME: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -149,8 +141,7 @@ jobs:
           npm config set registry https://registry.npmmirror.com
           npm install
 
-      - name: Generate Runtime V2 assets (optional)
-        if: inputs.include_runtime == true
+      - name: Generate Runtime V2 assets (PRoot host + Debian rootfs)
         run: |
           set -euxo pipefail
           sudo apt-get update
