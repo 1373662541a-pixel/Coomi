@@ -6,7 +6,7 @@ def coomiDevBuild = System.getenv("COOMI_DEV_BUILD") == "1"
 def coomiPackageName = coomiDevBuild ? "com.coomidev.android" : "com.coomi.android"
 def coomiAppName = coomiDevBuild ? "CoomiDev" : "Coomi"
 def coomiNdkHomeOverride = System.getenv("COOMI_NDK_HOME")
-
+def coomiVersionCode = (System.getenv("TERMUX_APP_VERSION_CODE") ?: "42").toInteger()
 configurations.configureEach {
     resolutionStrategy.force "com.google.guava:guava:24.1-jre"
 }
@@ -72,7 +72,7 @@ android {
         minSdkVersion project.properties.minSdkVersion.toInteger()
         targetSdkVersion coomiTargetSdk
         // Keep the executable Termux bootstrap security domain for v1.4.0.
-        versionCode (System.getenv("TERMUX_APP_VERSION_CODE") ?: "42").toInteger()
+        versionCode coomiVersionCode
         versionName "1.4.5"
 
         if (appVersionName) versionName = appVersionName
