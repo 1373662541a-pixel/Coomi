@@ -449,11 +449,13 @@ public class CoomiLauncherActivity extends Activity {
             return;
         }
 
-        // 控制台是 app 的主界面：打开 app 先进控制台（引擎状态 + 各功能入口），
-        // 从控制台再进入对话，符合安卓用户「回到主界面」的交互习惯。
-        Logger.logInfo(LOG_TAG, "All ready, routing to dashboard");
+        // 按「启动首页」设置进入控制台或对话页。
+        boolean chatHome = CoomiHomePreference.isChatHome(this);
+        Logger.logInfo(LOG_TAG, chatHome ? "All ready, routing to chat" : "All ready, routing to dashboard");
         mStatusText.setText(R.string.coomi_starting);
-        Intent intent = new Intent(this, CoomiDashboardActivity.class);
+        Intent intent = new Intent(this, chatHome
+            ? com.termux.app.CoomiActivity.class : CoomiDashboardActivity.class);
+        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         startActivity(intent);
         finish();
     }
