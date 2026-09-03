@@ -1,0 +1,166 @@
+name: Build CoomiDev APK
+
+# 云端构建 CoomiDev 定制 APK（包名 com.coomidev.android / 应用名 CoomiDev / 引擎端口 18765）。
+# 手动触发：Actions -> Build CoomiDev APK -> Run workflow。
+#   - include_runtime：是否打包 Runtime V2（PRoot host + Debian rootfs）。
+#     官方完整 APK 需要它，但资产超大、构建慢；默认 false 可快速产出核心 APK
+#     （Termux bootstrap + Rust 引擎 + Vue 前端）验证整条构建链路。
+#   - build_type：release（已开混淆）/ debug。
+# 签名：每次在本 runner 上用 keytool 生成一把稳定自持的开发签名并写入 local.properties，
+#       不依赖仓库内官方 testkey_untrusted.jks 的私有口令。
+
+on:
+  workflow_dispatch:
+    inputs:
+      include_runtime:
+        description: "Bundle Runtime V2 (PRoot host + Debian rootfs, 大且慢)"
+        required: false
+        default: false
+        type: boolean
+      build_type:
+        description: "构建变体"
+        required: false
+        default: "release"
+        type: choice
+        options:
+          - release
+          - debug
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-coomidev-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-coomidev:
+    runs-on: ubuntu-24.04
+    env:
+      COOMI_DEV_BUILD: "1"
+      TERMUX_PACKAGE_VARIANT: "apt-android-7"
+      # 未开 include_runtime 时保持非 "1"，stageCoomiRuntimeV2 会被 onlyIf 跳过。
+      COOMI_BUNDLE_RUNTIME: "${{ inputs.include_runtime && '1' || '' }}"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle/caches
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Cache Rust (coomi-rs)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/coomi-rs/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('apps/coomi-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Set up Android SDK command-line tools
+        uses: android-actions/setup-android@v3
+
+      - name: Accept SDK licenses
+        run: yes | sdkmanager --licenses >/dev/null 2>&1 || true
+
+      - name: Install Android SDK packages (platform/build-tools + NDK)
+        run: |
+          set -euxo pipefail
+          # :app 用 coomi-app/gradle.properties 里的 ndkVersion=29.0.14206865，
+          # termux 子模块读根 gradle.properties 的 27.0.12077973，两版都装。
+          sdkmanager \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;27.0.12077973" \
+            "ndk;29.0.14206865"
+
+      - name: Set up Rust + aarch64-linux-android target
+        run: |
+          set -euxo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          rustup target add aarch64-linux-android
+          rustc --version
+          cargo --version
+
+      - name: Generate CoomiDev signing keystore + local.properties
+        run: |
+          set -euxo pipefail
+          KS="$HOME/coomidev-release.jks"
+          ALIAS="coomidev"
+          STOREPASS="coomidev"
+          KEYPASS="coomidev"
+          rm -f "$KS"
+          keytool -genkeypair -v \
+            -keystore "$KS" \
+            -alias "$ALIAS" \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass "$STOREPASS" -keypass "$KEYPASS" \
+            -dname "CN=CoomiDev, OU=Operit, O=1373662541a-pixel, L=Local, ST=Local, C=CN" \
+            >/dev/null 2>&1
+          # local.properties 在 .gitignore 内，不会入库。
+          cat > local.properties <<EOF
+          sdk.dir=$ANDROID_HOME
+          coomi.signing.storeFile=$KS
+          coomi.signing.keyAlias=$ALIAS
+          coomi.signing.storePassword=$STOREPASS
+          coomi.signing.keyPassword=$KEYPASS
+          EOF
+
+      - name: Install web front-end deps
+        working-directory: apps/web
+        run: |
+          npm config set registry https://registry.npmmirror.com
+          npm install
+
+      - name: Generate Runtime V2 assets (optional)
+        if: inputs.include_runtime == true
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y mmdebstrap qemu-user-static binfmt-support debian-archive-keyring
+          sudo update-binfmts --enable qemu-aarch64
+          mkdir -p runtime-v2-dist
+          scripts/runtime-v2/build-proot-host.sh
+          sudo --preserve-env=RUNTIME_V2_OUTPUT scripts/runtime-v2/build-rootfs.sh
+        env:
+          RUNTIME_V2_OUTPUT: runtime-v2-dist
+
+      - name: Build CoomiDev APK
+        run: |
+          set -euxo pipefail
+          ./gradlew --no-daemon \
+            :app:assemble${{ inputs.build_type == 'debug' && 'Debug' || 'Release' }} \
+            --stacktrace
+
+      - name: Locate APK output
+        run: |
+          set -euxo pipefail
+          find apps/coomi-app/app/build/outputs/apk -name '*.apk' -exec ls -la {} +
+
+      - name: Upload CoomiDev APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: CoomiDev-${{ inputs.build_type }}-arm64-v8a
+          path: |
+            apps/coomi-app/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
