@@ -125,7 +125,9 @@ jobs:
           set -euxo pipefail
           mkdir -p signing
           # 仓库公开，keystore 绝不入库；由 Actions Secret(base64) 现场重建。
-          echo "${{ secrets.COOMI_SIGNING_KEYSTORE_B64 }}" | base64 -d > signing/coomidev-release.jks
+          B64=$(printf '%s' "${{ secrets.COOMI_SIGNING_KEYSTORE_B64 }}" | tr -d '[:space:]')
+          test -n "$B64" || { echo '::error::COOMI_SIGNING_KEYSTORE_B64 is empty or not set'; exit 1; }
+          printf '%s' "$B64" | base64 -d > signing/coomidev-release.jks
           test -s signing/coomidev-release.jks
           # local.properties is ignored and supplies the signing identity to Gradle (values from Secrets).
           cat > local.properties <<EOF
