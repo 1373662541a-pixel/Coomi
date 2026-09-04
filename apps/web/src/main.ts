@@ -2,6 +2,7 @@ import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import App from './App.vue'
 import { router } from './router'
+import { authedFetch, API_BASE } from './bridge/http'
 import { installSystemBackHandler } from './bridge/navigation'
 import { readThemeMode, applyTheme, type ThemeMode } from './stores/config'
 import './styles/global.css'
@@ -146,3 +147,30 @@ function initTheme() {
 initTheme()
 installSystemBackHandler(router)
 createApp(App).use(createPinia()).use(router).mount('#app')
+
+/**
+ * 用户自定义前端扩展：加载引擎提供的 user_ext.css / user_ext.js 并注入。
+ * Coomi 本身可直接写入这两个文件，从而实现"应用内直接增删改界面功能"。
+ */
+async function loadUserExtension() {
+  try {
+    const response = await authedFetch(`${API_BASE}/api/runtime/user-extension`, {
+      headers: { Accept: 'application/json' },
+    })
+    if (!response.ok) return
+    const data = await response.json() as { css?: string; js?: string }
+    if (data.css) {
+      const style = document.createElement('style')
+      style.id = 'coomi-user-ext-css'
+      style.textContent = data.css
+      document.head.appendChild(style)
+    }
+    if (data.js) {
+      const script = document.createElement('script')
+      script.id = 'coomi-user-ext-js'
+      script.textContent = data.js
+      document.body.appendChild(script)
+    }
+  } catch { /* 引擎扩展不可用时静默，不影响正常使用 */ }
+}
+void loadUserExtension()

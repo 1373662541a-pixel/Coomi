@@ -777,6 +777,10 @@ pub async fn serve(
             get(get_custom_prompt).post(set_custom_prompt),
         )
         .route(
+            "/api/runtime/user-extension",
+            get(get_user_extension),
+        )
+        .route(
             "/api/settings/connection",
             get(get_connection_settings).put(set_connection_settings),
         )
@@ -1568,6 +1572,18 @@ fn truncate_custom_prompt(text: &str) -> String {
 
 async fn get_global_memory(State(state): State<AppState>) -> Json<Value> {
     Json(json!({ "enabled": global_memory_enabled(&state.home) }))
+}
+
+/// 用户自定义前端扩展：读取 home 下的 user_ext.css / user_ext.js 并返回给前端注入。
+/// Coomi 本身可直接读写这两个文件，从而实现对界面的增删改（无需重装 APK）。
+async fn get_user_extension(State(state): State<AppState>) -> Json<Value> {
+    let read_maybe = |name: &str| -> String {
+        std::fs::read_to_string(state.home.join(name)).unwrap_or_default()
+    };
+    Json(json!({
+        "css": read_maybe("user_ext.css"),
+        "js": read_maybe("user_ext.js"),
+    }))
 }
 
 async fn set_global_memory(
