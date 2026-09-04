@@ -1,6 +1,7 @@
 package app.coomi;
 
 import android.annotation.SuppressLint;
+import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.DownloadManager;
 import android.content.BroadcastReceiver;
@@ -37,6 +38,11 @@ public final class UpdateChecker {
     private static final String UPDATE_URL =
         "https://api.github.com/repos/1373662541a-pixel/Coomi/releases/latest";
     private static final String TAG = "UpdateChecker";
+    /** 打开 App 主动提示的节流记录（避免同版本反复打扰）。 */
+    private static final String PREFS_UPDATES = "coomi_update_prompt";
+    private static final String KEY_PROMPTED_VERSION = "last_prompted_version";
+    /** 毫秒级防抖：同一时刻多 Activity 先后触发时不连弹两次。 */
+    private static volatile long lastPromptAtMs = 0L;
 
     public interface Callback {
         void onResult(boolean hasUpdate, String version, String notes, String error);
@@ -245,6 +251,97 @@ public final class UpdateChecker {
             return info.signingInfo.getApkContentsSigners();
         }
         return info.signatures;
+    }
+
+    /**
+     * 打开 App / 进入控制台时的主动更新提示（方案 B：启动即弹一次）。
+     * 查到比当前更高版本、且该版本尚未在本机提示/处理过时弹确认框：
+     * 「立即更新」走 {@link #downloadAndInstall} 下载并覆盖安装；
+     * 「暂不 / 关闭」记为已提示，同版本不再反复打扰，等待更高版本 release 时再提示。
+     */
+    public static void checkOnOpenPrompt(final Activity activity) {
+        if (activity == null || activity.isFinishing()) return;
+        final Context app = activity.getApplicationContext();
+        new Thread(() -> {
+            try {
+                URL url = new URL(UPDATE_URL);
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setConnectTimeout(8000);
+                conn.setReadTimeout(8000);
+                conn.setRequestProperty("User-Agent", "Coomi-Android/" + currentVersionCode(app));
+                int code = conn.getResponseCode();
+                if (code != 200) return;
+                String version = "";
+                String notes = "";
+                int remoteCode = 0;
+                String apkUrl = "";
+                try (InputStream in = conn.getInputStream()) {
+                    java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream();
+                    byte[] chunk = new byte[8192];
+                    int n;
+                    while ((n = in.read(chunk)) >= 0) buffer.write(chunk, 0, n);
+                    JSONObject json = new JSONObject(new String(buffer.toByteArray(), StandardCharsets.UTF_8));
+                    remoteCode = json.optInt("versionCode", 0);
+                    version = json.optString("tag_name", "");
+                    notes = json.optString("body", "");
+                    if (remoteCode == 0) {
+                        try { remoteCode = Integer.parseInt(version.replaceAll("[^0-9]", "")); }
+                        catch (Exception ignored) { }
+                    }
+                    org.json.JSONArray assets = json.optJSONArray("assets");
+                    if (assets != null) {
+                        for (int i = 0; i < assets.length(); i++) {
+                            JSONObject asset = assets.optJSONObject(i);
+                            if (asset != null && asset.optString("name", "").endsWith(".apk")) {
+                                apkUrl = asset.optString("browser_download_url", "");
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (remoteCode <= currentVersionCode(app) || version.isEmpty() || apkUrl.isEmpty()) return;
+
+                // 毫秒级防抖：避免进程内多个 Activity 先后触发连弹两次。
+                synchronized (UpdateChecker.class) {
+                    long now = System.currentTimeMillis();
+                    if (now - lastPromptAtMs < 5000) return;
+                    lastPromptAtMs = now;
+                }
+
+                final String fVersion = version;
+                final String fNotes = notes;
+                final String fApkUrl = apkUrl;
+                final android.content.SharedPreferences sp =
+                    app.getSharedPreferences(PREFS_UPDATES, Context.MODE_PRIVATE);
+                // 该版本已提示/处理过：本次启动不再打扰。
+                if (fVersion.equals(sp.getString(KEY_PROMPTED_VERSION, ""))) return;
+
+                activity.runOnUiThread(() -> {
+                    if (activity.isFinishing()
+                        || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1
+                            && activity.isDestroyed())) {
+                        return;
+                    }
+                    new AlertDialog.Builder(activity)
+                        .setTitle("发现新版本 " + fVersion)
+                        .setMessage((fNotes == null || fNotes.isEmpty()
+                            ? "检测到新的 CoomiDev 版本。"
+                            : fNotes)
+                            + "\n\n是否下载并安装更新？")
+                        .setPositiveButton("立即更新", (d, w) -> {
+                            sp.edit().putString(KEY_PROMPTED_VERSION, fVersion).apply();
+                            downloadAndInstall(activity, fApkUrl, fVersion);
+                        })
+                        .setNegativeButton("暂不", (d, w) ->
+                            sp.edit().putString(KEY_PROMPTED_VERSION, fVersion).apply())
+                        .setOnCancelListener(d ->
+                            sp.edit().putString(KEY_PROMPTED_VERSION, fVersion).apply())
+                        .show();
+                });
+            } catch (Exception ignored) {
+                // 静默失败：网络/解析出错不应阻碍打开 App。
+            }
+        }).start();
     }
 
     /** 供 Dashboard 使用：弹结果对话框。 */

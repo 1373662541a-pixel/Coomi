@@ -150,6 +150,8 @@ public class CoomiDashboardActivity extends Activity {
         mHomeSettingsButton = findViewById(R.id.btn_home_settings);
         mCheckUpdateDesc.setText(getString(R.string.coomi_dash_check_update_desc, BuildConfig.VERSION_NAME));
         checkUpdateSilently();
+        // 方案 B：进入控制台即主动检查是否有新版，有则弹更新确认框。
+        UpdateChecker.checkOnOpenPrompt(this);
         mBackupButton = findViewById(R.id.btn_backup_data);
         mMaintenanceButton = findViewById(R.id.btn_maintenance);
         mUsageButton = findViewById(R.id.btn_usage);
