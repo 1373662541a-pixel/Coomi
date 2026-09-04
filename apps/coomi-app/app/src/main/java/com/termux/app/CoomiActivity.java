@@ -174,6 +174,10 @@ public class CoomiActivity extends Activity {
         }
         applyThemeToWebView();
         CoomiTheme.applySystemBars(this);
+        // 方案 B：聊天作为首页时，回到前台即检查是否有新版并主动提示。
+        if (!CoomiDemo.isEnabled()) {
+            app.coomi.UpdateChecker.checkOnOpenPrompt(this);
+        }
     }
 
     /**
