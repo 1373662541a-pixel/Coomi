@@ -27,7 +27,9 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
+import android.webkit.WebChromeClient;
 import android.webkit.WebViewClient;
+import android.webkit.ValueCallback;
 import android.widget.Button;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -72,6 +74,7 @@ public class CoomiActivity extends Activity {
     private static final int REQUEST_AUTHORIZE_TREE = 2102;
     private static final int REQUEST_EXPORT_FILE = 2103;
     private static final int REQUEST_SAVE_IMAGE = 2104;
+    private static final int REQUEST_FILE_CHOOSER = 2105;
     /** 旧系统（API < 29）走 SAF 保存对话框时的待写图片数据。 */
     private byte[] mPendingImageBytes;
     private String mPendingImageName;
@@ -85,6 +88,8 @@ public class CoomiActivity extends Activity {
     public static final String EXTRA_RETURN_TO_SETUP = "coomi.return_to_setup";
 
     private WebView mWebView;
+    /** 由 onShowFileChooser 发起的图片/文件选择回调，用于把相册结果回填给 WebView。 */
+    private ValueCallback<Uri[]> mFilePathCallback;
     private View mSplash;
     private View mSplashSpinner;
     private TextView mLoadingText;
@@ -385,6 +390,67 @@ public class CoomiActivity extends Activity {
                     return true;
                 }
                 return false;
+            }
+        });
+
+        // 文件选择：网页里 <input type="file"> 的图片选择直接打开系统相册/图片选择器，
+        // 而不是跳到默认的文件管理器（用户期望选图即弹相册、选后再显示缩略图）。
+        mWebView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onShowFileChooser(WebView view,
+                                             ValueCallback<Uri[]> filePathCallback,
+                                             WebChromeClient.FileChooserParams fileChooserParams) {
+                // 上一次未完成的选择先作废，避免回调堆积导致前端卡住。
+                if (mFilePathCallback != null) {
+                    mFilePathCallback.onReceiveValue(null);
+                }
+                mFilePathCallback = filePathCallback;
+
+                String[] acceptTypes = fileChooserParams.getAcceptTypes();
+                boolean wantsImage = true;
+                if (acceptTypes != null) {
+                    for (String raw : acceptTypes) {
+                        String t = raw == null ? "" : raw.trim().toLowerCase();
+                        if ("image/*".equals(t) || t.startsWith("image/")) {
+                            wantsImage = true;
+                            break;
+                        }
+                        // 明确指定了非图片类型（.pdf / text/* 等）才按文件，否则默认当图片。
+                        if (!t.isEmpty() && !"*/*".equals(t) && !t.startsWith(".")) {
+                            wantsImage = false;
+                        }
+                    }
+                }
+                boolean multiple = fileChooserParams.getMode() == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE;
+
+                Intent intent;
+                if (wantsImage) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        // Android 13+ 系统图片选择器（Photo Picker），直接是相册，支持多选。
+                        intent = new Intent("android.provider.action.PICK_IMAGES");
+                        if (multiple) {
+                            intent.putExtra("android.provider.extra.PICK_IMAGES_MAX", 20);
+                        }
+                    } else if (multiple) {
+                        intent = new Intent(Intent.ACTION_GET_CONTENT);
+                        intent.addCategory(Intent.CATEGORY_OPENABLE);
+                        intent.setType("image/*");
+                        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+                    } else {
+                        // 旧版本单选：直接用系统图库选择器（ACTION_PICK），打开就是相册。
+                        intent = new Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI);
+                    }
+                } else {
+                    intent = fileChooserParams.createIntent();
+                }
+                try {
+                    startActivityForResult(intent, REQUEST_FILE_CHOOSER);
+                } catch (android.content.ActivityNotFoundException e) {
+                    mFilePathCallback = null;
+                    filePathCallback.onReceiveValue(null);
+                    return false;
+                }
+                return true;
             }
         });
     }
@@ -766,6 +832,26 @@ public class CoomiActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_FILE_CHOOSER) {
+            // 把相册/图片选择器选中的 Uri 回填给 WebView 的 <input type="file">。
+            Uri[] result = null;
+            if (resultCode == RESULT_OK && data != null) {
+                if (data.getClipData() != null && data.getClipData().getItemCount() > 0) {
+                    int count = data.getClipData().getItemCount();
+                    result = new Uri[count];
+                    for (int i = 0; i < count; i++) {
+                        result[i] = data.getClipData().getItemAt(i).getUri();
+                    }
+                } else if (data.getData() != null) {
+                    result = new Uri[]{data.getData()};
+                }
+            }
+            if (mFilePathCallback != null) {
+                mFilePathCallback.onReceiveValue(result);
+                mFilePathCallback = null;
+            }
+            return;
+        }
         if (resultCode != RESULT_OK || data == null) {
             if (requestCode == REQUEST_IMPORT_FILES && mPendingImportRequestId != null) {
                 emitFilesImported(new JSONArray(), mPendingImportRequestId);
@@ -1014,6 +1100,10 @@ public class CoomiActivity extends Activity {
         if (mWebView != null) {
             mWebView.destroy();
             mWebView = null;
+        }
+        if (mFilePathCallback != null) {
+            mFilePathCallback.onReceiveValue(null);
+            mFilePathCallback = null;
         }
         super.onDestroy();
     }
