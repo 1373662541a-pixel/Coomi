@@ -19,7 +19,11 @@ const session = useSessionStore()
 
 const RATE = 60
 const blocks = ref<string[]>([])
+/** 各段原文（未渲染 markdown），供"分段复制"直接复制纯文本。 */
+const rawBlocks = ref<string[]>([])
 const copied = ref(false)
+/** 当前复制到的段落序号（用于展示该段的"已复制"反馈）。 */
+const copiedSeg = ref<number | null>(null)
 let timer: ReturnType<typeof setTimeout> | null = null
 let last = 0
 
@@ -108,7 +112,9 @@ function splitBlocks(text: string): string[] {
 }
 
 function rebuild() {
-  blocks.value = splitBlocks(src.value).map(renderMarkdown)
+  const raw = splitBlocks(src.value)
+  rawBlocks.value = raw
+  blocks.value = raw.map(renderMarkdown)
 }
 
 function schedule() {
@@ -132,6 +138,15 @@ async function copyAll() {
   try { await navigator.clipboard.writeText(props.msg.content) } catch { /* 剪贴板不可用就算了 */ }
   copied.value = true
   setTimeout(() => { copied.value = false }, 1400)
+}
+
+/** 复制某一段原文（不渲染 markdown 的纯文本）。 */
+async function copySegment(index: number) {
+  const text = rawBlocks.value[index]
+  if (!text) return
+  try { await navigator.clipboard.writeText(text) } catch { /* 剪贴板不可用就算了 */ }
+  copiedSeg.value = index
+  setTimeout(() => { if (copiedSeg.value === index) copiedSeg.value = null }, 1400)
 }
 </script>
 
@@ -158,7 +173,12 @@ async function copyAll() {
   <div v-else class="assistant" :class="{ life: isLife }">
     <div v-if="isLife" class="life-tag"><CoomiIcon name="lifeRings" :size="12" /><span>生命体</span></div>
     <div class="wraps">
-      <div v-for="(h, i) in blocks" :key="i" class="md blk cascade" v-html="h" />
+      <div v-for="(h, i) in blocks" :key="i" class="wrap-blk">
+        <div class="md blk cascade" v-html="h" />
+        <button v-if="!streaming" class="seg-copy" :aria-label="'复制第' + (i + 1) + '段'" @click="copySegment(i)">
+          <CoomiIcon :name="copiedSeg === i ? 'check' : 'copy'" :size="13" />
+        </button>
+      </div>
     </div>
     <FileInline v-if="filePaths.length" :paths="filePaths" />
     <span v-if="streaming" class="stream-caret" />
@@ -196,6 +216,21 @@ async function copyAll() {
   background: color-mix(in srgb, var(--fill) 45%, var(--bg));
 }
 .blk + .blk { margin-top: 8px; }
+.wrap-blk { position: relative; }
+.seg-copy {
+  position: absolute; top: -7px; right: -9px;
+  display: grid; place-items: center;
+  width: 20px; height: 20px; padding: 0;
+  border: 1px solid var(--border-strong); border-radius: 50%;
+  background: var(--bg); color: var(--text-3);
+  opacity: 0.25;
+}
+.seg-copy:active { background: var(--fill); color: var(--blue); }
+.assistant.life .seg-copy { opacity: 0.25; }
+@media (hover: hover) {
+  .wrap-blk:hover .seg-copy { opacity: 0.9; }
+  .seg-copy:hover { opacity: 0.9; }
+}
 
 /* 生命体主动消息：左侧渐变边条 + 柔和底色，弱化“这是一条系统消息”的距离感。 */
 .assistant.life { padding: 2px 0 4px; }
