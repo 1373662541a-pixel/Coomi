@@ -138,7 +138,10 @@ async function copyAll() {
 <template>
   <div v-if="isUser" class="row user">
     <div class="wrap user-wrap">
-      <div class="bubble cascade">{{ msg.content }}</div>
+      <div v-if="msg.kind === 'user' && msg.images?.length" class="user-images">
+        <img v-for="(image, index) in msg.images" :key="index" :src="image" alt="用户图片" />
+      </div>
+      <div v-if="msg.content" class="bubble cascade">{{ msg.content }}</div>
       <div class="acts user-acts">
         <button class="act" @click="copyAll">
           <CoomiIcon :name="copied ? 'check' : 'copy'" :size="15" />
@@ -203,6 +206,8 @@ async function copyAll() {
 .assistant.life .blk + .blk { margin-top: 8px; }
 
 .user-wrap { display: flex; flex-direction: column; align-items: flex-end; max-width: 84%; }
+.user-images { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; margin-bottom: 6px; max-width: 100%; }
+.user-images img { display: block; width: 120px; max-width: 100%; height: 120px; object-fit: cover; border-radius: 10px; border: 1px solid var(--border); }
 .user-acts { justify-content: flex-end; }
 .acts { display: flex; gap: 4px; margin-top: 8px; }
 .act {
