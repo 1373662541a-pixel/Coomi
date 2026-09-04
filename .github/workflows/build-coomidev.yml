@@ -1,4 +1,6 @@
 name: Build CoomiDev APK
+# 触发新一轮构建：让 TERMUX_APP_VERSION_CODE/NUM 提升（run_number+1），
+# 生成更高版本号供 App 内更新检测再次弹出提示（用户点了“暂不更新”后想再看到更新）。
 # 说明：触发路径含本 workflow（及 apps/web、apps/coomi-rs、assets）。
 # 在 #15(64488f8) 之后做了历史清理并 force-push(6b9194f)；本提交用于触发
 # 一次基于新 Secrets(COOMI_SIGNING_*)签名 的构建验证。
