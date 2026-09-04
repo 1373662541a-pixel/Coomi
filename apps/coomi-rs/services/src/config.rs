@@ -144,7 +144,9 @@ pub struct ProviderSettings {
     pub supports_remote_compaction: Option<bool>,
     #[serde(default)]
     pub remote_compaction_mode: RemoteCompactionMode,
-    #[serde(default)]
+    // 默认按支持视觉处理（把图片交给模型）。真不支持时 agent 的
+    // image compatibility 兜底会去掉图重试，因此默认开不会破坏纯文本模型。
+    #[serde(default = "default_true")]
     pub supports_vision: bool,
     #[serde(default = "default_true")]
     pub supports_native_tools: bool,

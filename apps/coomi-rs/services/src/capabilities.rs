@@ -420,7 +420,9 @@ pub fn prune_unsupported_fields(payload: &mut Value, profile: &ModelCapabilityPr
     if !profile.streaming.state.supported() {
         object.remove("stream");
     }
-    if !profile.vision.state.supported() {
+    // 只有明确探测到“不支持视觉”才剥图；Unknown 的模型按可发图处理，
+    // 真不支持时由请求侧（agent 的 image compatibility 兜底）自动去图重试。
+    if profile.vision.state == CapabilityState::Unsupported {
         strip_images(payload);
     }
 }
