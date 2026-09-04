@@ -342,12 +342,22 @@ impl ToolSpec {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ImageContent {
     pub media_type: String,
+    #[serde(default)]
     pub data: String,
+    /// 公网图片地址；为空时兼容旧的 Base64 图片数据。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 impl ImageContent {
     pub fn data_url(&self) -> String {
-        format!("data:{};base64,{}", self.media_type, self.data)
+        if !self.data.trim().is_empty() {
+            return format!("data:{};base64,{}", self.media_type, self.data);
+        }
+        self.url
+            .clone()
+            .filter(|url| !url.trim().is_empty())
+            .unwrap_or_else(|| format!("data:{};base64,{}", self.media_type, self.data))
     }
 }
 
@@ -529,6 +539,7 @@ impl ToolResult {
         self.images.push(ImageContent {
             media_type: media_type.into(),
             data: data.into(),
+            url: None,
         });
         self
     }
@@ -867,10 +878,7 @@ impl WorkflowState {
         for step in &self.steps {
             for dep in &step.depends_on {
                 if dep == &step.id {
-                    return Err(format!(
-                        "step `{}` depends on itself",
-                        step.id
-                    ));
+                    return Err(format!("step `{}` depends on itself", step.id));
                 }
                 if !seen.contains(dep.as_str()) {
                     return Err(format!(
@@ -937,12 +945,7 @@ impl WorkflowState {
 
     /// 返回当前"可执行"的步骤 id：所有依赖已 succeeded 自身仍 Pending。
     pub fn ready_steps(&self) -> Vec<String> {
-        let state_of = |id: &str| {
-            self.steps
-                .iter()
-                .find(|s| s.id == id)
-                .map(|s| s.state)
-        };
+        let state_of = |id: &str| self.steps.iter().find(|s| s.id == id).map(|s| s.state);
         let mut ready = Vec::new();
         for step in &self.steps {
             if step.state != WorkflowStepState::Pending {
@@ -961,9 +964,15 @@ impl WorkflowState {
 
     /// 所有步骤是否都到达终态。
     pub fn is_terminal(&self) -> bool {
-        self.steps
-            .iter()
-            .all(|s| matches!(s.state, WorkflowStepState::Succeeded | WorkflowStepState::Failed | WorkflowStepState::Skipped | WorkflowStepState::Cancelled))
+        self.steps.iter().all(|s| {
+            matches!(
+                s.state,
+                WorkflowStepState::Succeeded
+                    | WorkflowStepState::Failed
+                    | WorkflowStepState::Skipped
+                    | WorkflowStepState::Cancelled
+            )
+        })
     }
 }
 
@@ -1131,8 +1140,16 @@ mod workflow_tests {
     use super::{StepAction, WorkflowState, WorkflowStep, WorkflowStepState};
 
     fn model_step(id: &str, name: &str, deps: &[&str]) -> WorkflowStep {
-        WorkflowStep::new(id, name, StepAction::Model { prompt: "hi".into(), model: None, isolate: None })
-            .depends_on(deps)
+        WorkflowStep::new(
+            id,
+            name,
+            StepAction::Model {
+                prompt: "hi".into(),
+                model: None,
+                isolate: None,
+            },
+        )
+        .depends_on(deps)
     }
 
     fn linear_workflow() -> WorkflowState {
@@ -1180,31 +1197,20 @@ mod workflow_tests {
         let wf = WorkflowState::new(
             "wf-3",
             "cycle",
-            vec![
-                model_step("a", "A", &["b"]),
-                model_step("b", "B", &["a"]),
-            ],
+            vec![model_step("a", "A", &["b"]), model_step("b", "B", &["a"])],
         );
         assert!(wf.validate().is_err());
     }
 
     #[test]
     fn unknown_dependency_is_rejected() {
-        let wf = WorkflowState::new(
-            "wf-4",
-            "bad-dep",
-            vec![model_step("a", "A", &["missing"])],
-        );
+        let wf = WorkflowState::new("wf-4", "bad-dep", vec![model_step("a", "A", &["missing"])]);
         assert!(wf.validate().is_err());
     }
 
     #[test]
     fn self_dependency_is_rejected() {
-        let wf = WorkflowState::new(
-            "wf-5",
-            "self-dep",
-            vec![model_step("a", "A", &["a"])],
-        );
+        let wf = WorkflowState::new("wf-5", "self-dep", vec![model_step("a", "A", &["a"])]);
         assert!(wf.validate().is_err());
     }
 

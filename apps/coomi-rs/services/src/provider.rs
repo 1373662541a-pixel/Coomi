@@ -803,7 +803,9 @@ fn set_json_path(target: &mut Value, path: &str, value: Value) {
             object.insert((*head).to_owned(), value);
             return;
         }
-        let child = object.entry((*head).to_owned()).or_insert_with(|| json!({}));
+        let child = object
+            .entry((*head).to_owned())
+            .or_insert_with(|| json!({}));
         set_segments(child, tail, value);
     }
 
@@ -2243,10 +2245,15 @@ mod tests {
             .expect("consume malformed tool delta");
         let response = state.finish().expect("finish malformed stream");
         assert!(response.tool_calls.is_empty());
-        assert_eq!(response.invalid_tool_calls[0].name, "provider_protocol_error");
-        assert!(response.invalid_tool_calls[0]
-            .reason
-            .contains("arguments_bytes=2"));
+        assert_eq!(
+            response.invalid_tool_calls[0].name,
+            "provider_protocol_error"
+        );
+        assert!(
+            response.invalid_tool_calls[0]
+                .reason
+                .contains("arguments_bytes=2")
+        );
     }
 
     #[test]
@@ -2483,9 +2490,9 @@ mod tests {
         output.images.push(coomi_engine::ImageContent {
             media_type: "image/png".into(),
             data: "BASE64".into(),
+            url: None,
         });
         let history = vec![ChatMessage::assistant("", vec![call]), output];
-
         let responses = responses_input(&history, true).expect("Responses history");
         assert_eq!(responses[1]["output"][1]["type"], "input_image");
         assert_eq!(
@@ -2528,9 +2535,9 @@ mod tests {
         output.images.push(coomi_engine::ImageContent {
             media_type: "image/png".into(),
             data: "BASE64".into(),
+            url: None,
         });
         let history = vec![ChatMessage::assistant("", vec![call]), output];
-
         let responses = responses_input(&history, false).expect("Responses history");
         assert_eq!(responses[1]["output"], "success: image loaded");
 

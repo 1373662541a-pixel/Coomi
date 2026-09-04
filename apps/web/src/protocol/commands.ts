@@ -5,9 +5,10 @@ export type ApprovalDecision = 'allow' | 'deny' | 'always'
 export type ReasoningEffort = 'auto' | 'low' | 'medium' | 'high' | 'xhigh'
 export type SessionMode = 'agent' | 'team' | 'life'
 
-export interface SendMessageCommand { command: 'send_message'; text: string }
+export interface ImageAttachment { media_type: string; data: string; url?: string }
+export interface SendMessageCommand { command: 'send_message'; text: string; images?: ImageAttachment[] }
 export interface CancelCommand { command: 'cancel' }
-export interface JumpInCommand { command: 'jump_in'; text: string }
+export interface JumpInCommand { command: 'jump_in'; text: string; images?: ImageAttachment[] }
 export interface ApproveToolCommand { command: 'approve_tool'; call_id: string; decision: ApprovalDecision }
 export interface AnswerQuestionCommand { command: 'answer_question'; call_id: string; answers: Record<string, string> }
 export interface SetPermissionModeCommand { command: 'set_permission_mode'; mode: PermissionMode }
@@ -19,7 +20,7 @@ export interface FileTransferResultCommand { command: 'file_transfer_result'; re
 export interface SendGuideCommand { command: 'send_guide'; key: string }
 export interface RetryTurnCommand { command: 'retry_turn' }
 export interface RegenerateResponseCommand { command: 'regenerate_response'; msg_id: string }
-export interface EditTurnCommand { command: 'edit_turn'; msg_id: string; text: string }
+export interface EditTurnCommand { command: 'edit_turn'; msg_id: string; text: string; images?: ImageAttachment[] }
 export interface UndoTurnCommand { command: 'undo_turn'; msg_id: string }
 export interface SetReasoningEffortCommand { command: 'set_reasoning_effort'; effort: ReasoningEffort }
 export interface SetMaxToolRoundsCommand { command: 'set_max_tool_rounds'; rounds: number }

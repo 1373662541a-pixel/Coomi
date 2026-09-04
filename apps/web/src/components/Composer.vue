@@ -32,9 +32,10 @@ const lifeStatsOpen = ref(false)
 const transferText = ref('')
 const transferProgress = ref(0)
 const textareaScrollable = ref(false)
+const imagePicker = ref<HTMLInputElement | null>(null)
+const imageAttachments = ref<Array<{ media_type: string; data: string; preview: string; name: string }>>([])
 const hasNative = typeof window !== 'undefined' && !!window.CoomiAndroid
-
-const canSend = computed(() => text.value.trim().length > 0)
+const canSend = computed(() => text.value.trim().length > 0 || imageAttachments.value.length > 0)
 const isJumpIn = computed(() => session.isBusy && canSend.value)
 const showStop = computed(() => session.isBusy && !canSend.value)
 const modeLabel = computed(() => PERMISSION_MODES.find(m => m.mode === config.permissionMode)?.label ?? '')
@@ -62,10 +63,30 @@ async function submit() {
       return
     }
   }
-  session.sendMessage(text.value)
+  session.sendMessage(text.value, imageAttachments.value.map(({ media_type, data }) => ({ media_type, data })))
   text.value = ''
+  imageAttachments.value = []
+  if (imagePicker.value) imagePicker.value.value = ''
   await nextTick()
   autoGrow()
+}
+function chooseImages() { imagePicker.value?.click() }
+function removeImage(index: number) { imageAttachments.value.splice(index, 1) }
+function onImagesSelected(event: Event) {
+  const files = Array.from((event.target as HTMLInputElement).files ?? [])
+  files.forEach(file => {
+    if (!file.type.startsWith('image/')) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      const url = String(reader.result ?? '')
+      if (!url.startsWith('data:image/')) return
+      const comma = url.indexOf(',')
+      const data = comma >= 0 ? url.slice(comma + 1) : ''
+      if (!data) return
+      imageAttachments.value.push({ media_type: file.type, data, preview: url, name: file.name })
+    }
+    reader.readAsDataURL(file)
+  })
 }
 
 /** 主按钮：空着且在忙 = 停止，其余 = 发送 / 插队。 */
@@ -209,6 +230,13 @@ watch(text, () => {
     </div>
 
     <div class="field" :class="{ busy: session.isBusy }">
+      <input ref="imagePicker" class="image-picker" type="file" accept="image/*" multiple @change="onImagesSelected" />
+      <div v-if="imageAttachments.length" class="image-previews">
+        <div v-for="(image, index) in imageAttachments" :key="image.name + index" class="image-preview">
+          <img :src="image.preview" :alt="image.name" />
+          <button type="button" aria-label="删除图片" title="删除图片" @click="removeImage(index)"><CoomiIcon name="close" :size="13" /></button>
+        </div>
+      </div>
       <button v-if="session.mode === 'life'" class="life-orbit" aria-label="查看数字生命统计" title="查看生命统计" @click="toggleLifeStats">
         <i class="orbit outer" /><i class="orbit inner" />
       </button>
@@ -256,6 +284,9 @@ watch(text, () => {
 
         <span class="spacer" />
 
+        <button class="act" aria-label="选择图片" title="选择图片" @click="chooseImages">
+          <CoomiIcon name="image" :size="20" />
+        </button>
         <button class="act" aria-label="快捷指令" @click="toggleQuick">
           <CoomiIcon name="plusCircle" :size="21" />
         </button>
@@ -330,6 +361,11 @@ watch(text, () => {
 .field:focus-within { border-color: var(--blue-border); background: var(--bg); }
 .field.busy { border-color: var(--border-strong); }
 
+.image-picker { display: none; }
+.image-previews { display: flex; gap: 8px; padding: 6px 6px 2px; overflow-x: auto; }
+.image-preview { position: relative; flex: 0 0 54px; width: 54px; height: 54px; }
+.image-preview img { display: block; width: 100%; height: 100%; border-radius: 7px; object-fit: cover; border: 1px solid var(--border); }
+.image-preview button { position: absolute; top: -6px; right: -6px; display: grid; place-items: center; width: 19px; height: 19px; padding: 0; border: 1px solid var(--bg); border-radius: 50%; background: var(--text); color: var(--bg); }
 .input-clip { overflow: hidden; border-radius: 18px 18px 8px 8px; }
 .input {
   display: block; width: 100%; max-height: 132px; overflow-y: hidden;

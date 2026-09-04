@@ -10,8 +10,8 @@ use crate::ModelStreamObserver;
 use crate::ProviderRequestError;
 use crate::SUMMARIZATION_PROMPT;
 use crate::Session;
-use crate::ToolConcurrency;
 use crate::ToolCall;
+use crate::ToolConcurrency;
 use crate::ToolResult;
 use crate::ToolRuntime;
 use crate::TurnControl;
@@ -190,15 +190,31 @@ impl Agent {
         approval: &dyn ApprovalHandler,
         observer: &dyn AgentObserver,
     ) -> Result<String, AgentError> {
-        self.run_accounted_turn(
+        self.run_turn_with_images(
             session,
-            ChatMessage::user(prompt),
+            prompt,
+            Vec::new(),
             provider,
             tools,
             approval,
             observer,
         )
         .await
+    }
+    pub async fn run_turn_with_images(
+        &self,
+        session: &mut Session,
+        prompt: impl Into<String>,
+        images: Vec<crate::ImageContent>,
+        provider: &dyn ModelProvider,
+        tools: &dyn ToolRuntime,
+        approval: &dyn ApprovalHandler,
+        observer: &dyn AgentObserver,
+    ) -> Result<String, AgentError> {
+        let mut message = ChatMessage::user(prompt);
+        message.images = images;
+        self.run_accounted_turn(session, message, provider, tools, approval, observer)
+            .await
     }
 
     /// Resume an interrupted turn without presenting the recovery instruction as a
@@ -534,13 +550,10 @@ impl Agent {
                 // an argument-shape problem. Sending a correction prompt
                 // cannot repair a tool call whose target is unknown and only
                 // causes an avoidable second model request.
-                let protocol_failure = response
-                    .invalid_tool_calls
-                    .iter()
-                    .any(|call| {
-                        call.reason.contains("no function name")
-                            || call.name == "provider_protocol_error"
-                    });
+                let protocol_failure = response.invalid_tool_calls.iter().any(|call| {
+                    call.reason.contains("no function name")
+                        || call.name == "provider_protocol_error"
+                });
                 if protocol_failure {
                     invalid_tool_retry_used = true;
                 }
@@ -799,10 +812,14 @@ impl Agent {
         if messages.is_empty() {
             return false;
         }
-        session
-            .messages
-            .extend(messages.iter().cloned().map(ChatMessage::user));
-        observer.on_event(&AgentEvent::QueuedInputAccepted(messages));
+        for queued in &messages {
+            let mut message = ChatMessage::user(queued.text.clone());
+            message.images = queued.images.clone();
+            session.messages.push(message);
+        }
+        observer.on_event(&AgentEvent::QueuedInputAccepted(
+            messages.iter().map(|queued| queued.text.clone()).collect(),
+        ));
         true
     }
 }
@@ -1240,7 +1257,7 @@ mod tests {
     #[tokio::test]
     async fn queued_input_continues_the_active_model_loop() {
         let queue = Arc::new(InputQueue::default());
-        queue.push("also check tests".into());
+        queue.push("also check tests".into(), Vec::new());
         let mut session = Session::new("mock", "queued", PathBuf::from("."));
         let output = Agent::new("test")
             .with_input_queue(queue)
@@ -1257,6 +1274,81 @@ mod tests {
             .await
             .expect("queued turn");
         assert_eq!(output, "done");
+    }
+
+    /// 记录每个进入 provider 的请求，验证用户消息携带的图片原图是否完整到达模型请求。
+    struct CapturingProvider {
+        requests: Mutex<Vec<ModelRequest>>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for CapturingProvider {
+        fn provider_id(&self) -> &str {
+            "capture"
+        }
+
+        fn model(&self) -> &str {
+            "capture-model"
+        }
+
+        async fn complete(&self, request: ModelRequest) -> Result<ModelResponse> {
+            self.requests.lock().expect("lock requests").push(request);
+            Ok(ModelResponse {
+                content: "done".into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn user_image_original_data_reaches_the_model_request() {
+        let original_b64 = "aGVsbG8gY29vbWkgaW1hZ2U="; // "hello coomi image"
+        let image = crate::ImageContent {
+            media_type: "image/png".into(),
+            data: original_b64.into(),
+            url: None,
+        };
+        let provider = CapturingProvider {
+            requests: Mutex::new(Vec::new()),
+        };
+        let mut session = Session::new("capture", "capture-model", PathBuf::from("."));
+        let output = Agent::new("test")
+            .run_turn_with_images(
+                &mut session,
+                "描述这张图片",
+                vec![image],
+                &provider,
+                &EchoTool,
+                &Approve,
+                &NoopObserver,
+            )
+            .await
+            .expect("image turn");
+        assert_eq!(output, "done");
+
+        // 传给 provider 的第一个请求里，用户消息必须携带能还原出原图 data URL 的图片。
+        let requests = provider.requests.lock().expect("lock requests");
+        assert!(!requests.is_empty(), "provider should have received a request");
+        let user_image = requests[0]
+            .messages
+            .iter()
+            .find(|message| message.role == crate::Role::User && message.content == "描述这张图片")
+            .and_then(|message| message.images.first())
+            .expect("user image should be present on the model request");
+        assert_eq!(
+            user_image.data_url(),
+            format!("data:image/png;base64,{original_b64}"),
+            "data_url() must prefer the original `data` field"
+        );
+
+        // 用户消息也持久化到会话历史，供刷新/历史恢复使用。
+        let persisted = session
+            .messages
+            .iter()
+            .find(|message| message.role == crate::Role::User && message.content == "描述这张图片")
+            .and_then(|message| message.images.first())
+            .expect("image should be persisted on the session user message");
+        assert_eq!(persisted.data, original_b64);
     }
 
     struct CompactingProvider {
@@ -1592,6 +1684,7 @@ mod tests {
         image_message.images.push(crate::ImageContent {
             media_type: "image/png".into(),
             data: "BASE64".into(),
+            url: None,
         });
         session.messages.push(image_message);
         let output = Agent::new("test")
@@ -1759,11 +1852,7 @@ fn parse_alias_xml_calls(content: &str) -> Option<Vec<ToolCall>> {
         });
         pos = body_start + body_rel + "</invoke>".len();
     }
-    if calls.is_empty() {
-        None
-    } else {
-        Some(calls)
-    }
+    if calls.is_empty() { None } else { Some(calls) }
 }
 
 /// 在属性串中读取 `attr="value"` / `attr='value'` / `attr=value`。

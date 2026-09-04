@@ -47,7 +47,7 @@ export const useSessionStore = defineStore('session', () => {
   /** 本次打开会话是否已做过开场问候（避免轮询重复触发投递）。 */
   let lifeAutoSent = false
   /** 编辑覆盖状态：非空表示输入框正处于「编辑上一条消息」模式。 */
-  const pendingEdit = ref<{ mid: string; content: string } | null>(null)
+  const pendingEdit = ref<{ mid: string; content: string; images?: Array<{ media_type: string; data: string }> } | null>(null)
   /** 回撤确认弹窗状态：非空表示等待用户确认回撤该轮。 */
   const undoConfirm = ref<{ mid: string } | null>(null)
 
@@ -460,12 +460,13 @@ export const useSessionStore = defineStore('session', () => {
     if (changed) persistSoon()
   }
 
-  function sendMessage(text: string) {
+  function sendMessage(text: string, images: Array<{ media_type: string; data: string; url?: string }> = []) {
     const trimmed = text.trim()
-    if (!trimmed) return
+    if (!trimmed && images.length === 0) return
     // 编辑覆盖模式：截断目标轮次（与引擎 edit_turn 行为一致），以新文本重新执行。
     const edit = pendingEdit.value
     if (edit) {
+      const editImages = images.length ? images : (edit.images ?? [])
       pendingEdit.value = null
       let cutAt = -1
       if (edit.mid) cutAt = timeline.value.findIndex(t => t.kind === 'user' && t.mid === edit.mid)
@@ -475,9 +476,12 @@ export const useSessionStore = defineStore('session', () => {
         }
       }
       if (cutAt >= 0) timeline.value.splice(cutAt)
-      timeline.value.push({ kind: 'user', id: nextId(), mid: '', content: trimmed })
+      timeline.value.push({
+        kind: 'user', id: nextId(), mid: '', content: trimmed,
+        images: editImages.map(image => `data:${image.media_type};base64,${image.data}`),
+      })
       runState.value = 'thinking'
-      transport.value?.send({ command: 'edit_turn', msg_id: edit.mid, text: trimmed })
+      transport.value?.send({ command: 'edit_turn', msg_id: edit.mid, text: trimmed, images: editImages.length ? editImages : undefined })
       persistSoon()
       return
     }
@@ -485,15 +489,21 @@ export const useSessionStore = defineStore('session', () => {
     const isFirst = !timeline.value.some(t => t.kind === 'user')
     if (isFirst) sessions.touch(sessionId.value, { title: sessions.deriveTitle(trimmed) })
     if (isBusy.value) {
-      timeline.value.push({ kind: 'user', id: nextId(), mid: '', content: trimmed })
-      transport.value?.send({ command: 'jump_in', text: trimmed })
+      timeline.value.push({
+        kind: 'user', id: nextId(), mid: '', content: trimmed,
+        images: images.map(image => `data:${image.media_type};base64,${image.data}`),
+      })
+      transport.value?.send({ command: 'jump_in', text: trimmed, images: images.length ? images : undefined })
       persistSoon()
       return
     }
     turnToolTrace = []
-    timeline.value.push({ kind: 'user', id: nextId(), mid: '', content: trimmed })
+    timeline.value.push({
+      kind: 'user', id: nextId(), mid: '', content: trimmed,
+      images: images.map(image => `data:${image.media_type};base64,${image.data}`),
+    })
     runState.value = 'thinking'
-    transport.value?.send({ command: 'send_message', text: trimmed })
+    transport.value?.send({ command: 'send_message', text: trimmed, images: images.length ? images : undefined })
     persistSoon()
   }
 
@@ -629,7 +639,10 @@ export const useSessionStore = defineStore('session', () => {
         continue
       }
       if (m.role === 'user') {
-        items.push({ kind: 'user', id: nextId(), mid: m.id ?? '', content: m.content })
+        items.push({
+          kind: 'user', id: nextId(), mid: m.id ?? '', content: m.content,
+          images: m.images?.map(image => `data:${image.media_type};base64,${image.data}`),
+        })
       } else if (m.role === 'assistant') {
         if (m.content) items.push({ kind: 'assistant', id: nextId(), mid: m.id ?? '', content: m.content, streaming: false, life: m.life_proactive === true })
         for (const tc of m.tool_calls ?? []) {
@@ -761,7 +774,13 @@ export const useSessionStore = defineStore('session', () => {
   /** 进入编辑模式：把旧文本回填到输入框，发送时覆盖该轮重新执行。 */
   function startEditMessage(mid: string, content: string) {
     if (isBusy.value) return
-    pendingEdit.value = { mid, content }
+    const item = timeline.value.find(t => t.kind === 'user' && t.mid === mid)
+    pendingEdit.value = {
+      mid, content,
+      images: item?.kind === 'user'
+        ? item.images?.map(dataUrl => imageFromDataUrl(dataUrl)).filter((image): image is { media_type: string; data: string } => image !== null)
+        : undefined,
+    }
     window.dispatchEvent(new CustomEvent('coomi:prefill-draft', {
       detail: { sessionId: sessionId.value, text: content },
     }))
@@ -896,6 +915,11 @@ export const useSessionStore = defineStore('session', () => {
 
   return { sessionId, mode, timeline, runState, usage, retryConfirmation, cwd, loop, collaboration, isBusy, pendingEdit, undoConfirm, lastUserMessage, lastAssistantMessage, pendingApproval, pendingQuestion, lifeUnread, lifeUnreadName, lifeDelivering, isGlobalSession, resolveLifeMode, syncLifeMode, refreshLifeUnread, deliverLife, autoDeliverLifeIfReady, connect, reconnect, disconnect, flushPersistence, sendMessage, cancel, approve, answerQuestion, setPermissionMode, setReasoningEffort, setMaxToolRounds, setSessionMode, togglePlanMode, selectModel, retryInterruptedTurn, dismissRetry, completeFileTransfer, newSession, openSession, deleteSession, clearSessionData, setSessionCwd, startEditMessage, cancelEditMessage, requestUndo, confirmUndo, cancelUndo, undoTurn, sendGuide, consentToolFailureFeedback, finishToolFailureFeedback }
 })
+
+function imageFromDataUrl(value: string): { media_type: string; data: string } | null {
+  const match = /^data:([^;]+);base64,(.+)$/s.exec(value)
+  return match ? { media_type: match[1], data: match[2] } : null
+}
 
 function fmtTokens(n: number): string { return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n) }
 

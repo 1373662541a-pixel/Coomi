@@ -1677,7 +1677,7 @@ fn submit_editor(
         return execute_slash_command(app, &prompt, runtime_tx);
     }
     if app.busy {
-        app.input_queue.push(prompt.clone());
+        app.input_queue.push(prompt.clone(), Vec::new());
         app.queue.push_back(prompt);
         app.status = format!("{} queued message(s)", app.queue.len());
     } else {

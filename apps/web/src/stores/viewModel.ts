@@ -21,7 +21,11 @@ export interface ToolCard {
 }
 
 export interface AssistantMessage { kind: 'assistant'; id: string; mid: string; content: string; streaming: boolean; life?: boolean }
-export interface UserMessage { kind: 'user'; id: string; mid: string; content: string }
+export interface UserMessage {
+  kind: 'user'; id: string; mid: string; content: string
+  /** 用户消息携带的原图 data URL，用于历史展示与编辑重发。 */
+  images?: string[]
+}
 export interface ReasoningBlock { kind: 'reasoning'; id: string; content: string; expanded: boolean }
 
 export interface QuestionCard {
