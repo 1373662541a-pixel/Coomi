@@ -20,6 +20,7 @@ on:
       - 'apps/coomi-app/**'
       - 'apps/coomi-rs/**'
       - 'apps/web/**'
+      - 'extensions/**'
       - 'assets/**'
       - 'gradle/**'
       - '**/*.gradle'
