@@ -1,4 +1,7 @@
 name: Build CoomiDev APK
+# 说明：触发路径含本 workflow（及 apps/web、apps/coomi-rs、assets）。
+# 在 #15(64488f8) 之后做了历史清理并 force-push(6b9194f)；本提交用于触发
+# 一次基于新 Secrets(COOMI_SIGNING_*)签名 的构建验证。
 
 # 云端构建 CoomiDev 定制 APK（包名 com.coomidev.android / 应用名 CoomiDev / 引擎端口 18765）。
 # 始终内置 Runtime V2（PRoot host + Debian rootfs）——Coomi v1.4.5 引擎运行在 PRoot+Debian 环境，
