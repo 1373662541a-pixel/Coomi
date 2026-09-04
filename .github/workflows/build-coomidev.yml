@@ -117,18 +117,20 @@ jobs:
           rustc --version
           cargo --version
 
-      - name: Configure fixed CoomiDev signing keystore
+      - name: Recreate signing keystore from GitHub Secrets
         run: |
           set -euxo pipefail
-          KS="$GITHUB_WORKSPACE/signing/coomidev-release.jks"
-          test -f "$KS"
-          # local.properties is ignored and supplies the checked-in private signing identity to Gradle.
+          mkdir -p signing
+          # 仓库公开，keystore 绝不入库；由 Actions Secret(base64) 现场重建。
+          echo "${{ secrets.COOMI_SIGNING_KEYSTORE_B64 }}" | base64 -d > signing/coomidev-release.jks
+          test -s signing/coomidev-release.jks
+          # local.properties is ignored and supplies the signing identity to Gradle (values from Secrets).
           cat > local.properties <<EOF
           sdk.dir=$ANDROID_HOME
-          coomi.signing.storeFile=$KS
-          coomi.signing.keyAlias=coomidev
-          coomi.signing.storePassword=CoomiDev-Private-2026
-          coomi.signing.keyPassword=CoomiDev-Private-2026
+          coomi.signing.storeFile=$GITHUB_WORKSPACE/signing/coomidev-release.jks
+          coomi.signing.keyAlias=${{ secrets.COOMI_SIGNING_KEY_ALIAS }}
+          coomi.signing.storePassword=${{ secrets.COOMI_SIGNING_STORE_PASS }}
+          coomi.signing.keyPassword=${{ secrets.COOMI_SIGNING_KEY_PASS }}
           EOF
 
       - name: Install web front-end deps

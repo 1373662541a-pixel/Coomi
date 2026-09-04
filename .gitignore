@@ -62,3 +62,7 @@ java_pid*.hprof
 scripts/__pycache__/
 __pycache__/
 *.py[cod]
+
+# 签名私钥不入库（公开仓库安全）
+signing/*.jks
+signing/*.keystore
