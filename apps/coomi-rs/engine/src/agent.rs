@@ -437,6 +437,25 @@ impl Agent {
                 for message in &mut messages {
                     message.images.clear();
                 }
+            } else {
+                // 载荷守护：图生图等场景会把大图（几 MB 的 PNG）base64 内联进上下文，
+                // 重放时整包超过上游上限会报 413（Payload Too Large）。这里对内联
+                // base64 过大、或整轮累计过大的图不重放（保留公网 URL 引用）；会话
+                // 记录与前端 show_image 预览不受影响，只是不把超大图塞给模型。
+                const INLINE_LIMIT: usize = 3_000_000; // 单张 base64 字符上限（约 2.2MiB）
+                const TOTAL_LIMIT: usize = 8_000_000;  // 整轮内联图总量上限
+                let mut total: usize = 0;
+                for message in &mut messages {
+                    message.images.retain(|img| {
+                        let inline = !img.data.trim().is_empty();
+                        if inline {
+                            if img.data.len() > INLINE_LIMIT { return false; }
+                            if total + img.data.len() > TOTAL_LIMIT { return false; }
+                            total += img.data.len();
+                        }
+                        true
+                    });
+                }
             }
             let mut request = ModelRequest {
                 model: provider.model().to_string(),
