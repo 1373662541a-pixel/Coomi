@@ -128,10 +128,23 @@ function toggleLifeStats() { lifeStatsOpen.value = !lifeStatsOpen.value }
 
 function importFiles() { quickOpen.value = false; window.CoomiAndroid?.importFiles?.() }
 function authorizeFolder() { quickOpen.value = false; window.CoomiAndroid?.authorizeFolder?.() }
+// 导出/传输进度提示的自动消失定时器：结束后短暂停留即清除，避免「文件已导出」永久留在界面。
+let transferClearTimer: ReturnType<typeof setTimeout> | null = null
+function clearTransferSoon() {
+  if (transferClearTimer) clearTimeout(transferClearTimer)
+  transferClearTimer = setTimeout(() => {
+    transferText.value = ''
+    transferProgress.value = 0
+  }, 3000)
+}
 function onTransferProgress(event: Event) {
   const detail = (event as CustomEvent<{ message?: string; progress?: number }>).detail ?? {}
-  transferText.value = detail.message ?? '正在传输文件'
-  transferProgress.value = detail.progress ?? 0
+  const message = detail.message ?? '正在传输文件'
+  const progress = detail.progress ?? 0
+  transferText.value = message
+  transferProgress.value = progress
+  // 导出已结束（成功 progress=100 / 失败·错误·取消提示）→ 延迟自动清除，不再永久停留。
+  if (progress >= 100 || /失败|错误|取消/.test(message)) clearTransferSoon()
 }
 function onFilesImported(event: Event) {
   const detail = (event as CustomEvent<{ paths?: string[]; requestId?: string }>).detail ?? {}
@@ -160,6 +173,7 @@ onMounted(() => {
   loadDraft()
 })
 onBeforeUnmount(() => {
+  if (transferClearTimer) clearTimeout(transferClearTimer)
   window.removeEventListener('coomi:file-transfer-progress', onTransferProgress)
   window.removeEventListener('coomi:files-imported', onFilesImported)
   window.removeEventListener('coomi:file-exported', onFileExported)
