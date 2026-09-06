@@ -125,6 +125,9 @@ struct AppState {
     home: PathBuf,
     cwd: PathBuf,
     port: u16,
+    /// Browser origins allowed by CORS and the WebSocket handshake. Always contains
+    /// the loopback origins plus any --allow-origin values supplied at startup.
+    allowed_origins: Vec<String>,
     /// 引擎启动时生成的随机访问令牌；/api/* 与 /ws/* 需携带
     /// `Authorization: Bearer <token>` 或 `?token=<token>`（WS 握手用）。
     token: String,
@@ -707,9 +710,11 @@ impl ConnectionContext {
 pub async fn serve(
     home: PathBuf,
     cwd: PathBuf,
+    host: String,
     port: u16,
     token: String,
     static_dir: PathBuf,
+    extra_origins: Vec<String>,
 ) -> Result<()> {
     fs::create_dir_all(home.join("config"))?;
     fs::create_dir_all(home.join("sessions"))?;
@@ -762,10 +767,18 @@ pub async fn serve(
     let restored_tasks = load_task_checkpoints(&home, &task_manager);
     let configured_task_limit = configured_connection_settings(&home).max_concurrent_tasks;
     let workflow_scheduler = crate::workflow::WorkflowScheduler::new(&home.clone());
+    // Loopback origins are always allowed; extra --allow-origin values (a domain
+    // or server address) extend the CORS + WS allow list for remote deployment.
+    let mut allowed_origins = vec![
+        format!("http://127.0.0.1:{port}"),
+        format!("http://localhost:{port}"),
+    ];
+    allowed_origins.extend(extra_origins);
     let state = AppState {
         home,
         cwd,
         port,
+        allowed_origins: allowed_origins.clone(),
         token,
         permission,
         tasks: Arc::new(StdMutex::new(restored_tasks)),
@@ -930,19 +943,19 @@ pub async fn serve(
         )
         .route("/ws/session/{session_id}", get(websocket_route))
         .fallback_service(files)
-        // Local bridge: only allow same-origin browser access (the Android WebView and
-        // a browser pointed at 127.0.0.1:{port}). Restricting CORS + WS Origin closes the
-        // cross-site attack surface where an arbitrary web page could read provider keys.
+        // Loopback origins are always allowed plus any --allow-origin values. Restricting
+        // CORS + WS Origin closes the cross-site attack surface where an arbitrary web page
+        // could read provider keys; remote deployments must pass --allow-origin explicitly.
         .layer(
             CorsLayer::new()
-                .allow_origin(vec![
-                    format!("http://127.0.0.1:{port}")
-                        .parse::<HeaderValue>()
-                        .expect("valid origin"),
-                    format!("http://localhost:{port}")
-                        .parse::<HeaderValue>()
-                        .expect("valid origin"),
-                ])
+                .allow_origin(
+                    allowed_origins
+                        .iter()
+                        .map(|origin| {
+                            origin.parse::<HeaderValue>().expect("valid origin")
+                        })
+                        .collect::<Vec<_>>(),
+                )
                 .allow_methods([
                     Method::GET,
                     Method::POST,
@@ -958,8 +971,8 @@ pub async fn serve(
         ))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
-    println!("Coomi Rust bridge {BRIDGE_VERSION} listening on http://127.0.0.1:{port}");
+    let listener = tokio::net::TcpListener::bind((host.as_str(), port)).await?;
+    println!("Coomi Rust bridge {BRIDGE_VERSION} listening on http://{host}:{port}");
 
     // 引擎被终止（SIGTERM/SIGINT，如 app 退出时 Android 侧 destroy）时，
     // 先清理所有由引擎启动的工具进程，再退出 —— 满足“关闭 app 后全部终止”。
@@ -5308,10 +5321,7 @@ async fn websocket_route(
     // Reject cross-origin WebSocket upgrades (e.g. from arbitrary web pages). Requests
     // without an Origin header (curl, CLI tools) are allowed — there is no browser
     // CSRF context for them.
-    let allowed_origins = [
-        format!("http://127.0.0.1:{}", state.port),
-        format!("http://localhost:{}", state.port),
-    ];
+    let allowed_origins = &state.allowed_origins;
     if let Some(origin) = headers.get(header::ORIGIN) {
         let origin = origin.to_str().unwrap_or("");
         if !allowed_origins.iter().any(|allowed| allowed == origin) {
@@ -8885,6 +8895,7 @@ mod tests {
             home: home.clone(),
             cwd: cwd.clone(),
             port: 0,
+            allowed_origins: vec!["http://127.0.0.1:0".into()],
             token: "test-token".into(),
             permission: Arc::new(RwLock::new(PermissionMode::Auto)),
             tasks: Arc::new(StdMutex::new(HashMap::new())),

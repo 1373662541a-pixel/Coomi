@@ -76,7 +76,11 @@ struct Cli {
 enum Command {
     /// Run the local HTTP/WebSocket bridge used by the Android WebView.
     Serve {
-        /// Loopback port to listen on.
+        /// Address to bind. Use 0.0.0.0 to expose the bridge beyond localhost
+        /// (e.g. when deploying behind a reverse proxy on a server).
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Port to listen on.
         #[arg(long, default_value_t = 8765)]
         port: u16,
         /// Access token required for /api/* and /ws/* (Bearer header or ?token=).
@@ -85,6 +89,11 @@ enum Command {
         /// Built frontend directory to serve.
         #[arg(long)]
         static_dir: PathBuf,
+        /// Extra browser Origin allowed by CORS and the WebSocket handshake
+        /// (repeatable), e.g. --allow-origin https://coomi.example.com. Loopback
+        /// origins are always allowed; add this when serving behind a domain.
+        #[arg(long = "allow-origin")]
+        allow_origin: Vec<String>,
     },
     /// Run one non-interactive agent turn.
     Exec {
@@ -176,16 +185,20 @@ async fn main() -> Result<()> {
     }
     match &cli.command {
         Some(Command::Serve {
+            host,
             port,
             token,
             static_dir,
+            allow_origin,
         }) => {
             web::serve(
                 paths.home,
                 paths.cwd,
+                host.clone(),
                 *port,
                 token.clone(),
                 static_dir.clone(),
+                allow_origin.clone(),
             )
             .await?
         }
