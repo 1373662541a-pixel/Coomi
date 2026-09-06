@@ -434,6 +434,24 @@ impl SessionTask {
     }
 }
 
+/// 兜底复位：turn 任务无论正常结束还是 panic，都必须清掉 running，
+/// 否则 panic 会让该会话停在 running=true，后续消息被永久判为
+/// “a turn is already running”。正常路径已由 finish() 复位，这里只兜底。
+struct TurnTaskGuard(Arc<SessionTask>);
+
+impl Drop for TurnTaskGuard {
+    fn drop(&mut self) {
+        if self.0.running.load(Ordering::SeqCst) {
+            self.0.finish("interrupted");
+        }
+        self.0
+            .abort
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+    }
+}
+
 fn begin_managed_task(
     state: &AppState,
     session_id: &str,
@@ -1108,6 +1126,10 @@ const DEFAULT_PROVIDER_RETRY_COUNT: u8 = 2;
 const DEFAULT_WS_RETRY_COUNT: u8 = 10;
 const DEFAULT_RECONNECT_INITIAL_DELAY_MS: u64 = 500;
 const DEFAULT_RECONNECT_MAX_DELAY_MS: u64 = 10_000;
+const DEFAULT_APPROVAL_TIMEOUT_MS: u64 = 300_000;
+const DEFAULT_QUESTION_TIMEOUT_MS: u64 = 300_000;
+const DEFAULT_FILE_EXPORT_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_FILE_IMPORT_TIMEOUT_SECS: u64 = 600;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1118,10 +1140,34 @@ struct ConnectionSettings {
     reconnect_max_delay_ms: u64,
     #[serde(default = "default_max_concurrent_tasks")]
     max_concurrent_tasks: usize,
+    #[serde(default = "default_approval_timeout_ms")]
+    approval_timeout_ms: u64,
+    #[serde(default = "default_question_timeout_ms")]
+    question_timeout_ms: u64,
+    #[serde(default = "default_file_export_timeout_secs")]
+    file_export_timeout_secs: u64,
+    #[serde(default = "default_file_import_timeout_secs")]
+    file_import_timeout_secs: u64,
 }
 
 const fn default_max_concurrent_tasks() -> usize {
     DEFAULT_MAX_CONCURRENT_SESSION_TASKS
+}
+
+const fn default_approval_timeout_ms() -> u64 {
+    DEFAULT_APPROVAL_TIMEOUT_MS
+}
+
+const fn default_question_timeout_ms() -> u64 {
+    DEFAULT_QUESTION_TIMEOUT_MS
+}
+
+const fn default_file_export_timeout_secs() -> u64 {
+    DEFAULT_FILE_EXPORT_TIMEOUT_SECS
+}
+
+const fn default_file_import_timeout_secs() -> u64 {
+    DEFAULT_FILE_IMPORT_TIMEOUT_SECS
 }
 
 impl Default for ConnectionSettings {
@@ -1132,6 +1178,10 @@ impl Default for ConnectionSettings {
             reconnect_initial_delay_ms: DEFAULT_RECONNECT_INITIAL_DELAY_MS,
             reconnect_max_delay_ms: DEFAULT_RECONNECT_MAX_DELAY_MS,
             max_concurrent_tasks: DEFAULT_MAX_CONCURRENT_SESSION_TASKS,
+            approval_timeout_ms: DEFAULT_APPROVAL_TIMEOUT_MS,
+            question_timeout_ms: DEFAULT_QUESTION_TIMEOUT_MS,
+            file_export_timeout_secs: DEFAULT_FILE_EXPORT_TIMEOUT_SECS,
+            file_import_timeout_secs: DEFAULT_FILE_IMPORT_TIMEOUT_SECS,
         }
     }
 }
@@ -1170,6 +1220,26 @@ fn configured_connection_settings(home: &Path) -> ConnectionSettings {
             .and_then(|v| usize::try_from(v).ok())
             .unwrap_or(defaults.max_concurrent_tasks)
             .clamp(1, 20),
+        approval_timeout_ms: settings
+            .get("approval_timeout_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(defaults.approval_timeout_ms)
+            .clamp(5_000, 900_000),
+        question_timeout_ms: settings
+            .get("question_timeout_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(defaults.question_timeout_ms)
+            .clamp(5_000, 900_000),
+        file_export_timeout_secs: settings
+            .get("file_export_timeout_secs")
+            .and_then(Value::as_u64)
+            .unwrap_or(defaults.file_export_timeout_secs)
+            .clamp(5, 300),
+        file_import_timeout_secs: settings
+            .get("file_import_timeout_secs")
+            .and_then(Value::as_u64)
+            .unwrap_or(defaults.file_import_timeout_secs)
+            .clamp(30, 3_600),
     }
 }
 
@@ -1208,12 +1278,36 @@ async fn set_connection_settings(
             "maxConcurrentTasks must be between 1 and 20",
         ));
     }
+    if !(5_000..=900_000).contains(&body.approval_timeout_ms) {
+        return Err(ApiError::bad_request(
+            "approvalTimeoutMs must be between 5000 and 900000",
+        ));
+    }
+    if !(5_000..=900_000).contains(&body.question_timeout_ms) {
+        return Err(ApiError::bad_request(
+            "questionTimeoutMs must be between 5000 and 900000",
+        ));
+    }
+    if !(5..=300).contains(&body.file_export_timeout_secs) {
+        return Err(ApiError::bad_request(
+            "fileExportTimeoutSecs must be between 5 and 300",
+        ));
+    }
+    if !(30..=3_600).contains(&body.file_import_timeout_secs) {
+        return Err(ApiError::bad_request(
+            "fileImportTimeoutSecs must be between 30 and 3600",
+        ));
+    }
     let mut settings = read_settings(&state.home);
     settings["provider_retry_count"] = json!(body.provider_retry_count);
     settings["ws_retry_count"] = json!(body.ws_retry_count);
     settings["reconnect_initial_delay_ms"] = json!(body.reconnect_initial_delay_ms);
     settings["reconnect_max_delay_ms"] = json!(body.reconnect_max_delay_ms);
     settings["max_concurrent_tasks"] = json!(body.max_concurrent_tasks);
+    settings["approval_timeout_ms"] = json!(body.approval_timeout_ms);
+    settings["question_timeout_ms"] = json!(body.question_timeout_ms);
+    settings["file_export_timeout_secs"] = json!(body.file_export_timeout_secs);
+    settings["file_import_timeout_secs"] = json!(body.file_import_timeout_secs);
     write_settings(&state.home, &settings)?;
     Ok(Json(body))
 }
@@ -5470,6 +5564,8 @@ async fn handle_command(
             let turn_task = Arc::clone(&task);
             let team_mode = *context.session_mode.read().await == SessionMode::Team;
             let spawned = tokio::spawn(async move {
+                // panic 兜底：复位 running / 清 abort，杜绝会话永久卡死
+                let _turn_guard = TurnTaskGuard(Arc::clone(&turn_task));
                 let result = if team_mode {
                     run_team_turn(
                         &turn_state,
@@ -5924,6 +6020,8 @@ async fn handle_command(
             let turn_context = Arc::clone(&context);
             let turn_task = Arc::clone(&task);
             let spawned = tokio::spawn(async move {
+                // panic 兜底：复位 running / 清 abort，杜绝会话永久卡死
+                let _turn_guard = TurnTaskGuard(Arc::clone(&turn_task));
                 let result = retry_turn(
                     &turn_state,
                     &turn_session_id,
@@ -5980,6 +6078,8 @@ async fn handle_command(
             let turn_task = Arc::clone(&task);
             let turn_msg_id = msg_id.to_owned();
             let spawned = tokio::spawn(async move {
+                // panic 兜底：复位 running / 清 abort，杜绝会话永久卡死
+                let _turn_guard = TurnTaskGuard(Arc::clone(&turn_task));
                 let result = regenerate_response(
                     &turn_state,
                     &turn_session_id,
@@ -6041,6 +6141,8 @@ async fn handle_command(
             let turn_context = Arc::clone(&context);
             let turn_task = Arc::clone(&task);
             let spawned = tokio::spawn(async move {
+                // panic 兜底：复位 running / 清 abort，杜绝会话永久卡死
+                let _turn_guard = TurnTaskGuard(Arc::clone(&turn_task));
                 let result = edit_turn(
                     &turn_state,
                     &turn_session_id,
@@ -6645,12 +6747,13 @@ async fn run_turn_with_images(
         routed_skills,
     );
     let provider = HttpModelProvider::new(provider_config)?;
+    let connection_settings = configured_connection_settings(&state.home);
     let approval = BrowserApproval {
         task: Arc::clone(&task),
         permission: Arc::clone(&context.permission),
+        settings: connection_settings,
     };
     let max_tool_rounds = *context.max_tool_rounds.read().await;
-    let connection_settings = configured_connection_settings(&state.home);
     let context_categories = estimate_context_categories(
         &state.home,
         &prompt_context,
@@ -7701,6 +7804,7 @@ impl AgentObserver for BrowserObserver {
 struct BrowserApproval {
     task: Arc<SessionTask>,
     permission: Arc<RwLock<PermissionMode>>,
+    settings: ConnectionSettings,
 }
 
 #[async_trait]
@@ -7726,11 +7830,14 @@ impl ApprovalHandler for BrowserApproval {
             "access": approval_access(reason),
             "risk_summary": reason,
         }));
-        tokio::time::timeout(std::time::Duration::from_secs(300), receiver)
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or(false)
+        tokio::time::timeout(
+            std::time::Duration::from_millis(self.settings.approval_timeout_ms),
+            receiver,
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or(false)
     }
 
     async fn request_user_input(&self, request: &UserInputRequest) -> Option<UserInputResponse> {
@@ -7751,8 +7858,8 @@ impl ApprovalHandler for BrowserApproval {
         }));
         let timeout_ms = request
             .auto_resolution_ms
-            .unwrap_or(300_000)
-            .clamp(1_000, 300_000);
+            .unwrap_or(self.settings.question_timeout_ms)
+            .clamp(1_000, self.settings.question_timeout_ms.max(1_000));
         tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), receiver)
             .await
             .ok()
@@ -7775,9 +7882,9 @@ impl ApprovalHandler for BrowserApproval {
             "multiple": request.multiple,
         }));
         let timeout = if request.operation == "export" {
-            30
+            self.settings.file_export_timeout_secs
         } else {
-            600
+            self.settings.file_import_timeout_secs
         };
         let result = tokio::time::timeout(std::time::Duration::from_secs(timeout), receiver)
             .await
