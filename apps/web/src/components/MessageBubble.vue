@@ -67,8 +67,21 @@ const filePaths = computed(() => {
     if (p.length < 8) continue
     if (p.includes('://')) continue
     if (p.startsWith('~/')) continue // 引擎 home 目录未知，跳过避免误导
-    // 相对路径拼 cwd；无 cwd 时相对路径无法解析，跳过。
-    const full = p.startsWith('/') ? p : (cwd ? cwd + '/' + p : '')
+    // 拼成绝对路径供 FileInline 使用；相对路径用 cwd 拼接。
+    let full: string
+    if (p.startsWith('/')) {
+      // 已是绝对路径，直接用（./ ../ 由下方规范化处理）。
+      full = p
+    } else if (cwd) {
+      // 若 p 以 cwd 的「无前导斜杠」形式开头，说明 p 本身就是绝对路径（只是开头丢了 /）。
+      // 此时再拼 cwd 会把 home 前缀重复一遍 → 引擎报「文件不存在」。应补回 / 而非拼接 cwd。
+      const cwdNoSlash = cwd.replace(/^\/+/, '')
+      full = p === cwdNoSlash || p.startsWith(cwdNoSlash + '/')
+        ? '/' + p
+        : cwd + '/' + p
+    } else {
+      full = '' // 无 cwd 且非绝对路径：无法解析，跳过
+    }
     if (!full.startsWith('/')) continue
     // 规范化：去掉 /./，解析 /../ 与多余斜杠。
     const parts: string[] = []
