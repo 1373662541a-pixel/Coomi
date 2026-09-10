@@ -1620,7 +1620,15 @@ fn stream_event_error(phase: &'static str, value: &Value) -> anyhow::Error {
 
 fn openai_messages(messages: &[ChatMessage], supports_vision: bool) -> Result<Vec<Value>> {
     let mut output = Vec::new();
+    // 带图片的 tool 结果先暂存，待 tool 序列结束后再补发为一条 user 消息，
+    // 避免打断 assistant(tool_calls) → tool 的连续配对（DeepSeek/OpenAI 会 400）。
+    let mut pending_tool_images: Vec<Value> = Vec::new();
     for message in messages {
+        if message.role != Role::Tool && !pending_tool_images.is_empty() {
+            let mut blocks = vec![json!({"type": "text", "text": "以下为工具返回的图片："})];
+            blocks.extend(pending_tool_images.drain(..));
+            output.push(json!({"role": "user", "content": Value::Array(blocks)}));
+        }
         if !message.provider_items.is_empty() {
             continue;
         }
@@ -1654,29 +1662,32 @@ fn openai_messages(messages: &[ChatMessage], supports_vision: bool) -> Result<Ve
             }
             Role::Tool => {
                 // tool 消息的 content 在 OpenAI 兼容端点只接受字符串，图片
-                // 不能放进 tool 消息（上游会忽略或报错）。图片以独立的 user
-                // 消息紧跟在 tool 消息之后发送：
-                //   {"role":"user","content":[{"type":"text",...},
-                //    {"type":"image_url","image_url":{"url":"data:...;base64,..."}}]}
+                // 不能放进 tool 消息（上游会忽略或报错）。这里先把图片暂存，
+                // 待整段 tool 序列结束后再补发为一条 user 消息；若紧跟在每个
+                // tool 后面插入 user，会打断 assistant(tool_calls) → tool 的
+                // 连续配对，DeepSeek/OpenAI 会返回 400 invalid_request_error。
                 output.push(json!({
                     "role": "tool",
                     "tool_call_id": message.tool_call_id.as_deref().context("tool message has no call id")?,
                     "content": message.content
                 }));
                 if supports_vision && !message.images.is_empty() {
-                    let mut content = vec![json!({"type": "text", "text": message.content})];
-                    content.extend(message.images.iter().map(|image| {
+                    pending_tool_images.extend(message.images.iter().map(|image| {
                         json!({
                             "type": "image_url",
                             "image_url": {"url": image.data_url()}
                         })
                     }));
-                    output.push(json!({"role": "user", "content": content}));
                 }
                 continue;
             }
         };
         output.push(value);
+    }
+    if !pending_tool_images.is_empty() {
+        let mut blocks = vec![json!({"type": "text", "text": "以下为工具返回的图片："})];
+        blocks.extend(pending_tool_images.drain(..));
+        output.push(json!({"role": "user", "content": Value::Array(blocks)}));
     }
     Ok(output)
 }
@@ -2520,6 +2531,65 @@ mod tests {
 
         let (_, gemini) = gemini_messages(&history, true).expect("Gemini history");
         assert_eq!(gemini[1]["parts"][1]["inlineData"]["mimeType"], "image/png");
+    }
+
+    #[test]
+    fn tool_images_do_not_break_tool_call_pairing() {
+        // 多 tool_calls + 图片：图片 user 消息必须排在整段 tool 消息之后，
+        // 否则会打断 assistant(tool_calls) → tool 的配对，DeepSeek 返回 400。
+        let calls = vec![
+            ToolCall {
+                id: "call-1".into(),
+                name: "view_image".into(),
+                arguments: json!({"path": "a.png"}),
+            },
+            ToolCall {
+                id: "call-2".into(),
+                name: "view_image".into(),
+                arguments: json!({"path": "b.png"}),
+            },
+        ];
+        let mut first = ChatMessage::tool("call-1", "ok a");
+        first.images.push(coomi_engine::ImageContent {
+            media_type: "image/png".into(),
+            data: "AAA".into(),
+            url: None,
+        });
+        let mut second = ChatMessage::tool("call-2", "ok b");
+        second.images.push(coomi_engine::ImageContent {
+            media_type: "image/png".into(),
+            data: "BBB".into(),
+            url: None,
+        });
+        let history = vec![ChatMessage::assistant("", calls), first, second];
+        let chat = openai_messages(&history, true).expect("Chat history");
+        // 两条 tool 消息必须连续，中间不能插入 user。
+        assert_eq!(chat[1]["role"], "tool");
+        assert_eq!(chat[1]["tool_call_id"], "call-1");
+        assert_eq!(chat[2]["role"], "tool");
+        assert_eq!(chat[2]["tool_call_id"], "call-2");
+        // 图片合并为一条 user 消息，排在所有 tool 之后。
+        assert_eq!(chat[3]["role"], "user");
+        let urls: Vec<String> = chat[3]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|block| {
+                block
+                    .get("image_url")
+                    .and_then(|image| image.get("url"))
+                    .and_then(|url| url.as_str())
+                    .map(str::to_owned)
+            })
+            .collect();
+        assert_eq!(
+            urls,
+            vec![
+                "data:image/png;base64,AAA".to_string(),
+                "data:image/png;base64,BBB".to_string()
+            ]
+        );
+        assert_eq!(chat.len(), 4);
     }
 
     #[test]
